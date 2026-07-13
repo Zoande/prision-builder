@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Generated BC7/KTX textures — rebuild with `npm run textures`.
+# The renderer falls back to the raw textures in public/textures if absent.
+public/textures/compressed/
+
+# Third-party texture sources (~880 MB of licensed Poliigon / ambientCG
+# downloads). Inputs to `npm run textures`; see README for what goes here.
+assets/textures-src/
+
+# Local state written by the dev-server middleware in vite.config.mjs
+prototype-save.json
+sim-log.jsonl
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
