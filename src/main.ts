@@ -1,6 +1,6 @@
 import { Camera } from "./camera";
 import { invert } from "./math";
-import { World } from "./sim/world";
+import { DIRS, World, defOf } from "./sim/world";
 import {
   Agents, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, TRAY_STACK_KIND,
   REG_NAMES, type Agent,
@@ -352,20 +352,19 @@ async function main() {
       }
       return out;
     }
-    if (cat === "bed") {
-      const o = editor.orient & 3;
-      add(hoverTile.x, hoverTile.z);
-      add(
-        hoverTile.x + (o === 0 ? 1 : o === 2 ? -1 : 0),
-        hoverTile.z + (o === 1 ? 1 : o === 3 ? -1 : 0),
-      );
-      return out;
-    }
-    if (cat === "bench2" || cat === "bench4") {
-      const len = cat === "bench2" ? 2 : 4;
-      const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
-      const [dx, dz] = dirs[editor.orient & 3];
-      for (let n = 0; n < len; n++) add(hoverTile.x + dx * n, hoverTile.z + dz * n);
+    if (cat === "piece") {
+      // Ghost the object's real footprint, rotated the way it will be placed.
+      const d = defOf(editor.tool!.mat);
+      if (d) {
+        const o = editor.orient & 3;
+        const [ax, az] = DIRS[o];
+        const [bx, bz] = DIRS[(o + 1) & 3];
+        for (let a = 0; a < d.w; a++) {
+          for (let b = 0; b < d.d; b++) {
+            add(hoverTile.x + ax * a + bx * b, hoverTile.z + az * a + bz * b);
+          }
+        }
+      }
       return out;
     }
     add(hoverTile.x, hoverTile.z);
@@ -469,7 +468,7 @@ async function main() {
       s += `\n` +
         `food     ${pc(n.food)}   sleep   ${pc(n.sleep)}\n` +
         `outdoors ${pc(n.outdoors)}   comfort ${pc(n.comfort)}\n` +
-        `hygiene  ${pc(n.hygiene)}\n` +
+        `hygiene  ${pc(n.hygiene)}   boredom ${pc(1 - n.recreation)}\n` +
         `escape desire ${pc(ag.escapeDesire)}  feasibility ${pc(ag.escapeFeasibility)}`;
       if (ag.plan) {
         s += `\nPLANNING ESCAPE: ${ag.plan.method} (${ag.plan.stage})` +
@@ -560,9 +559,7 @@ async function main() {
 
   function previewShowsFacing(): boolean {
     const cat = editor.tool?.cat;
-    return cat === "bed" || cat === "bench2" || cat === "bench4" ||
-      cat === "toilet" || cat === "shower" || cat === "table" ||
-      cat === "servingtable" || cat === "cooker" ||
+    return cat === "piece" ||
       cat === "prisoner" || cat === "guard" || cat === "cook" || cat === "workman";
   }
 
@@ -680,6 +677,7 @@ async function main() {
       if (n.sleep < 0.25) reasons.push(`low sleep ${n.sleep.toFixed(2)}`);
       if (n.outdoors < 0.25) reasons.push(`low outdoors ${n.outdoors.toFixed(2)}`);
       if (n.hygiene < 0.25) reasons.push(`low hygiene ${n.hygiene.toFixed(2)}`);
+      if (n.recreation < 0.25) reasons.push(`low recreation ${n.recreation.toFixed(2)}`);
       if (ag.plan) reasons.push(`escape ${ag.plan.method}/${ag.plan.stage}`);
       if (ag.sneaking) reasons.push("sneaking");
       if (ag.risk > 0.05) reasons.push(`risk ${ag.risk.toFixed(2)}`);
@@ -696,6 +694,7 @@ async function main() {
             outdoors: Number(n.outdoors.toFixed(2)),
             comfort: Number(n.comfort.toFixed(2)),
             hygiene: Number(n.hygiene.toFixed(2)),
+            recreation: Number(n.recreation.toFixed(2)),
           },
           known: ag.known?.size ?? 0,
           bed: ag.bedIdx,
@@ -850,7 +849,7 @@ async function main() {
         text +=
           `\n   food ${pc(n.food)}   sleep ${pc(n.sleep)}   outdoors ${pc(n.outdoors)}   comfort ${pc(n.comfort)}` +
           `\n   knows ${selected.known.size} tiles   bed ${selected.bedIdx >= 0 ? "claimed" : "none"}` +
-          `   tables ${selected.tables!.size}   benches ${selected.benches!.size}` +
+          `   objects ${[...selected.objMem!.values()].reduce((a, m) => a + m.size, 0)}` +
           `\n   escape: desire ${pc(selected.escapeDesire)}   feasibility ${pc(selected.escapeFeasibility)}` +
           `   caught ${selected.timesCaught}x   cutters ${selected.cutters}   spoons ${selected.spoons}` +
           (selected.plan ? `\n   plan: ${selected.plan.method} (${selected.plan.stage}, ${selected.plan.needed} fences)` : "");

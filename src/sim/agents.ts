@@ -25,7 +25,15 @@
 // Cooks: claim a cooker, cook, stock tables. Workmen: repair flagged breaches
 // (cut fences, tunnels, surface holes). Staff know the whole layout.
 
-import { Access, Obj, RoomType, World, type Room } from "./world";
+import { Access, RoomType, World, type Room } from "./world.ts";
+import {
+  Obj, defOf, kindsServing,
+  POSE_STAND, POSE_SIT, POSE_LIE_BED, POSE_LIE_FLOOR, POSE_CLIMB,
+  type NeedName,
+} from "./objects.ts";
+
+export { POSE_STAND, POSE_SIT, POSE_LIE_BED, POSE_LIE_FLOOR, POSE_CLIMB } from "./objects.ts";
+export type { NeedName } from "./objects.ts";
 
 export const FOOD_KIND = 1000; // pseudo-kinds for the furniture pass
 export const HOLE_ENTRY_KIND = 1001;
@@ -50,9 +58,6 @@ export function defaultRegime(): number[] {
 
 const SERVING_CAP = 6; // meals a serving table can hold
 const SHOWER_TIME = 10; // seconds under the head
-
-// Poses (mirrored by person.wgsl).
-export const POSE_STAND = 0, POSE_SIT = 2, POSE_LIE_BED = 3, POSE_LIE_FLOOR = 4, POSE_CLIMB = 5;
 
 const VISION_RANGE = 26;
 const VISION_HALF = 0.90;
@@ -81,14 +86,13 @@ const RATES = {
   outdoorsDecay: 1 / 540,
   comfortDecay: 1 / 350,
   hygieneDecay: 1 / 1080,
+  recreationDecay: 1 / 620,
   sleepRefill: 1 / 90,
   sleepRefillFloor: 1 / 220,
   outdoorsRefill: 1 / 25,
   comfortRefill: 1 / 30,
   hygieneRefill: 1 / SHOWER_TIME,
 };
-
-type NeedName = "food" | "sleep" | "outdoors" | "comfort" | "hygiene";
 
 // Memory tile states. K_DOOR: a jail door — might be open or locked right
 // now, so path through it optimistically and let reality decide at the door.
@@ -143,9 +147,11 @@ export interface Agent {
   aux: number;
   needs: Record<NeedName, number>;
   known: Map<number, number> | null;
-  beds: Set<number> | null; tables: Set<number> | null;
-  benches: Set<number> | null; toilets: Set<number> | null;
-  showers: Set<number> | null; servings: Set<number> | null;
+  /** Remembered objects, by kind. Replaces the old per-kind Sets, so a new
+   *  object type is remembered without touching this file at all. */
+  objMem: Map<number, Set<number>> | null;
+  /** Anchor of the object currently being used (a claim on its capacity). */
+  useIdx: number;
   compliant: boolean; // following this hour's regime activity
   carrying: boolean; // holding a meal tray
   bedIdx: number;
@@ -184,11 +190,11 @@ function angleLerp(a: number, b: number, t: number): number {
 
 function passable(world: World, i: number, staff: boolean): boolean {
   const k = world.objKind[i];
-  if (k === Obj.None || k === Obj.Door || k === Obj.FenceDoor || k === Obj.CutFence ||
-      k === Obj.Drain || k === Obj.RoofLight || k === Obj.Shower) return true;
-  if (staff && (k === Obj.JailDoor || k === Obj.FenceJailDoor)) return true;
+  if (defOf(k)?.walkable) return true;
+  // The two conditional cases the registry can't state as a flag.
+  if (k === Obj.FenceJailDoor) return staff;
   // Open jail doors let prisoners through; closed ones are staff-only.
-  if (!staff && k === Obj.JailDoor && !world.jailClosed[i]) return true;
+  if (k === Obj.JailDoor) return staff || !world.jailClosed[i];
   return false;
 }
 
@@ -202,8 +208,7 @@ function prisonerAllowed(world: World, i: number): boolean {
 }
 
 function sightBlocks(world: World, i: number): boolean {
-  const k = world.objKind[i];
-  return k === Obj.Wall || k === Obj.Door || k === Obj.WallLight;
+  return defOf(world.objKind[i])?.blocksSight ?? false;
 }
 
 function isFenceKind(k: number): boolean {
@@ -307,6 +312,8 @@ export class Agents {
   private nextId = 1;
   private claimedBeds = new Map<number, number>();
   private claimedCookers = new Map<number, number>();
+  /** Use-slot occupancy: object anchor -> the agents using it right now. */
+  private useClaims = new Map<number, Set<number>>();
   readonly mealTables = new Set<number>();
   readonly tunnels: Tunnel[] = [];
   readonly cutFences = new Set<number>(); // cut fence tiles (world holds truth)
@@ -352,14 +359,11 @@ export class Agents {
             outdoors: 0.6 + Math.random() * 0.4,
             comfort: 0.6 + Math.random() * 0.4,
             hygiene: 0.6 + Math.random() * 0.4,
+            recreation: 0.6 + Math.random() * 0.4,
           },
           known: prisoner ? new Map() : null,
-          beds: prisoner ? new Set() : null,
-          tables: prisoner ? new Set() : null,
-          benches: prisoner ? new Set() : null,
-          toilets: prisoner ? new Set() : null,
-          showers: prisoner ? new Set() : null,
-          servings: prisoner ? new Set() : null,
+          objMem: prisoner ? new Map() : null,
+          useIdx: -1,
           compliant: true,
           carrying: false,
           bedIdx: -1,
@@ -396,6 +400,7 @@ export class Agents {
   private removeAgent(ag: Agent) {
     if (ag.bedIdx >= 0) this.claimedBeds.delete(ag.bedIdx);
     if (ag.cookerIdx >= 0) this.claimedCookers.delete(ag.cookerIdx);
+    this.releaseUse(ag);
     if (ag.tunnel) ag.tunnel.occupied = false;
     if (ag.job) ag.job.claimedBy = -1;
     for (const [s, id] of this.servers) if (id === ag.id) this.servers.delete(s);
@@ -506,25 +511,32 @@ export class Agents {
     else if (k === Obj.JailDoor) v = K_DOOR;
     else if (passable(world, i, false)) v = K_OPEN;
     ag.known!.set(i, v);
-    if (k === Obj.Bed) {
-      // Remembered, but never claimed by sight: cells are assigned by guards.
-      const anchor = this.bedAnchor(world, i);
-      if (anchor >= 0) ag.beds!.add(anchor);
-    } else if (k === Obj.Table) ag.tables!.add(i);
-    else if (k === Obj.Bench2 || k === Obj.Bench4) ag.benches!.add(i);
-    else if (k === Obj.Toilet) ag.toilets!.add(i);
-    else if (k === Obj.Shower) ag.showers!.add(i);
-    else if (k === Obj.ServingTable) ag.servings!.add(i);
+
+    // Objects are remembered straight off the registry. Beds and use-slot
+    // objects are remembered by anchor (a bed claim and a use claim are both
+    // keyed by it); benches and tables by tile, because a diner sits on the
+    // tile he reached, not on the anchor.
+    const def = defOf(k);
+    if (!def || !def.remember) return;
+    const at = def.remember === "anchor" ? world.anchorOf(i) : i;
+    this.mem(ag, k).add(at);
   }
 
-  private bedAnchor(world: World, i: number): number {
-    const x = i % world.size, z = (i / world.size) | 0;
-    for (const b of world.beds) {
-      const x2 = b.x + (b.orient === 0 ? 1 : b.orient === 2 ? -1 : 0);
-      const z2 = b.z + (b.orient === 1 ? 1 : b.orient === 3 ? -1 : 0);
-      if ((b.x === x && b.z === z) || (x2 === x && z2 === z)) return world.idx(b.x, b.z);
+  /** An agent's remembered tiles for one object kind. */
+  private mem(ag: Agent, kind: number): Set<number> {
+    let s = ag.objMem!.get(kind);
+    if (!s) ag.objMem!.set(kind, s = new Set());
+    return s;
+  }
+
+  /** Remembered tiles across several kinds. */
+  private memOf(ag: Agent, kinds: number[]): number[] {
+    const out: number[] = [];
+    for (const k of kinds) {
+      const s = ag.objMem!.get(k);
+      if (s) out.push(...s);
     }
-    return -1;
+    return out;
   }
 
   private look(ag: Agent, world: World) {
@@ -666,10 +678,18 @@ export class Agents {
 
   private updatePrisoner(ag: Agent, dt: number, world: World, isNight: boolean) {
     const n = ag.needs;
+    // A use claim only lives as long as the using: a guard escort, a lock-up or
+    // an erased object all pull him off it, and none of them route through
+    // finishUse.
+    if (ag.useIdx >= 0 && ag.state !== "using") {
+      this.releaseUse(ag);
+      ag.pose = POSE_STAND;
+    }
     n.food = Math.max(0, n.food - RATES.foodDecay * dt);
     n.sleep = Math.max(0, n.sleep - RATES.sleepDecay * dt);
     n.comfort = Math.max(0, n.comfort - RATES.comfortDecay * dt);
     n.hygiene = Math.max(0, n.hygiene - RATES.hygieneDecay * dt);
+    n.recreation = Math.max(0, n.recreation - RATES.recreationDecay * dt);
     if (!ag.underground) {
       const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
       const outside = world.roofed[here] === 0;
@@ -681,7 +701,8 @@ export class Agents {
     }
 
     // Escape desire: slow average of misery; fear (post-capture) suppresses it.
-    const misery = 1 - (n.food + n.sleep + n.outdoors + n.comfort + n.hygiene) / 5;
+    const misery = 1 -
+      (n.food + n.sleep + n.outdoors + n.comfort + n.hygiene + n.recreation) / 6;
     ag.desire += (Math.min(1, misery * 1.6) - ag.desire) * Math.min(1, dt / 45);
     ag.fear = Math.max(0, ag.fear - dt / 150);
     ag.risk = Math.max(0, ag.risk - dt / 900); // wariness fades slowly
@@ -765,6 +786,10 @@ export class Agents {
           ag.state = "idle";
           this.stepOff(ag, world);
         }
+        return;
+      }
+      case "using": {
+        this.updateUsing(ag, dt, world);
         return;
       }
       case "outside": {
@@ -948,7 +973,7 @@ export class Agents {
         if (ag.carrying) return true; // already mid-flow (toTable in motion)
         if (ag.needs.food > 0.95) return false; // fed; do as you please
         let best = -1, bd = Infinity;
-        for (const s of ag.servings!) {
+        for (const s of this.mem(ag, Obj.ServingTable)) {
           if (world.objKind[s] !== Obj.ServingTable) continue;
           if (world.roomTypeAt(s) !== RoomType.Canteen) continue;
           if ((this.servingStock.get(s) ?? 0) <= 0) continue;
@@ -1002,7 +1027,7 @@ export class Agents {
         }
         // Head for a shower head in a valid shower room and stand under it.
         let best = -1, bd = Infinity;
-        for (const s of ag.showers!) {
+        for (const s of this.mem(ag, Obj.Shower)) {
           if (world.objKind[s] !== Obj.Shower) continue;
           if (world.roomTypeAt(s) !== RoomType.ShowerRoom) continue;
           const d = Math.abs((s % world.size) - ag.x) + Math.abs(((s / world.size) | 0) - ag.z);
@@ -1040,7 +1065,7 @@ export class Agents {
     // Carry the tray to a dining table (bench-adjacent preferred).
     let best = -1, bestScore = -Infinity;
     const size = world.size;
-    for (const t of ag.tables!) {
+    for (const t of this.mem(ag, Obj.Table)) {
       if (world.objKind[t] !== Obj.Table) continue;
       if (world.roomTypeAt(t) !== RoomType.Canteen) continue;
       const d = Math.abs((t % size) - ag.x) + Math.abs(((t / size) | 0) - ag.z);
@@ -1109,7 +1134,7 @@ export class Agents {
           return;
         }
         const bx = ag.bedIdx % size, bz = (ag.bedIdx / size) | 0;
-        const bed = world.beds.find((b) => b.x === bx && b.z === bz);
+        const bed = world.pieceAtTile(ag.bedIdx);
         ag.x = bx + 0.5; ag.z = bz + 0.5;
         ag.heading = bed ? [0, Math.PI / 2, Math.PI, -Math.PI / 2][bed.orient & 3] : 0;
         ag.pose = POSE_LIE_BED;
@@ -1136,6 +1161,10 @@ export class Agents {
       case "toOutside": {
         ag.state = "outside";
         ag.timer = 30;
+        return;
+      }
+      case "toUse": {
+        this.startUse(ag, world);
         return;
       }
       case "toBreach": {
@@ -1272,6 +1301,8 @@ export class Agents {
       ["comfort", (1 - n.comfort) * 0.6],
       // Filth escalates: past a point the shower outranks comfort/outdoors.
       ["hygiene", (1 - n.hygiene) * (n.hygiene < 0.1 ? 0.9 : 0.5)],
+      // Boredom is the quietest need — it loses every contest until it's deep.
+      ["recreation", (1 - n.recreation) * 0.55],
     ];
     cands.sort((a, b) => b[1] - a[1]);
     for (const [need, w] of cands) {
@@ -1287,7 +1318,7 @@ export class Agents {
     switch (need) {
       case "food": {
         let best = -1, bestScore = -Infinity;
-        for (const t of ag.tables!) {
+        for (const t of this.mem(ag, Obj.Table)) {
           if (!this.mealTables.has(t) || world.objKind[t] !== Obj.Table) continue;
           const d = Math.abs((t % size) - ax) + Math.abs(((t / size) | 0) - az);
           const benchBonus = this.adjacentBench(world, t, ag) >= 0 ? 2.0 : 1.0;
@@ -1311,7 +1342,7 @@ export class Agents {
         // shameless — no stealth, no risk gate; guards can drag him off.
         if (ag.needs.food >= 0.5) return false;
         let bestS = -1, bd = Infinity;
-        for (const s of ag.servings!) {
+        for (const s of this.mem(ag, Obj.ServingTable)) {
           if (world.objKind[s] !== Obj.ServingTable) continue;
           if (world.roomTypeAt(s) !== RoomType.Canteen) continue;
           if ((this.servingStock.get(s) ?? 0) <= 0) continue;
@@ -1366,7 +1397,7 @@ export class Agents {
       }
       case "comfort": {
         let best = -1, bestScore = -Infinity;
-        for (const b of ag.benches!) {
+        for (const b of this.memOf(ag, [Obj.Bench2, Obj.Bench4])) {
           if (world.objKind[b] !== Obj.Bench2 && world.objKind[b] !== Obj.Bench4) continue;
           const d = Math.abs((b % size) - ax) + Math.abs(((b / size) | 0) - az);
           const s = 1 / (1 + d);
@@ -1377,7 +1408,8 @@ export class Agents {
           const s = 0.9 / (1 + d);
           if (s > bestScore) { bestScore = s; best = ag.bedIdx; }
         }
-        if (best < 0) return false;
+        // No bench and no bunk: an armchair or sofa will do just as well.
+        if (best < 0) return this.tryUse(ag, world, "comfort");
         if (!this.pathAdjacent(ag, world, best, this.lawfulOpen(ag, world))) return false;
         // Resting on the bunk edge beats standing around (and beats the
         // lie-down/insta-wake loop a daytime "toSleep" would cause).
@@ -1385,10 +1417,12 @@ export class Agents {
         ag.interact = best;
         return true;
       }
+      case "recreation":
+        return this.tryUse(ag, world, "recreation");
       case "hygiene": {
         // A known shower head in a valid shower room.
         let best = -1, bd = Infinity;
-        for (const s of ag.showers!) {
+        for (const s of this.mem(ag, Obj.Shower)) {
           if (world.objKind[s] !== Obj.Shower) continue;
           if (world.roomTypeAt(s) !== RoomType.ShowerRoom) continue;
           const d = Math.abs((s % size) - ax) + Math.abs(((s / size) | 0) - az);
@@ -1407,6 +1441,116 @@ export class Agents {
         return this.trySneak(ag, world, "hygiene");
       }
     }
+  }
+
+  // --- Use-slots --------------------------------------------------------------
+  //
+  // Any object whose registry row carries a `use` block can be walked to, stood
+  // (or sat) at, and drained for the needs it lists. One state pair — "toUse"
+  // then "using" — serves every such object, so a new usable thing is a data
+  // row, not a new branch in this machine.
+
+  private useCount(anchor: number): number {
+    return this.useClaims.get(anchor)?.size ?? 0;
+  }
+
+  private releaseUse(ag: Agent) {
+    if (ag.useIdx < 0) return;
+    const set = this.useClaims.get(ag.useIdx);
+    if (set) {
+      set.delete(ag.id);
+      if (set.size === 0) this.useClaims.delete(ag.useIdx);
+    }
+    ag.useIdx = -1;
+  }
+
+  /** Is this remembered anchor still a usable object with room for one more? */
+  private useable(world: World, anchor: number, kind: number): boolean {
+    if (world.objKind[anchor] !== kind) return false;
+    const use = defOf(kind)?.use;
+    if (!use) return false;
+    return this.useCount(anchor) < use.capacity;
+  }
+
+  /** Walk to the nearest remembered object that fills `need`. */
+  private tryUse(ag: Agent, world: World, need: NeedName): boolean {
+    const size = world.size;
+    const ax = Math.floor(ag.x), az = Math.floor(ag.z);
+    const kinds = kindsServing(need);
+    let best = -1, bd = Infinity;
+    for (const kind of kinds) {
+      for (const anchor of this.mem(ag, kind)) {
+        if (!this.useable(world, anchor, kind)) continue;
+        const d = Math.abs((anchor % size) - ax) + Math.abs(((anchor / size) | 0) - az);
+        if (d < bd) { bd = d; best = anchor; }
+      }
+    }
+    if (best < 0) return false;
+
+    const use = defOf(world.objKind[best])!.use!;
+    const open = this.lawfulOpen(ag, world);
+    if (use.from === "on") {
+      // Stand on the object itself (a sofa, a mat).
+      const path = astar(size, az * size + ax, best, (i) => open(i) || i === best);
+      if (!path) return false;
+      ag.path = path; ag.pathI = 0;
+    } else if (!this.pathAdjacent(ag, world, best, open)) return false;
+
+    ag.state = "toUse";
+    ag.interact = best;
+    return true;
+  }
+
+  /** Arrived at a use-slot object: claim it and settle in. */
+  private startUse(ag: Agent, world: World) {
+    const anchor = ag.interact;
+    const kind = world.objKind[anchor];
+    const use = defOf(kind)?.use;
+    if (!use || !this.useable(world, anchor, kind)) { ag.state = "idle"; return; }
+
+    let set = this.useClaims.get(anchor);
+    if (!set) this.useClaims.set(anchor, set = new Set());
+    set.add(ag.id);
+    ag.useIdx = anchor;
+
+    const size = world.size;
+    if (use.from === "on") {
+      ag.x = (anchor % size) + 0.5;
+      ag.z = ((anchor / size) | 0) + 0.5;
+    }
+    // Face what you're using.
+    ag.heading = Math.atan2(
+      (((anchor / size) | 0) + 0.5) - ag.z,
+      ((anchor % size) + 0.5) - ag.x,
+    );
+    ag.pose = use.pose;
+    ag.timer = use.seconds;
+    ag.state = "using";
+  }
+
+  /** Drain the object's needs into the agent; stop when full, bored, or the
+   *  object is gone (a player can erase a bookshelf out from under a reader). */
+  private updateUsing(ag: Agent, dt: number, world: World) {
+    ag.amp = Math.max(0, ag.amp - dt * 8);
+    const kind = world.objKind[ag.useIdx];
+    const use = ag.useIdx >= 0 ? defOf(kind)?.use : undefined;
+    if (!use) { this.finishUse(ag, world); return; }
+
+    let full = true;
+    for (const [need, rate] of Object.entries(use.needs) as [NeedName, number][]) {
+      ag.needs[need] = Math.min(1, ag.needs[need] + rate * dt);
+      if (ag.needs[need] < 1) full = false;
+    }
+    ag.timer -= dt;
+    if (full || ag.timer <= 0) this.finishUse(ag, world);
+  }
+
+  private finishUse(ag: Agent, world: World) {
+    const on = defOf(world.objKind[ag.useIdx])?.use?.from === "on";
+    this.releaseUse(ag);
+    ag.pose = POSE_STAND;
+    ag.state = "idle";
+    if (on) this.stepOff(ag, world);
   }
 
   // --- Rule-breaking need trips ----------------------------------------------
@@ -1447,7 +1591,7 @@ export class Agents {
     // Hygiene: nearest remembered shower head, access rules be damned
     // (someone else's in-cell shower counts).
     let best = -1, bd = Infinity;
-    for (const s of ag.showers!) {
+    for (const s of this.mem(ag, Obj.Shower)) {
       if (world.objKind[s] !== Obj.Shower) continue;
       const d = Math.abs((s % size) - ag.x) + Math.abs(((s / size) | 0) - ag.z);
       if (d < bd) { bd = d; best = s; }
@@ -1656,11 +1800,11 @@ export class Agents {
     if (ag.planBias) {
       method = ag.planBias;
       // Biased to dig but no toilet known yet: hold out for one.
-      if (method === "dig" && ag.toilets!.size === 0) return;
+      if (method === "dig" && this.mem(ag, Obj.Toilet).size === 0) return;
     } else {
       const wClimb = 1 / (1 + ag.timesCaught);
       const wCut = 0.8;
-      const wDig = ag.toilets!.size > 0 ? 0.7 : 0;
+      const wDig = this.mem(ag, Obj.Toilet).size > 0 ? 0.7 : 0;
       const r = Math.random() * (wClimb + wCut + wDig);
       method = r < wClimb ? "climb" : r < wClimb + wCut ? "cut" : "dig";
     }
@@ -1669,7 +1813,7 @@ export class Agents {
     let toiletIdx = -1;
     if (method === "dig") {
       let bd = Infinity;
-      for (const t of ag.toilets!) {
+      for (const t of this.mem(ag, Obj.Toilet)) {
         if (world.objKind[t] !== Obj.Toilet) continue;
         const d = Math.abs((t % size) - ag.x) + Math.abs(((t / size) | 0) - ag.z);
         if (d < bd) { bd = d; toiletIdx = t; }
@@ -1863,7 +2007,7 @@ export class Agents {
     // (abstracted: retreat paths only through passable tiles; if boxed in,
     // climb back over the nearest known fence).
     const size = world.size;
-    const home = ag.bedIdx >= 0 ? ag.bedIdx : ag.tables!.values().next().value ?? -1;
+    const home = ag.bedIdx >= 0 ? ag.bedIdx : this.mem(ag, Obj.Table).values().next().value ?? -1;
     if (home < 0) { ag.plan = null; ag.state = "idle"; return; }
     if (this.pathAdjacent(ag, world, home, this.fleeOpen(ag))) {
       ag.state = "retreating";
@@ -2404,7 +2548,7 @@ export class Agents {
 
   /** An unclaimed bed anchor inside a room, or -1. */
   private freeBedInRoom(world: World, room: Room): number {
-    for (const b of world.beds) {
+    for (const b of world.piecesOfKind(Obj.Bed)) {
       const anchor = world.idx(b.x, b.z);
       if (!room.tiles.has(anchor) || this.claimedBeds.has(anchor)) continue;
       return anchor;
@@ -2689,7 +2833,7 @@ export class Agents {
     for (const [i, v] of ag.known) {
       out.push(i % world.size, (i / world.size) | 0, v === K_OPEN || v === K_CUT ? 0 : 1);
     }
-    for (const s of [ag.tables!, ag.benches!, ag.beds!, ag.toilets!]) {
+    for (const s of ag.objMem!.values()) {
       for (const i of s) out.push(i % world.size, (i / world.size) | 0, 2);
     }
     // Active tunnel: believed line vs actual head.
@@ -2825,8 +2969,9 @@ export class Agents {
   }
 
   saveData() {
-    const serSet = (s: Set<number> | null) => s ? [...s] : null;
     const serMap = (m: Map<number, number> | null) => m ? [...m.entries()] : null;
+    const serMem = (m: Map<number, Set<number>> | null): [number, number[]][] | null =>
+      m ? [...m].map(([kind, tiles]) => [kind, [...tiles]]) : null;
     return {
       nextId: this.nextId,
       regime: [...this.regime],
@@ -2845,12 +2990,7 @@ export class Agents {
         path: a.path ? [...a.path] : null,
         needs: { ...a.needs },
         known: serMap(a.known),
-        beds: serSet(a.beds),
-        tables: serSet(a.tables),
-        benches: serSet(a.benches),
-        toilets: serSet(a.toilets),
-        showers: serSet(a.showers),
-        servings: serSet(a.servings),
+        objMem: serMem(a.objMem),
         plan: a.plan ? { ...a.plan, breaches: [...a.plan.breaches] } : null,
         tunnel: a.tunnel ? { ...a.tunnel } : null,
         job: a.job ? { ...a.job, claimedBy: -1 } : null,
@@ -2860,10 +3000,11 @@ export class Agents {
     };
   }
 
-  loadData(data: ReturnType<Agents["saveData"]>) {
+  loadData(data: ReturnType<Agents["saveData"]> & LegacyAgentSave) {
     this.agents.length = 0;
     this.claimedBeds.clear();
     this.claimedCookers.clear();
+    this.useClaims.clear();
     this.mealTables.clear();
     this.tunnels.length = 0;
     this.cutFences.clear();
@@ -2885,20 +3026,38 @@ export class Agents {
     for (const j of data.repairJobs ?? []) this.repairJobs.push({ ...j, claimedBy: -1 });
     for (const t of data.doorTasks ?? []) this.doorTasks.push({ ...t, claimedBy: -1 });
 
-    const deSet = (v: number[] | null) => v ? new Set(v) : null;
     const deMap = (v: [number, number][] | null) => v ? new Map(v) : null;
+    // Saves written before the registry kept one Set per object type.
+    const deMem = (raw: LegacyAgentMem): Map<number, Set<number>> | null => {
+      if (raw.objMem) return new Map(raw.objMem.map(([k, t]) => [k, new Set(t)]));
+      const legacy: [number, number[] | null | undefined][] = [
+        [Obj.Bed, raw.beds], [Obj.Table, raw.tables], [Obj.Toilet, raw.toilets],
+        [Obj.Shower, raw.showers], [Obj.ServingTable, raw.servings],
+      ];
+      const any = raw.beds ?? raw.tables ?? raw.benches ?? raw.toilets ??
+        raw.showers ?? raw.servings;
+      if (!any) return null; // staff: no memory at all
+      const m = new Map<number, Set<number>>();
+      for (const [kind, tiles] of legacy) if (tiles) m.set(kind, new Set(tiles));
+      // Bench tiles were one pooled set; they can't be split back per kind, so
+      // file them under the kind actually on each tile at load.
+      for (const t of raw.benches ?? []) {
+        const k = Obj.Bench2; // refined on first sight; both are benches
+        let s = m.get(k);
+        if (!s) m.set(k, s = new Set());
+        s.add(t);
+      }
+      return m;
+    };
+
     for (const raw of data.agents ?? []) {
       const ag = {
         ...raw,
         path: raw.path ? [...raw.path] : null,
-        needs: { ...raw.needs },
+        needs: { ...raw.needs, recreation: raw.needs.recreation ?? 0.8 },
         known: deMap(raw.known),
-        beds: deSet(raw.beds),
-        tables: deSet(raw.tables),
-        benches: deSet(raw.benches),
-        toilets: deSet(raw.toilets),
-        showers: deSet(raw.showers),
-        servings: deSet(raw.servings),
+        objMem: deMem(raw as LegacyAgentMem),
+        useIdx: -1, // claims are re-taken on the next decision
         plan: raw.plan ? { ...raw.plan, breaches: [...raw.plan.breaches] } : null,
         tunnel: raw.tunnel ? this.tunnels.find((t) => t.owner === raw.tunnel!.owner && t.entry === raw.tunnel!.entry) ?? { ...raw.tunnel } : null,
         job: null,
@@ -2907,6 +3066,7 @@ export class Agents {
         risk: raw.risk ?? 0, // older saves predate risk memory
         sneaking: raw.sneaking ?? false,
       } as Agent;
+      if (ag.state === "using" || ag.state === "toUse") ag.state = "idle";
       this.agents.push(ag);
       if (ag.bedIdx >= 0) this.claimedBeds.set(ag.bedIdx, ag.id);
       if (ag.cookerIdx >= 0) this.claimedCookers.set(ag.cookerIdx, ag.id);
@@ -2914,4 +3074,18 @@ export class Agents {
     this.mealsDirty = true;
     this.worldDirty = true;
   }
+}
+
+/** Per-agent memory as older saves stored it: one array per object type. */
+interface LegacyAgentMem {
+  objMem?: [number, number[]][] | null;
+  beds?: number[] | null;
+  tables?: number[] | null;
+  benches?: number[] | null;
+  toilets?: number[] | null;
+  showers?: number[] | null;
+  servings?: number[] | null;
+}
+interface LegacyAgentSave {
+  agents?: (Agent & LegacyAgentMem)[];
 }

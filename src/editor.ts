@@ -2,19 +2,35 @@
 // current tool. Placement itself is driven by main (pointer + picking); this
 // module owns tool state and the UI.
 
-import { Access, Obj, RoomType, World } from "./sim/world";
+import { Access, Obj, PIECE_DEFS, RoomType, World, defOf } from "./sim/world";
 import { FLOOR_MATS, WALL_MATS, FENCE_MAT } from "./render/materials";
 
+// Structural tools get their own cat because each has a bespoke world setter
+// (a door converts a wall, a wall light must find an open face). Everything
+// else is a "piece": one cat, and `mat` carries the Obj kind — so a new object
+// costs a row in objects.ts and nothing here.
 export type ToolCat =
-  | "floor" | "wall" | "fence" | "door" | "jaildoor" | "bed"
+  | "floor" | "wall" | "fence" | "door" | "jaildoor"
+  | "fencedoor" | "fencejaildoor"
   | "lamp" | "walllight" | "rooflight"
-  | "toilet" | "shower" | "drain" | "fencedoor" | "fencejaildoor"
-  | "table" | "servingtable" | "bench2" | "bench4" | "cooker"
+  | "piece"
   | "prisoner" | "guard" | "cook" | "workman" | "baton"
   | "room" | "access" | "erase";
 export interface Tool { cat: ToolCat; mat: number }
 interface Item { label: string; swatch: string; tool: Tool }
 interface Cat { key: string; label: string; items: Item[] }
+
+/** A palette button straight from the object registry. */
+function pieceItem(kind: number): Item {
+  const d = defOf(kind)!;
+  return { label: d.palette!.label, swatch: d.palette!.swatch, tool: { cat: "piece", mat: kind } };
+}
+
+/** A palette button for a kind with a bespoke setter. */
+function objItem(kind: number, cat: ToolCat): Item {
+  const d = defOf(kind)!;
+  return { label: d.palette!.label, swatch: d.palette!.swatch, tool: { cat, mat: 0 } };
+}
 
 const CATS: Cat[] = [
   {
@@ -31,31 +47,23 @@ const CATS: Cat[] = [
   {
     key: "furniture", label: "Furniture",
     items: [
-      { label: "Door", swatch: "#b98a57", tool: { cat: "door", mat: 0 } },
-      { label: "Jail Door", swatch: "#7e868f", tool: { cat: "jaildoor", mat: 0 } },
-      { label: "Fence Door", swatch: "#e07a1f", tool: { cat: "fencedoor", mat: 0 } },
-      { label: "Fence Jail Door", swatch: "#c03030", tool: { cat: "fencejaildoor", mat: 0 } },
-      { label: "Bed", swatch: "#cabfa6", tool: { cat: "bed", mat: 0 } },
-      { label: "Toilet", swatch: "#dfe4ea", tool: { cat: "toilet", mat: 0 } },
-      { label: "Shower", swatch: "#9fb4c8", tool: { cat: "shower", mat: 0 } },
-      { label: "Drain", swatch: "#4a4f55", tool: { cat: "drain", mat: 0 } },
-      { label: "Table", swatch: "#d8d8d2", tool: { cat: "table", mat: 0 } },
-      { label: "Serving Table", swatch: "#aeb6ba", tool: { cat: "servingtable", mat: 0 } },
-      { label: "Bench 2x1", swatch: "#cfcfc8", tool: { cat: "bench2", mat: 0 } },
-      { label: "Bench 4x1", swatch: "#c4c4bc", tool: { cat: "bench4", mat: 0 } },
-      { label: "Cooker", swatch: "#666c73", tool: { cat: "cooker", mat: 0 } },
-      { label: "Lamp", swatch: "#e8b96a", tool: { cat: "lamp", mat: 0 } },
-      { label: "Wall Light", swatch: "#f0d9a0", tool: { cat: "walllight", mat: 0 } },
-      { label: "Roof Light", swatch: "#dfe8f2", tool: { cat: "rooflight", mat: 0 } },
+      objItem(Obj.Door, "door"),
+      objItem(Obj.JailDoor, "jaildoor"),
+      objItem(Obj.FenceDoor, "fencedoor"),
+      objItem(Obj.FenceJailDoor, "fencejaildoor"),
+      ...PIECE_DEFS.map((d) => pieceItem(d.kind)),
+      objItem(Obj.Lamp, "lamp"),
+      objItem(Obj.WallLight, "walllight"),
+      objItem(Obj.RoofLight, "rooflight"),
     ],
   },
   {
     key: "people", label: "People",
     items: [
-      { label: "Prisoner", swatch: "#f07018", tool: { cat: "prisoner", mat: 0 } },
-      { label: "Guard", swatch: "#3a4a6b", tool: { cat: "guard", mat: 0 } },
-      { label: "Cook", swatch: "#e8e6e0", tool: { cat: "cook", mat: 0 } },
-      { label: "Workman", swatch: "#f0c020", tool: { cat: "workman", mat: 0 } },
+      objItem(Obj.Prisoner, "prisoner"),
+      objItem(Obj.Guard, "guard"),
+      objItem(Obj.Cook, "cook"),
+      objItem(Obj.Workman, "workman"),
       { label: "Baton", swatch: "#202024", tool: { cat: "baton", mat: 0 } },
     ],
   },
@@ -160,15 +168,7 @@ export class Editor {
       case "jaildoor": world.setDoor(x, z, true); return true;
       case "fencedoor": world.setFenceGate(x, z, false); return true;
       case "fencejaildoor": world.setFenceGate(x, z, true); return true;
-      case "bed": return world.placeBed(x, z, this.orient);
-      case "toilet": world.setFurniture(x, z, Obj.Toilet, this.orient); return true;
-      case "shower": world.setFurniture(x, z, Obj.Shower, this.orient); return true;
-      case "drain": world.setFurniture(x, z, Obj.Drain, this.orient); return true;
-      case "table": world.setFurniture(x, z, Obj.Table, this.orient); return true;
-      case "servingtable": world.setFurniture(x, z, Obj.ServingTable, this.orient); return true;
-      case "bench2": return world.placeSpan(x, z, this.orient, Obj.Bench2);
-      case "bench4": return world.placeSpan(x, z, this.orient, Obj.Bench4);
-      case "cooker": world.setFurniture(x, z, Obj.Cooker, this.orient); return true;
+      case "piece": return world.placePiece(x, z, this.tool.mat, this.orient);
       case "lamp": world.setLamp(x, z); return true;
       case "walllight": world.setWallLight(x, z); return true;
       case "rooflight": world.setRoofLight(x, z); return true;

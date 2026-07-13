@@ -11,7 +11,7 @@ import { FENCE_H, PRELUDE, sceneLightEntries, type SceneLight } from "./shaderCo
 // Palette indices (mirror furniture.wgsl).
 const CERAMIC = 0, CERAMIC_DK = 1, STEEL = 2, DARK = 3, BLACK = 4;
 const ORANGE = 5, RED = 6, TABLE = 7, SEAT = 8, CHROME = 9, LINK = 10, STOVE = 11;
-const FOOD_A = 12, FOOD_B = 13;
+const FOOD_A = 12, FOOD_B = 13, WOOD = 14, BOOKS = 15;
 
 // Box tagged with a palette index on every vertex (pos3 + part1), no bottom.
 function box(
@@ -144,6 +144,33 @@ const foodMesh = () => new Float32Array([
   ...box(0.55, 0.64, 0.815, 0.85, 0.44, 0.56, FOOD_B),
 ]);
 
+// Bookshelf spanning `len` tiles along +X: a wooden carcass against the back of
+// the tile (-Z), with `shelves` rows of books. The first object built entirely
+// from the registry — small and large are the same mesh at two sizes.
+function bookshelfMesh(len: number, height: number): Float32Array {
+  const z0 = 0.06, z1 = 0.40; // shallow: it sits against a wall, not in the room
+  const out = [
+    ...box(0.04, len - 0.04, 0.00, 0.08, z0, z1, WOOD), // plinth
+    ...box(0.04, len - 0.04, height - 0.06, height, z0 - 0.02, z1 + 0.02, WOOD), // cornice
+    ...box(0.04, 0.10, 0.00, height, z0, z1, WOOD), // side panels
+    ...box(len - 0.10, len - 0.04, 0.00, height, z0, z1, WOOD),
+    ...box(0.04, len - 0.04, 0.00, height, z0, z0 + 0.03, WOOD), // back panel
+  ];
+  // Shelf boards, with a run of books standing on each.
+  const shelves = Math.max(2, Math.round((height - 0.20) / 0.36));
+  for (let s = 0; s < shelves; s++) {
+    const y = 0.08 + ((height - 0.22) / shelves) * s;
+    out.push(...box(0.10, len - 0.10, y, y + 0.04, z0 + 0.02, z1, WOOD));
+    const top = y + 0.04 + (height - 0.22) / shelves - 0.10;
+    for (let x = 0.16; x < len - 0.20; x += 0.075) {
+      // Vary the height a little so the spines don't read as one solid block.
+      const h = top - (((x * 37) % 5) / 5) * 0.06;
+      out.push(...box(x, x + 0.055, y + 0.04, h, z0 + 0.05, z1 - 0.05, BOOKS));
+    }
+  }
+  return new Float32Array(out);
+}
+
 // Cooker: steel body, dark hob with four burners, front handle (+X).
 const cookerMesh = () => {
   const out = [
@@ -214,6 +241,8 @@ export class FurniturePass {
       [Obj.Cooker, cookerMesh()],
       [Obj.CutFence, cutFenceMesh()],
       [Obj.ServingTable, servingTableMesh()],
+      [Obj.Bookshelf, bookshelfMesh(1, 1.15)],
+      [Obj.BookshelfLarge, bookshelfMesh(2, 1.95)],
       [FOOD_KIND, foodMesh()],
       [TRAY_STACK_KIND, trayStackMesh()],
       [HOLE_ENTRY_KIND, holeEntryMesh()],

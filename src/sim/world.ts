@@ -5,23 +5,39 @@
 //
 // Per tile:
 //   floorMat  0 = natural ground, else a floor material id
-//   objKind   None | Wall | Door | Fence | Bed
+//   objKind   an Obj kind (see objects.ts — that table owns every per-kind fact)
 //   objMat    material id for walls / fences
-//   objOrient 0 (X) or 1 (Z), for doors / beds
+//   objOrient 0..3 quarter turns
 //   roofed    derived: 1 if covered by an auto-roof
+//   pieceAt   0 = none, else the id of the multi-tile piece covering this tile
+//
+// Furniture is placed as a `Piece`: a w x d footprint with one anchor tile. A
+// bed is a 2x1 piece, a 4-seat bench a 4x1 piece, a toilet a 1x1 piece — the
+// three ad-hoc systems this replaced are now one.
 
-export const Obj = {
-  None: 0, Wall: 1, Door: 2, Fence: 3, Bed: 4,
-  Lamp: 5, WallLight: 6, RoofLight: 7,
-  Prisoner: 8, Guard: 9,
-  JailDoor: 10, Toilet: 11, Shower: 12, Drain: 13,
-  FenceDoor: 14, FenceJailDoor: 15,
-  Table: 16, Bench2: 17, Bench4: 18, Cooker: 19,
-  Cook: 20, CutFence: 21, Workman: 22, ServingTable: 23,
-} as const;
+// .ts extensions: the dev scripts import this module through Node's native type
+// stripping, which will not resolve an extensionless specifier.
+import { DIRS, Obj, OBJ_DEFS, defOf } from "./objects.ts";
 
-/** Multi-tile span object (benches): anchor tile, direction, length. */
-export interface Span { x: number; z: number; orient: number; len: number; kind: number }
+export { Obj, DIRS, OBJ_DEFS, PIECE_DEFS, defOf, kindsServing } from "./objects.ts";
+export type { ObjDef, ObjKind, NeedName, UseDef } from "./objects.ts";
+
+/** A placed footprint object. `w` runs along DIRS[orient], `d` across it. */
+export interface Piece {
+  id: number;
+  kind: number;
+  x: number;
+  z: number;
+  orient: number;
+  w: number;
+  d: number;
+}
+
+/** Saves written before pieces existed: separate bed and bench-span lists. */
+interface LegacySave {
+  beds?: { x: number; z: number; orient: number }[];
+  spans?: { x: number; z: number; orient: number; len: number; kind: number }[];
+}
 
 // --- Rooms & access ---------------------------------------------------------
 export const RoomType = {
@@ -53,10 +69,7 @@ const ROOM_MIN_SQUARE: Record<number, number> = {
   [RoomType.ShowerRoom]: 5,
 };
 
-const PERSON_KINDS: number[] = [Obj.Prisoner, Obj.Guard, Obj.Cook, Obj.Workman];
-const SPAN_LEN: Record<number, number> = { [Obj.Bench2]: 2, [Obj.Bench4]: 4 };
-const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]];
-export type ObjKind = (typeof Obj)[keyof typeof Obj];
+const PERSON_KINDS: number[] = OBJ_DEFS.filter((d) => d.place === "person").map((d) => d.kind);
 
 const ROOM_NAMES: Record<number, string> = {
   [RoomType.Empty]: "Empty Room",
@@ -79,22 +92,22 @@ const LIGHT_REACH = 9; // max radius, for region margins
 /** A rectangular RGBA8 block of the world light grid, ready for the GPU. */
 export interface LightField { x0: number; z0: number; w: number; h: number; data: Uint8Array }
 
-export interface Bed {
-  x: number;
-  z: number;
-  orient: number;
-}
-
 export class World {
   readonly size: number;
   readonly floorMat: Uint8Array;
-  readonly objKind: Uint8Array;
+  // Uint16: the object registry is meant to grow into the hundreds, and a
+  // Uint8Array would have capped it at 255 kinds.
+  readonly objKind: Uint16Array;
   readonly objMat: Uint8Array;
   readonly objOrient: Uint8Array;
   readonly roofed: Uint8Array;
 
-  readonly beds: Bed[] = [];
-  private spans: Span[] = [];
+  // Multi-tile furniture. `pieceAt` maps a tile to its piece id (0 = none), so
+  // "which object is this tile part of" is O(1) — it used to be a linear scan
+  // of every bed in the prison, run for every tile every agent could see.
+  readonly pieces = new Map<number, Piece>();
+  readonly pieceAt: Int32Array;
+  private nextPieceId = 1;
   private active = new Set<number>();
   // Rooms: per-tile room id (0 = outside / none) + the room registry.
   readonly roomId: Int32Array;
@@ -110,12 +123,78 @@ export class World {
     this.size = size;
     const n = size * size;
     this.floorMat = new Uint8Array(n);
-    this.objKind = new Uint8Array(n);
+    this.objKind = new Uint16Array(n);
     this.objMat = new Uint8Array(n);
     this.objOrient = new Uint8Array(n);
     this.roofed = new Uint8Array(n);
     this.roomId = new Int32Array(n);
     this.jailClosed = new Uint8Array(n);
+    this.pieceAt = new Int32Array(n);
+  }
+
+  // --- Pieces ---------------------------------------------------------------
+
+  /** The tiles a piece covers: w along DIRS[orient], d across it. */
+  pieceTiles(p: Piece): number[] {
+    const [ax, az] = DIRS[p.orient & 3];
+    const [bx, bz] = DIRS[(p.orient + 1) & 3];
+    const out: number[] = [];
+    for (let a = 0; a < p.w; a++) {
+      for (let b = 0; b < p.d; b++) {
+        const tx = p.x + ax * a + bx * b, tz = p.z + az * a + bz * b;
+        if (!this.inBounds(tx, tz)) return [];
+        out.push(this.idx(tx, tz));
+      }
+    }
+    return out;
+  }
+
+  /** The piece covering a tile, or null. */
+  pieceAtTile(i: number): Piece | null {
+    return this.pieces.get(this.pieceAt[i]) ?? null;
+  }
+
+  /** The anchor tile of the piece covering `i` — or `i` itself if it isn't one. */
+  anchorOf(i: number): number {
+    const p = this.pieceAtTile(i);
+    return p ? this.idx(p.x, p.z) : i;
+  }
+
+  piecesOfKind(kind: number): Piece[] {
+    return [...this.pieces.values()].filter((p) => p.kind === kind);
+  }
+
+  /** Place a footprint object. All its tiles must be empty. */
+  placePiece(x: number, z: number, kind: number, orient: number): boolean {
+    const d = defOf(kind);
+    if (!d || d.place !== "piece" || !this.inBounds(x, z)) return false;
+    const piece: Piece = {
+      id: this.nextPieceId, kind, x, z, orient: orient & 3, w: d.w, d: d.d,
+    };
+    const tiles = this.pieceTiles(piece);
+    if (tiles.length === 0) return false; // ran off the map
+    for (const i of tiles) if (this.objKind[i] !== Obj.None) return false;
+
+    this.nextPieceId++;
+    this.pieces.set(piece.id, piece);
+    for (const i of tiles) {
+      this.objKind[i] = kind;
+      this.objOrient[i] = piece.orient;
+      this.objMat[i] = 0;
+      this.pieceAt[i] = piece.id;
+      this.touch(i % this.size, (i / this.size) | 0);
+    }
+    return true;
+  }
+
+  private removePiece(p: Piece) {
+    for (const i of this.pieceTiles(p)) {
+      this.objKind[i] = Obj.None;
+      this.objMat[i] = 0;
+      this.pieceAt[i] = 0;
+      this.touch(i % this.size, (i / this.size) | 0);
+    }
+    this.pieces.delete(p.id);
   }
 
   idx(x: number, z: number): number { return z * this.size + x; }
@@ -145,10 +224,10 @@ export class World {
     this.touch(x, z);
   }
 
+  /** Structural placement never bulldozes furniture — erase the piece first. */
   private canObj(x: number, z: number): boolean {
     if (!this.inBounds(x, z)) return false;
-    const k = this.objKind[this.idx(x, z)];
-    return k !== Obj.Bed && k !== Obj.Bench2 && k !== Obj.Bench4;
+    return this.pieceAt[this.idx(x, z)] === 0;
   }
 
   setWall(x: number, z: number, mat: number) {
@@ -210,16 +289,6 @@ export class World {
     };
   }
 
-  /** Simple one-tile furniture (toilet, shower, drain, table, cooker). */
-  setFurniture(x: number, z: number, kind: number, orient: number) {
-    if (!this.canObj(x, z)) return;
-    const i = this.idx(x, z);
-    this.objKind[i] = kind;
-    this.objOrient[i] = orient & 3;
-    this.objMat[i] = 0;
-    this.touch(x, z);
-  }
-
   /** Turn a fence tile into a gate (open FenceDoor / guard-only FenceJailDoor);
    *  orientation follows the fence run, like doors follow walls. */
   setFenceGate(x: number, z: number, locked: boolean) {
@@ -231,26 +300,6 @@ export class World {
     this.objKind[i] = locked ? Obj.FenceJailDoor : Obj.FenceDoor;
     this.objOrient[i] = horiz ? 0 : 1;
     this.touch(x, z);
-  }
-
-  /** Place a multi-tile span object (benches) from an anchor tile. */
-  placeSpan(x: number, z: number, orient: number, kind: number): boolean {
-    const len = SPAN_LEN[kind];
-    if (!len) return false;
-    const [dx, dz] = DIRS[orient & 3];
-    for (let k = 0; k < len; k++) {
-      const tx = x + dx * k, tz = z + dz * k;
-      if (!this.inBounds(tx, tz) || this.objKind[this.idx(tx, tz)] !== Obj.None) return false;
-    }
-    for (let k = 0; k < len; k++) {
-      const tx = x + dx * k, tz = z + dz * k;
-      const i = this.idx(tx, tz);
-      this.objKind[i] = kind;
-      this.objOrient[i] = orient & 3;
-      this.touch(tx, tz);
-    }
-    this.spans.push({ x, z, orient: orient & 3, len, kind });
-    return true;
   }
 
   /** Mount a light on an existing wall, facing its most useful open side. */
@@ -298,68 +347,26 @@ export class World {
     this.touch(x, z);
   }
 
-  placeBed(x: number, z: number, orient: number): boolean {
-    orient &= 3;
-    const x2 = x + (orient === 0 ? 1 : orient === 2 ? -1 : 0);
-    const z2 = z + (orient === 1 ? 1 : orient === 3 ? -1 : 0);
-    if (!this.inBounds(x, z) || !this.inBounds(x2, z2)) return false;
-    if (this.objKind[this.idx(x, z)] !== Obj.None) return false;
-    if (this.objKind[this.idx(x2, z2)] !== Obj.None) return false;
-    for (const [tx, tz] of [[x, z], [x2, z2]]) {
-      const i = this.idx(tx, tz);
-      this.objKind[i] = Obj.Bed;
-      this.objOrient[i] = orient;
-      this.touch(tx, tz);
-    }
-    this.beds.push({ x, z, orient });
-    return true;
-  }
-
-  /** Erase the object on a tile, or the floor if there is no object. */
+  /** Erase the object on a tile (a whole piece if it is one), or the floor. */
   erase(x: number, z: number) {
     if (!this.inBounds(x, z)) return;
     const i = this.idx(x, z);
-    const k = this.objKind[i];
-    if (k === Obj.Bench2 || k === Obj.Bench4) {
-      const span = this.spans.find((s) => {
-        const [dx, dz] = DIRS[s.orient];
-        for (let n = 0; n < s.len; n++) {
-          if (s.x + dx * n === x && s.z + dz * n === z) return true;
-        }
-        return false;
-      });
-      if (span) {
-        const [dx, dz] = DIRS[span.orient];
-        for (let n = 0; n < span.len; n++) {
-          this.objKind[this.idx(span.x + dx * n, span.z + dz * n)] = Obj.None;
-        }
-        this.spans.splice(this.spans.indexOf(span), 1);
-      }
+    const piece = this.pieceAtTile(i);
+    if (piece) { this.removePiece(piece); return; }
+    if (this.objKind[i] !== Obj.None) {
+      this.objKind[i] = Obj.None;
+      this.objMat[i] = 0;
+      this.touch(x, z);
       return;
     }
-    if (this.objKind[i] === Obj.Bed) {
-      const bed = this.beds.find((b) => {
-        const x2 = b.x + (b.orient === 0 ? 1 : b.orient === 2 ? -1 : 0);
-        const z2 = b.z + (b.orient === 1 ? 1 : b.orient === 3 ? -1 : 0);
-        return (b.x === x && b.z === z) || (x2 === x && z2 === z);
-      });
-      if (bed) {
-        const x2 = bed.x + (bed.orient === 0 ? 1 : bed.orient === 2 ? -1 : 0);
-        const z2 = bed.z + (bed.orient === 1 ? 1 : bed.orient === 3 ? -1 : 0);
-        this.objKind[this.idx(bed.x, bed.z)] = Obj.None;
-        this.objKind[this.idx(x2, z2)] = Obj.None;
-        this.beds.splice(this.beds.indexOf(bed), 1);
-      }
-      return;
-    }
-    if (this.objKind[i] !== Obj.None) { this.objKind[i] = Obj.None; this.objMat[i] = 0; return; }
     this.floorMat[i] = 0;
+    this.touch(x, z);
   }
 
+  /** Roof/sight barrier: walls and doors, but not fences. */
   private wallLike(x: number, z: number): boolean {
     if (!this.inBounds(x, z)) return false;
-    const k = this.objKind[this.idx(x, z)];
-    return k === Obj.Wall || k === Obj.Door || k === Obj.WallLight || k === Obj.JailDoor;
+    return defOf(this.objKind[this.idx(x, z)])?.roofBarrier ?? false;
   }
 
   // --- Auto-roof: flood from outside; enclosed built floors get roofed -----
@@ -371,10 +378,7 @@ export class World {
     const w = x1 - x0 + 1, h = z1 - z0 + 1;
     const reached = new Uint8Array(w * h);
     const ri = (x: number, z: number) => (z - z0) * w + (x - x0);
-    const barrier = (x: number, z: number) => {
-      const k = this.objKind[this.idx(x, z)];
-      return k === Obj.Wall || k === Obj.Door || k === Obj.WallLight || k === Obj.JailDoor;
-    };
+    const barrier = (x: number, z: number) => this.wallLike(x, z);
 
     // BFS from the region border (which is open ground) through non-barriers.
     const stack: number[] = [];
@@ -419,9 +423,7 @@ export class World {
 
   /** Room-bounding barrier: walls AND fences (and everything door-like). */
   private roomBarrier(i: number): boolean {
-    const k = this.objKind[i];
-    return k === Obj.Wall || k === Obj.Door || k === Obj.WallLight || k === Obj.JailDoor ||
-      k === Obj.Fence || k === Obj.FenceDoor || k === Obj.FenceJailDoor || k === Obj.CutFence;
+    return defOf(this.objKind[i])?.roomBarrier ?? false;
   }
 
   /** Re-derive rooms in the touched region: enclosed tiles get a room (new
@@ -676,9 +678,8 @@ export class World {
 
   prisonerCapacity(): number {
     let cap = 0;
-    for (const b of this.beds) {
-      const i = this.idx(b.x, b.z);
-      const r = this.rooms.get(this.roomId[i]);
+    for (const b of this.piecesOfKind(Obj.Bed)) {
+      const r = this.rooms.get(this.roomId[this.idx(b.x, b.z)]);
       if (!r || !r.valid || (r.type !== RoomType.Cell && r.type !== RoomType.Dorm)) continue;
       cap++;
     }
@@ -695,8 +696,8 @@ export class World {
     return {
       size: this.size,
       tiles,
-      beds: this.beds.map((b) => ({ ...b })),
-      spans: this.spans.map((s) => ({ ...s })),
+      pieces: [...this.pieces.values()].map((p) => ({ ...p })),
+      nextPieceId: this.nextPieceId,
       rooms: [...this.rooms.values()].map((r) => ({
         id: r.id,
         type: r.type,
@@ -708,7 +709,7 @@ export class World {
     };
   }
 
-  loadData(data: ReturnType<World["saveData"]>) {
+  loadData(data: ReturnType<World["saveData"]> & LegacySave) {
     this.floorMat.fill(0);
     this.objKind.fill(0);
     this.objMat.fill(0);
@@ -716,8 +717,9 @@ export class World {
     this.roofed.fill(0);
     this.roomId.fill(0);
     this.jailClosed.fill(0);
-    this.beds.length = 0;
-    this.spans = [];
+    this.pieceAt.fill(0);
+    this.pieces.clear();
+    this.nextPieceId = 1;
     this.active.clear();
     this.rooms.clear();
     this.nextRoomId = data.nextRoomId ?? 1;
@@ -733,8 +735,36 @@ export class World {
       this.jailClosed[i] = j;
       this.touch(i % this.size, (i / this.size) | 0);
     }
-    for (const b of data.beds ?? []) this.beds.push({ x: b.x, z: b.z, orient: b.orient });
-    this.spans = (data.spans ?? []).map((s) => ({ ...s }));
+
+    // Pieces, or a pre-piece save's separate `beds` and `spans` lists.
+    const pieces: Piece[] = (data.pieces ?? []).map((p) => ({ ...p }));
+    if (!data.pieces) {
+      let id = 1;
+      for (const b of data.beds ?? []) {
+        pieces.push({ id: id++, kind: Obj.Bed, x: b.x, z: b.z, orient: b.orient, w: 2, d: 1 });
+      }
+      for (const s of data.spans ?? []) {
+        pieces.push({ id: id++, kind: s.kind, x: s.x, z: s.z, orient: s.orient, w: s.len, d: 1 });
+      }
+      // Single-tile furniture was tile-only before pieces; rebuild it from the
+      // tiles we just loaded, so old saves come back with usable objects.
+      for (const i of this.active) {
+        const d = defOf(this.objKind[i]);
+        if (!d || d.place !== "piece" || d.w !== 1 || d.d !== 1) continue;
+        pieces.push({
+          id: id++, kind: this.objKind[i],
+          x: i % this.size, z: (i / this.size) | 0,
+          orient: this.objOrient[i], w: 1, d: 1,
+        });
+      }
+    }
+    for (const p of pieces) {
+      this.pieces.set(p.id, p);
+      for (const i of this.pieceTiles(p)) this.pieceAt[i] = p.id;
+      if (p.id >= this.nextPieceId) this.nextPieceId = p.id + 1;
+    }
+    if (data.nextPieceId) this.nextPieceId = Math.max(this.nextPieceId, data.nextPieceId);
+
     for (const r of data.rooms ?? []) {
       const room: Room = {
         id: r.id,
@@ -834,29 +864,33 @@ export class World {
     return new Float32Array(out);
   }
 
-  /** Single-tile + span furniture instances (x, z, orient) keyed by Obj kind. */
+  /** Furniture instances (x, z, orient) keyed by Obj kind: every piece the
+   *  furniture pass draws, plus the tile-placed kinds it also owns (gates and
+   *  cut fences, which are conversions of a wall/fence rather than pieces). */
   furnitureInstances(): Map<number, Float32Array> {
     const buckets = new Map<number, number[]>();
     const push = (kind: number, x: number, z: number, o: number) => {
       let a = buckets.get(kind); if (!a) buckets.set(kind, a = []);
       a.push(x, z, o);
     };
-    const SINGLE = new Set<number>([
-      Obj.Toilet, Obj.Shower, Obj.Drain, Obj.FenceDoor, Obj.FenceJailDoor,
-      Obj.Table, Obj.Cooker, Obj.CutFence, Obj.ServingTable,
-    ]);
     for (const i of this.active) {
       const k = this.objKind[i];
-      if (!SINGLE.has(k)) continue;
+      const d = defOf(k);
+      if (!d || d.render !== "furniture" || d.place === "piece") continue;
       push(k, i % this.size, (i / this.size) | 0, this.objOrient[i]);
     }
-    for (const s of this.spans) push(s.kind, s.x, s.z, s.orient);
+    for (const p of this.pieces.values()) {
+      if (defOf(p.kind)?.render !== "furniture") continue;
+      push(p.kind, p.x, p.z, p.orient);
+    }
     return new Map([...buckets].map(([k, a]) => [k, new Float32Array(a)]));
   }
 
   bedInstances(): Float32Array {
     const out: number[] = [];
-    for (const b of this.beds) out.push(b.x, b.z, b.orient);
+    for (const p of this.pieces.values()) {
+      if (defOf(p.kind)?.render === "bed") out.push(p.x, p.z, p.orient);
+    }
     return new Float32Array(out);
   }
 
@@ -889,10 +923,11 @@ export class World {
     const w = x1 - x0 + 1, h = z1 - z0 + 1;
     const acc = new Float32Array(w * h * 3);
 
+    // Doors let light through; solid walls do not.
     const solid = (x: number, z: number) => {
       if (!this.inBounds(x, z)) return true;
       const k = this.objKind[this.idx(x, z)];
-      return k === Obj.Wall || k === Obj.WallLight; // doors let light through
+      return k === Obj.Wall || k === Obj.WallLight;
     };
 
     for (const i of this.active) {
@@ -970,8 +1005,7 @@ export class World {
     const queue: number[] = [];
     for (const i of this.active) {
       if (this.roofed[i] !== 1) continue;
-      const k = this.objKind[i];
-      if (k === Obj.Wall || k === Obj.Door || k === Obj.WallLight || k === Obj.JailDoor) {
+      if (defOf(this.objKind[i])?.roofBarrier) {
         mat.set(i, this.objMat[i] || 1);
         queue.push(i);
       }
