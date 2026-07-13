@@ -27,8 +27,15 @@
 
 import { Access, RoomType, World, type Room } from "./world.ts";
 import {
-  Obj, defOf, kindsServing,
-  POSE_STAND, POSE_SIT, POSE_LIE_BED, POSE_LIE_FLOOR, POSE_CLIMB,
+  Item, type Inventory, type Stack,
+  canHold, canPocket, clearInventory, countItem, hasItem, heldSlots, itemDef,
+POCKET_SLOTS,
+  newInventory, pocket, removeFromHands, removeItem, seizeContraband, stashAdd,
+  stashCount, stashTake, stow, takeInHands,
+} from "./items.ts";
+import {
+  DIRS, NEEDS, Obj, SHELF_KINDS, defOf, kindsServing,
+  POSE_STAND, POSE_SIT, POSE_LIE_FLOOR, POSE_CLIMB,
   type NeedName,
 } from "./objects.ts";
 
@@ -67,14 +74,21 @@ const AWARE_R = 2.5;
 const PRISONER_SPEED = 2.1;
 const STAFF_SPEED = 2.5;
 const COOK_TIME = 20;
-const EAT_TIME = 6;
 const CLIMB_TIME = 8; // seconds per fence line
 const CUT_TIME = 6;
 const DIG_TILE_TIME = 3;
 const CRAWL_SPEED = 3; // tiles/s inside a tunnel
 const REPAIR_TIME = 8;
 const STAKEOUT_TIME = 45;
+const SNIPER_RANGE = 60;   // a tower sees a long way
+const SNIPER_AIM = 1.6;    // seconds to line up the shot
+const SNIPER_RELOAD = 3;
+const KO_TIME = 30;        // seconds face-down before he comes round
+const TOWER_HEIGHT = 3.4;  // where the sniper actually stands
 const MEALS_PER_CUTTER = 3;
+const BOOK_READ_RATE = 1 / 35; // recreation per second, while holding a book
+const READ_TIME = 45;
+const SPOONS_TO_DIG = 4;
 const TUNNEL_DRIFT = 0.16; // radians of accumulated error per dug tile
 const ESCAPE_MARGIN = 26; // this close to the playable edge = swallowed by fog
 
@@ -86,13 +100,40 @@ const RATES = {
   outdoorsDecay: 1 / 540,
   comfortDecay: 1 / 350,
   hygieneDecay: 1 / 1080,
-  recreationDecay: 1 / 620,
   sleepRefill: 1 / 90,
   sleepRefillFloor: 1 / 220,
   outdoorsRefill: 1 / 25,
   comfortRefill: 1 / 30,
   hygieneRefill: 1 / SHOWER_TIME,
 };
+
+// The needs that decay on their own and are met by walking to an object with a
+// matching use-slot. Outdoors is not here: it refills by *being* outside, not by
+// using anything, so it keeps its bespoke handling below.
+//
+//   decay  — per second
+//   weight — how loudly it argues in decide(); >1 means it usually wins
+const NEED_TUNING: Record<NeedName, { decay: number; weight: number }> = {
+  food: { decay: RATES.foodDecay, weight: 1.3 },
+  sleep: { decay: RATES.sleepDecay, weight: 0.55 },
+  outdoors: { decay: RATES.outdoorsDecay, weight: 0.7 },
+  comfort: { decay: RATES.comfortDecay, weight: 0.6 },
+  hygiene: { decay: RATES.hygieneDecay, weight: 0.5 },
+  recreation: { decay: 1 / 620, weight: 0.55 },
+  exercise: { decay: 1 / 800, weight: 0.5 },
+  // Fast and insistent: a full bladder outranks nearly everything.
+  bladder: { decay: 1 / 260, weight: 1.5 },
+  spirituality: { decay: 1 / 1400, weight: 0.4 },
+};
+
+
+function freshNeeds(): Record<NeedName, number> {
+  const n = {} as Record<NeedName, number>;
+  for (const k of NEEDS) n[k] = 0.6 + Math.random() * 0.4;
+  n.food = 0.7 + Math.random() * 0.3;
+  n.sleep = 0.7 + Math.random() * 0.3;
+  return n;
+}
 
 // Memory tile states. K_DOOR: a jail door — might be open or locked right
 // now, so path through it optimistically and let reality decide at the door.
@@ -152,8 +193,11 @@ export interface Agent {
   objMem: Map<number, Set<number>> | null;
   /** Anchor of the object currently being used (a claim on its capacity). */
   useIdx: number;
+  /** The seat he means to take when he gets there (the bench by the table). */
+  seatIdx: number;
   compliant: boolean; // following this hour's regime activity
-  carrying: boolean; // holding a meal tray
+  /** Hands (visible) + pockets. Replaces the old carrying/cutters/spoons ints. */
+  inv: Inventory;
   bedIdx: number;
   lastTX: number; lastTZ: number;
   decideT: number;
@@ -163,7 +207,7 @@ export interface Agent {
   // rule-breaking
   risk: number; // learned wariness: how risky breaking the rules has proven
   sneaking: boolean; // on a quiet unauthorized need trip (hygiene/outdoors)
-  cutters: number; spoons: number; cutterMeals: number;
+  cutterMeals: number; // meals eaten toward fashioning the next cutter
   cuffed: boolean; // newcomers wait handcuffed for a cell assignment
   cellRoom: number; // claimed cell/dorm room id, -1 = none
   speedMul: number;
@@ -172,7 +216,11 @@ export interface Agent {
   underground: boolean;
   planBias: Method | null; // debug/testing hook
   escortedBy: number; // guard id while being marched home
+  /** How high above the ground he stands (a sniper is up his tower). */
+  elev: number;
   // staff
+  /** The tower this sniper mans (its piece anchor), or -1. */
+  postIdx: number;
   cookerIdx: number;
   job: RepairJob | null;
   chaseId: number;
@@ -314,6 +362,9 @@ export class Agents {
   private claimedCookers = new Map<number, number>();
   /** Use-slot occupancy: object anchor -> the agents using it right now. */
   private useClaims = new Map<number, Set<number>>();
+  /** What each prisoner has hidden under his bunk, keyed by bed anchor. A guard
+   *  who catches him only takes what's on him — the stash is why hiding pays. */
+  readonly stashes = new Map<number, Stack[]>();
   readonly mealTables = new Set<number>();
   readonly tunnels: Tunnel[] = [];
   readonly cutFences = new Set<number>(); // cut fence tiles (world holds truth)
@@ -335,6 +386,47 @@ export class Agents {
   takeMealsDirty(): boolean { const d = this.mealsDirty; this.mealsDirty = false; return d; }
   takeWorldDirty(): boolean { const d = this.worldDirty; this.worldDirty = false; return d; }
 
+  /** A fresh agent of a kind, at the origin. sync() and manTowers() both use it. */
+  private blankAgent(kind: number): Agent {
+    const prisoner = kind === Obj.Prisoner;
+    return {
+      id: 0,
+      kind,
+      x: 0.5, z: 0.5,
+      heading: 0,
+      baton: kind === Obj.Guard,
+      pose: POSE_STAND, phase: Math.random() * 6.28, amp: 0,
+      path: null, pathI: 0,
+      state: "idle", timer: 0, interact: -1, aux: 0,
+      needs: freshNeeds(),
+      known: prisoner ? new Map() : null,
+      objMem: prisoner ? new Map() : null,
+      useIdx: -1,
+      seatIdx: -1,
+      compliant: true,
+      inv: newInventory(),
+      bedIdx: -1,
+      lastTX: -1, lastTZ: -1,
+      decideT: Math.random(),
+      escapeDesire: 0, escapeFeasibility: 0,
+      desire: 0, fear: 0, timesCaught: 0,
+      risk: 0, sneaking: false,
+      cutterMeals: 0,
+      cuffed: prisoner,
+      cellRoom: -1,
+      speedMul: 1,
+      plan: null, tunnel: null, underground: false,
+      planBias: null,
+      escortedBy: -1,
+      elev: 0,
+      postIdx: -1,
+      cookerIdx: -1,
+      job: null,
+      chaseId: -1,
+      stakeTunnel: null,
+    };
+  }
+
   sync(world: World) {
     for (const kind of [Obj.Prisoner, Obj.Guard, Obj.Cook, Obj.Workman]) {
       for (const i of world.tilesOfKind(kind)) {
@@ -343,46 +435,12 @@ export class Agents {
         const baton = world.objMat[i] === 1;
         world.objKind[i] = Obj.None;
         world.objMat[i] = 0;
-        const prisoner = kind === Obj.Prisoner;
         this.agents.push({
+          ...this.blankAgent(kind),
           id: this.nextId++,
-          kind,
           x: x + 0.5, z: z + 0.5,
           heading: [0, Math.PI / 2, Math.PI, -Math.PI / 2][orient & 3],
           baton,
-          pose: POSE_STAND, phase: Math.random() * 6.28, amp: 0,
-          path: null, pathI: 0,
-          state: "idle", timer: 0, interact: -1, aux: 0,
-          needs: {
-            food: 0.7 + Math.random() * 0.3,
-            sleep: 0.7 + Math.random() * 0.3,
-            outdoors: 0.6 + Math.random() * 0.4,
-            comfort: 0.6 + Math.random() * 0.4,
-            hygiene: 0.6 + Math.random() * 0.4,
-            recreation: 0.6 + Math.random() * 0.4,
-          },
-          known: prisoner ? new Map() : null,
-          objMem: prisoner ? new Map() : null,
-          useIdx: -1,
-          compliant: true,
-          carrying: false,
-          bedIdx: -1,
-          lastTX: -1, lastTZ: -1,
-          decideT: Math.random(),
-          escapeDesire: 0, escapeFeasibility: 0,
-          desire: 0, fear: 0, timesCaught: 0,
-          risk: 0, sneaking: false,
-          cutters: 0, spoons: 0, cutterMeals: 0,
-          cuffed: prisoner,
-          cellRoom: -1,
-          speedMul: 1,
-          plan: null, tunnel: null, underground: false,
-          planBias: null,
-          escortedBy: -1,
-          cookerIdx: -1,
-          job: null,
-          chaseId: -1,
-          stakeTunnel: null,
         });
       }
     }
@@ -479,11 +537,14 @@ export class Agents {
       }
     }
 
+    this.manTowers(world);
+
     for (let n = this.agents.length - 1; n >= 0; n--) {
       const ag = this.agents[n];
       if (ag.kind === Obj.Prisoner) this.updatePrisoner(ag, dt, world, isNight);
       else if (ag.kind === Obj.Cook) this.updateCook(ag, dt, world);
       else if (ag.kind === Obj.Guard) this.updateGuard(ag, dt, world);
+      else if (ag.kind === Obj.Sniper) this.updateSniper(ag, dt, world);
       else this.updateWorkman(ag, dt, world);
     }
   }
@@ -529,16 +590,6 @@ export class Agents {
     return s;
   }
 
-  /** Remembered tiles across several kinds. */
-  private memOf(ag: Agent, kinds: number[]): number[] {
-    const out: number[] = [];
-    for (const k of kinds) {
-      const s = ag.objMem!.get(k);
-      if (s) out.push(...s);
-    }
-    return out;
-  }
-
   private look(ag: Agent, world: World) {
     const size = world.size;
     const ax = Math.floor(ag.x), az = Math.floor(ag.z);
@@ -570,10 +621,13 @@ export class Agents {
   /** Line-of-sight visibility check (guards spotting, prisoners sneaking).
    *  `nearR` is the omnidirectional radius — noisy acts (climbing, cutting)
    *  are noticed all around, not just in the facing cone. */
-  private canSee(ag: Agent, world: World, tx: number, tz: number, nearR = AWARE_R): boolean {
+  private canSee(
+    ag: Agent, world: World, tx: number, tz: number,
+    nearR = AWARE_R, range = ag.kind === Obj.Sniper ? SNIPER_RANGE : VISION_RANGE,
+  ): boolean {
     const dx = tx - ag.x, dz = tz - ag.z;
     const d = Math.hypot(dx, dz);
-    if (d > VISION_RANGE) return false;
+    if (d > range) return false;
     if (d > nearR) {
       let da = Math.atan2(dz, dx) - ag.heading;
       while (da > Math.PI) da -= Math.PI * 2;
@@ -685,11 +739,11 @@ export class Agents {
       this.releaseUse(ag);
       ag.pose = POSE_STAND;
     }
-    n.food = Math.max(0, n.food - RATES.foodDecay * dt);
-    n.sleep = Math.max(0, n.sleep - RATES.sleepDecay * dt);
-    n.comfort = Math.max(0, n.comfort - RATES.comfortDecay * dt);
-    n.hygiene = Math.max(0, n.hygiene - RATES.hygieneDecay * dt);
-    n.recreation = Math.max(0, n.recreation - RATES.recreationDecay * dt);
+    if (ag.seatIdx >= 0 && ag.state !== "toUse") ag.seatIdx = -1;
+    for (const need of NEEDS) {
+      if (need === "outdoors") continue; // refills by being outside, below
+      n[need] = Math.max(0, n[need] - NEED_TUNING[need].decay * dt);
+    }
     if (!ag.underground) {
       const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
       const outside = world.roofed[here] === 0;
@@ -701,8 +755,17 @@ export class Agents {
     }
 
     // Escape desire: slow average of misery; fear (post-capture) suppresses it.
-    const misery = 1 -
-      (n.food + n.sleep + n.outdoors + n.comfort + n.hygiene + n.recreation) / 6;
+    //
+    // Weighted by how much each need matters, so a prison with no chapel isn't
+    // punished as hard as one with no food — and bladder is excluded outright,
+    // because needing the toilet is not a reason to tunnel out of a prison.
+    let sum = 0, total = 0;
+    for (const need of NEEDS) {
+      if (need === "bladder") continue;
+      const w = NEED_TUNING[need].weight;
+      sum += n[need] * w; total += w;
+    }
+    const misery = 1 - sum / total;
     ag.desire += (Math.min(1, misery * 1.6) - ag.desire) * Math.min(1, dt / 45);
     ag.fear = Math.max(0, ag.fear - dt / 150);
     ag.risk = Math.max(0, ag.risk - dt / 900); // wariness fades slowly
@@ -741,55 +804,41 @@ export class Agents {
       return;
     }
 
+    // Shot with a beanbag round: nothing to decide until he comes round.
+    if (ag.state === "knockedOut") {
+      ag.amp = 0;
+      ag.pose = POSE_LIE_FLOOR;
+      ag.timer -= dt;
+      if (ag.timer <= 0) {
+        ag.pose = POSE_STAND;
+        ag.state = "idle";
+      }
+      return;
+    }
+
     // Timed interaction states.
     switch (ag.state) {
-      case "eating": {
-        ag.amp = Math.max(0, ag.amp - dt * 8);
-        ag.timer -= dt;
-        if (ag.timer <= 0) {
-          n.food = 1;
-          // Contraband: meals feed the active plan's toolkit.
-          if (ag.plan?.method === "cut") {
-            ag.cutterMeals++;
-            if (ag.cutterMeals >= MEALS_PER_CUTTER) { ag.cutterMeals = 0; ag.cutters++; }
-          } else if (ag.plan?.method === "dig") ag.spoons++;
-          // Finish the tray that was set on the table (if it's still there).
-          if (this.mealTables.delete(ag.interact)) this.mealsDirty = true;
-          ag.pose = POSE_STAND;
-          ag.state = "idle";
-          // If we ate seated on a bench, get off it.
-          const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
-          if (!passable(world, here, false)) this.stepOff(ag, world);
-        }
+      case "using": {
+        this.updateUsing(ag, dt, world, isNight);
         return;
       }
-      case "sleeping": {
+      case "sleepFloor": {
         ag.amp = 0;
-        const floor = ag.pose === POSE_LIE_FLOOR;
-        n.sleep = Math.min(1, n.sleep + (floor ? RATES.sleepRefillFloor : RATES.sleepRefill) * dt);
-        if (!floor) n.comfort = Math.min(1, n.comfort + RATES.comfortRefill * 0.5 * dt);
+        n.sleep = Math.min(1, n.sleep + RATES.sleepRefillFloor * dt);
         if (n.sleep >= 1 || (!isNight && n.sleep > 0.75)) {
           ag.pose = POSE_STAND;
           ag.state = "idle";
-          if (ag.bedIdx >= 0) {
-            ag.x = (ag.bedIdx % world.size) + 0.5; ag.z = ((ag.bedIdx / world.size) | 0) + 0.5;
-            this.stepOff(ag, world);
-          }
         }
         return;
       }
-      case "sitting": {
-        ag.amp = 0;
-        n.comfort = Math.min(1, n.comfort + RATES.comfortRefill * dt);
-        if (n.comfort >= 1) {
-          ag.pose = POSE_STAND;
-          ag.state = "idle";
-          this.stepOff(ag, world);
-        }
-        return;
-      }
-      case "using": {
-        this.updateUsing(ag, dt, world);
+      case "reading": {
+        // Nowhere to sit, so he reads on his feet.
+        ag.amp = Math.max(0, ag.amp - dt * 8);
+        if (!hasItem(ag.inv, Item.Book)) { ag.state = "idle"; return; }
+        const mul = world.ambienceMul(world.idx(Math.floor(ag.x), Math.floor(ag.z)));
+        n.recreation = Math.min(1, n.recreation + BOOK_READ_RATE * mul * dt);
+        ag.timer -= dt;
+        if (n.recreation >= 1 || ag.timer <= 0) ag.state = "idle";
         return;
       }
       case "outside": {
@@ -832,11 +881,14 @@ export class Agents {
       }
       case "queueing": {
         ag.amp = Math.max(0, ag.amp - dt * 8);
-        if (this.curActivity !== REG.Eating) { ag.state = "idle"; return; }
         ag.timer -= dt;
         if (ag.timer <= 0) {
           ag.timer = 2;
-          if (this.isNextTo(ag, world, ag.interact)) this.tryTakeMeal(ag, world);
+          // The counter may have been stocked or manned since he sat down here.
+          if (this.useable(ag, world, ag.interact, Obj.ServingTable) &&
+              this.isNextTo(ag, world, ag.interact)) {
+            this.startUse(ag, world);
+          } else if (ag.needs.food > 0.6) ag.state = "idle";
         }
         return;
       }
@@ -857,30 +909,6 @@ export class Agents {
               if (p) { ag.path = p; ag.pathI = 0; }
             }
           }
-        }
-        return;
-      }
-      case "showering": {
-        ag.amp = 0;
-        ag.needs.hygiene = Math.min(1, ag.needs.hygiene + RATES.hygieneRefill * dt);
-        // An unauthorized shower is cut short the moment a guard shows.
-        if (ag.sneaking) {
-          ag.decideT -= dt;
-          if (ag.decideT <= 0) {
-            ag.decideT = 0.5;
-            if (this.guardInSight(ag, world)) {
-              ag.risk = Math.min(1, ag.risk + 0.15);
-              ag.sneaking = false;
-              ag.state = "idle";
-              this.stepOff(ag, world);
-              return;
-            }
-          }
-        }
-        if (ag.needs.hygiene >= 1) {
-          ag.sneaking = false;
-          ag.state = "idle";
-          this.stepOff(ag, world);
         }
         return;
       }
@@ -954,44 +982,22 @@ export class Agents {
         if (ag.cellRoom < 0 || ag.bedIdx < 0) return false;
         if (this.insideOwnCell(ag, world)) {
           this.lockCell(ag, world);
-          if (act === REG.Sleep) {
-            if (this.pathAdjacent(ag, world, ag.bedIdx, this.lawfulOpen(ag, world))) {
-              ag.state = "toSleep";
-              return true;
-            }
-          }
+          if (act === REG.Sleep && this.trySatisfy(ag, world, "sleep")) return true;
           ag.state = "inCell";
           return true;
         }
+        if (act === REG.Sleep && this.trySatisfy(ag, world, "sleep")) return true;
         if (this.pathAdjacent(ag, world, ag.bedIdx, this.lawfulOpen(ag, world))) {
-          ag.state = act === REG.Sleep ? "toSleep" : "regimeToCell";
+          ag.state = "regimeToCell";
           return true;
         }
         return false;
       }
       case REG.Eating: {
-        if (ag.carrying) return true; // already mid-flow (toTable in motion)
+        // Mid-meal already (tray in hand, or sat at a table).
+        if (hasItem(ag.inv, Item.Tray) || ag.state === "using" || ag.state === "queueing") return true;
         if (ag.needs.food > 0.95) return false; // fed; do as you please
-        let best = -1, bd = Infinity;
-        for (const s of this.mem(ag, Obj.ServingTable)) {
-          if (world.objKind[s] !== Obj.ServingTable) continue;
-          if (world.roomTypeAt(s) !== RoomType.Canteen) continue;
-          if ((this.servingStock.get(s) ?? 0) <= 0) continue;
-          const d = Math.abs((s % world.size) - ag.x) + Math.abs(((s / world.size) | 0) - ag.z);
-          if (d < bd) { bd = d; best = s; }
-        }
-        if (best < 0) return false;
-        if (this.isNextTo(ag, world, best)) {
-          ag.interact = best;
-          this.tryTakeMeal(ag, world);
-          return true;
-        }
-        if (this.pathAdjacent(ag, world, best, this.lawfulOpen(ag, world))) {
-          ag.state = "toServe";
-          ag.interact = best;
-          return true;
-        }
-        return false;
+        return this.trySatisfy(ag, world, "food");
       }
       case REG.Yard: {
         const size = world.size;
@@ -1025,67 +1031,10 @@ export class Agents {
           }
           return false;
         }
-        // Head for a shower head in a valid shower room and stand under it.
-        let best = -1, bd = Infinity;
-        for (const s of this.mem(ag, Obj.Shower)) {
-          if (world.objKind[s] !== Obj.Shower) continue;
-          if (world.roomTypeAt(s) !== RoomType.ShowerRoom) continue;
-          const d = Math.abs((s % world.size) - ag.x) + Math.abs(((s / world.size) | 0) - ag.z);
-          if (d < bd) { bd = d; best = s; }
-        }
-        if (best < 0) return false;
-        const size = world.size;
-        const start = world.idx(Math.floor(ag.x), Math.floor(ag.z));
-        const path = astar(size, start, best,
-          (i) => this.lawfulOpen(ag, world)(i) || i === best);
-        if (!path) return false;
-        ag.path = path; ag.pathI = 0;
-        ag.state = "toShower";
-        return true;
+        return this.trySatisfy(ag, world, "hygiene");
       }
     }
     return false;
-  }
-
-  /** Take a meal from a stocked serving table; head for a table. During
-   *  eating hours the line waits for a serving cook — but raids outside the
-   *  schedule (and truly starving men) just grab a tray. */
-  private tryTakeMeal(ag: Agent, world: World) {
-    const s = ag.interact;
-    const stock = this.servingStock.get(s) ?? 0;
-    const needServer = this.curActivity === REG.Eating && ag.needs.food >= 0.15;
-    if (world.objKind[s] !== Obj.ServingTable || stock <= 0 || (needServer && !this.servers.has(s))) {
-      ag.state = "queueing";
-      ag.timer = 2;
-      return;
-    }
-    this.servingStock.set(s, stock - 1);
-    this.mealsDirty = true;
-    ag.carrying = true;
-    // Carry the tray to a dining table (bench-adjacent preferred).
-    let best = -1, bestScore = -Infinity;
-    const size = world.size;
-    for (const t of this.mem(ag, Obj.Table)) {
-      if (world.objKind[t] !== Obj.Table) continue;
-      if (world.roomTypeAt(t) !== RoomType.Canteen) continue;
-      const d = Math.abs((t % size) - ag.x) + Math.abs(((t / size) | 0) - ag.z);
-      const benchBonus = this.adjacentBench(world, t, ag) >= 0 ? 2.0 : 1.0;
-      const sc = benchBonus / (1 + d);
-      if (sc > bestScore) { bestScore = sc; best = t; }
-    }
-    if (best >= 0) {
-      const bench = this.adjacentBench(world, best, ag);
-      const target = bench >= 0 ? bench : best;
-      if (this.pathAdjacent(ag, world, target, this.lawfulOpen(ag, world))) {
-        ag.state = "toTable";
-        ag.interact = best;
-        return;
-      }
-    }
-    // Nowhere to sit: eat standing right here.
-    ag.carrying = false;
-    ag.state = "eating";
-    ag.timer = EAT_TIME;
   }
 
   private stepOff(ag: Agent, world: World) {
@@ -1102,60 +1051,27 @@ export class Agents {
   }
 
   private onArrive(ag: Agent, world: World) {
-    const size = world.size;
     switch (ag.state) {
-      case "toEat": {
-        if (!this.mealTables.has(ag.interact) || world.objKind[ag.interact] !== Obj.Table) {
-          ag.state = "idle";
-          return;
-        }
-        this.mealTables.delete(ag.interact);
-        this.mealsDirty = true;
-        const bench = this.adjacentBench(world, ag.interact, ag);
-        const face = () => {
-          ag.heading = Math.atan2(
-            (((ag.interact / size) | 0) + 0.5) - ag.z,
-            ((ag.interact % size) + 0.5) - ag.x,
-          );
-        };
-        if (bench >= 0 && this.isNextTo(ag, world, bench)) {
-          ag.x = (bench % size) + 0.5; ag.z = ((bench / size) | 0) + 0.5;
-          face();
-          ag.pose = POSE_SIT;
-        } else face();
-        ag.state = "eating";
-        ag.timer = EAT_TIME;
+      case "toQueue": {
+        // Reached the counter: use it if he can, otherwise wait his turn.
+        if (this.useable(ag, world, ag.interact, Obj.ServingTable)) this.startUse(ag, world);
+        else { ag.state = "queueing"; ag.timer = 2; }
         return;
       }
-      case "toSleep": {
-        if (ag.bedIdx < 0 || world.objKind[ag.bedIdx] !== Obj.Bed) {
-          if (ag.bedIdx >= 0) { this.claimedBeds.delete(ag.bedIdx); ag.bedIdx = -1; }
-          ag.state = "idle";
-          return;
-        }
-        const bx = ag.bedIdx % size, bz = (ag.bedIdx / size) | 0;
-        const bed = world.pieceAtTile(ag.bedIdx);
-        ag.x = bx + 0.5; ag.z = bz + 0.5;
-        ag.heading = bed ? [0, Math.PI / 2, Math.PI, -Math.PI / 2][bed.orient & 3] : 0;
-        ag.pose = POSE_LIE_BED;
-        ag.state = "sleeping";
-        // Lights out: bedding down during Sleep/Lockup hours queues lock-up.
-        const act = this.curActivity;
-        if ((act === REG.Sleep || act === REG.Lockup) && ag.cellRoom >= 0 &&
-            this.insideOwnCell(ag, world)) {
-          this.lockCell(ag, world);
-        }
+      case "toShelf": {
+        // Put the book back where it came from.
+        removeItem(ag.inv, Item.Book);
+        ag.state = "idle";
         return;
       }
-      case "toSit": {
-        const k = world.objKind[ag.interact];
-        if (k !== Obj.Bench2 && k !== Obj.Bench4 && k !== Obj.Bed) {
-          ag.state = "idle";
-          return;
-        }
-        ag.x = (ag.interact % size) + 0.5; ag.z = ((ag.interact / size) | 0) + 0.5;
-        ag.pose = POSE_SIT;
-        ag.state = "sitting";
+      case "toStash": {
+        this.doStash(ag);
+        ag.state = "idle";
+        return;
+      }
+      case "toRetrieve": {
+        this.doRetrieve(ag, ag.aux);
+        ag.state = "idle";
         return;
       }
       case "toOutside": {
@@ -1171,45 +1087,9 @@ export class Agents {
         this.startBreach(ag, world);
         return;
       }
-      case "toServe": {
-        this.tryTakeMeal(ag, world);
-        return;
-      }
-      case "toTable": {
-        // Set the tray down and eat (seated if there's a bench).
-        if (world.objKind[ag.interact] !== Obj.Table) {
-          ag.carrying = false;
-          ag.state = "eating"; // eat standing, tray in hand
-          ag.timer = EAT_TIME;
-          return;
-        }
-        this.mealTables.add(ag.interact);
-        this.mealsDirty = true;
-        ag.carrying = false;
-        const bench = this.adjacentBench(world, ag.interact, ag);
-        const face = () => {
-          ag.heading = Math.atan2(
-            (((ag.interact / size) | 0) + 0.5) - ag.z,
-            ((ag.interact % size) + 0.5) - ag.x,
-          );
-        };
-        if (bench >= 0 && this.isNextTo(ag, world, bench)) {
-          ag.x = (bench % size) + 0.5; ag.z = ((bench / size) | 0) + 0.5;
-          face();
-          ag.pose = POSE_SIT;
-        } else face();
-        // The tray sits on the table while he eats (a leftover if interrupted).
-        ag.state = "eating";
-        ag.timer = EAT_TIME;
-        return;
-      }
       case "toYard": {
         ag.state = "yardTime";
         ag.timer = 0;
-        return;
-      }
-      case "toShower": {
-        ag.state = "showering";
         return;
       }
       case "regimeToCell": {
@@ -1274,36 +1154,32 @@ export class Agents {
     return Math.abs(x - tx) + Math.abs(z - tz) <= 1;
   }
 
-  private adjacentBench(world: World, table: number, ag: Agent): number {
-    const size = world.size;
-    const tx = table % size, tz = (table / size) | 0;
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nx = tx + dx, nz = tz + dz;
-      if (!world.inBounds(nx, nz)) continue;
-      const i = nz * size + nx;
-      const k = world.objKind[i];
-      if ((k === Obj.Bench2 || k === Obj.Bench4) && (!ag.known || ag.known.has(i))) return i;
-    }
-    return -1;
-  }
-
   // --- Needs ----------------------------------------------------------------
 
   private decide(ag: Agent, world: World, isNight: boolean) {
     const n = ag.needs;
     const gathering = ag.plan?.stage === "prepare" &&
       (ag.plan.method === "cut" || ag.plan.method === "dig");
-    const cands: [NeedName, number][] = [
+
+    // Housekeeping first. A finished book goes back on the shelf, and anything
+    // incriminating in his hands goes under the bunk before a guard sees it.
+    if (hasItem(ag.inv, Item.Book) && n.recreation > 0.95 &&
+        this.returnBook(ag, world)) return;
+    if (this.tryStashTrip(ag, world)) return;
+
+    // Each need argues for itself with (how empty it is) x (how loud it is).
+    // The handful of needs whose urgency isn't linear get a nudge on top.
+    const cands: [NeedName, number][] = NEEDS.map((need) => {
+      let w = (1 - n[need]) * NEED_TUNING[need].weight;
       // Gathering contraband makes meals instrumental: eat well before hungry.
-      ["food", (1 - n.food) * 1.3 + (gathering ? 0.5 : 0)],
-      ["sleep", (1 - n.sleep) * (isNight ? 1.7 : 0.55)],
-      ["outdoors", (1 - n.outdoors) * 0.7],
-      ["comfort", (1 - n.comfort) * 0.6],
-      // Filth escalates: past a point the shower outranks comfort/outdoors.
-      ["hygiene", (1 - n.hygiene) * (n.hygiene < 0.1 ? 0.9 : 0.5)],
-      // Boredom is the quietest need — it loses every contest until it's deep.
-      ["recreation", (1 - n.recreation) * 0.55],
-    ];
+      if (need === "food" && gathering) w += 0.5;
+      // At night, sleep stops being optional.
+      if (need === "sleep" && isNight) w = (1 - n.sleep) * 1.7;
+      // Filth escalates: past a point the shower outranks comfort and air.
+      if (need === "hygiene" && n.hygiene < 0.1) w = (1 - n.hygiene) * 0.9;
+      return [need, w];
+    });
+
     cands.sort((a, b) => b[1] - a[1]);
     for (const [need, w] of cands) {
       if (w < 0.28) break;
@@ -1317,69 +1193,63 @@ export class Agents {
     const ax = Math.floor(ag.x), az = Math.floor(ag.z);
     switch (need) {
       case "food": {
-        let best = -1, bestScore = -Infinity;
-        for (const t of this.mem(ag, Obj.Table)) {
-          if (!this.mealTables.has(t) || world.objKind[t] !== Obj.Table) continue;
-          const d = Math.abs((t % size) - ax) + Math.abs(((t / size) | 0) - az);
-          const benchBonus = this.adjacentBench(world, t, ag) >= 0 ? 2.0 : 1.0;
-          const s = benchBonus / (1 + d);
-          if (s > bestScore) { bestScore = s; best = t; }
-        }
-        // Critical hunger overrides the access rules (not the walls) — but
-        // only when no lawful route exists; don't trespass gratuitously.
+        // Holding a tray already? Then all that is left is to find a table.
+        if (hasItem(ag.inv, Item.Tray)) return this.tryUse(ag, world, "food", [Obj.Table]);
+        // A table with a tray already on it is a free meal — take it.
+        if (this.tryUse(ag, world, "food", [Obj.Table])) return true;
+
+        // Otherwise queue at a serving counter. Hunger is shameless: past a
+        // point he will cut through staff territory to reach one.
         const trespass = ag.needs.food < 0.2;
-        if (best >= 0) {
-          const bench = this.adjacentBench(world, best, ag);
-          const target = bench >= 0 ? bench : best;
-          if (this.pathAdjacent(ag, world, target, this.lawfulOpen(ag, world)) ||
-              (trespass && this.pathAdjacent(ag, world, target, this.lawfulOpen(ag, world, true)))) {
-            ag.state = "toEat";
-            ag.interact = best;
-            return true;
-          }
-        }
-        // No leftovers: raid a remembered stocked serving table. Hunger is
-        // shameless — no stealth, no risk gate; guards can drag him off.
-        if (ag.needs.food >= 0.5) return false;
-        let bestS = -1, bd = Infinity;
-        for (const s of this.mem(ag, Obj.ServingTable)) {
-          if (world.objKind[s] !== Obj.ServingTable) continue;
-          if (world.roomTypeAt(s) !== RoomType.Canteen) continue;
-          if ((this.servingStock.get(s) ?? 0) <= 0) continue;
-          const d = Math.abs((s % size) - ax) + Math.abs(((s / size) | 0) - az);
-          if (d < bd) { bd = d; bestS = s; }
-        }
-        if (bestS < 0) {
-          // Starving and knows of no food anywhere: search for some, access
-          // rules be damned.
-          if (ag.needs.food < 0.15) { this.explore(ag, world, true); return true; }
-          return false;
-        }
-        if (this.isNextTo(ag, world, bestS)) {
-          ag.interact = bestS;
-          this.tryTakeMeal(ag, world);
+        const counter = this.nearestUsable(ag, world, [Obj.ServingTable]);
+        if (counter >= 0 && this.walkToUse(ag, world, counter, trespass)) {
+          ag.state = "toUse";
+          ag.interact = counter;
           return true;
         }
-        if (!this.pathAdjacent(ag, world, bestS, this.lawfulOpen(ag, world)) &&
-            !(trespass && this.pathAdjacent(ag, world, bestS, this.lawfulOpen(ag, world, true)))) return false;
-        ag.state = "toServe";
-        ag.interact = bestS;
-        return true;
-      }
-      case "sleep": {
-        if (ag.bedIdx >= 0 && world.objKind[ag.bedIdx] === Obj.Bed) {
-          if (this.pathAdjacent(ag, world, ag.bedIdx, this.lawfulOpen(ag, world))) {
-            ag.state = "toSleep";
+        // A counter he knows of, but it is empty or unmanned: wait beside it.
+        let known = -1, kd = Infinity;
+        for (const t of this.mem(ag, Obj.ServingTable)) {
+          if (world.objKind[t] !== Obj.ServingTable) continue;
+          const d = Math.abs((t % size) - ax) + Math.abs(((t / size) | 0) - az);
+          if (d < kd) { kd = d; known = t; }
+        }
+        if (known >= 0 && ag.needs.food < 0.6) {
+          if (this.isNextTo(ag, world, known)) {
+            ag.state = "queueing";
+            ag.interact = known;
+            ag.timer = 2;
+            return true;
+          }
+          if (this.pathAdjacent(ag, world, known, this.lawfulOpen(ag, world, trespass))) {
+            ag.state = "toQueue";
+            ag.interact = known;
             return true;
           }
         }
+        // Starving and knows of no food anywhere: go and look, rules be damned.
+        if (ag.needs.food < 0.15) { this.explore(ag, world, true); return true; }
+        return false;
+      }
+
+      case "sleep": {
+        // His own bunk, through the generic machinery — which lies him down at
+        // the middle of the bed instead of snapping him to the pillow end.
+        if (ag.bedIdx >= 0 && this.useable(ag, world, ag.bedIdx, Obj.Bed) &&
+            this.walkToUse(ag, world, ag.bedIdx)) {
+          ag.state = "toUse";
+          ag.interact = ag.bedIdx;
+          return true;
+        }
+        // Dead on his feet with nowhere to lie: the floor will do.
         if (ag.needs.sleep < 0.12) {
           ag.pose = POSE_LIE_FLOOR;
-          ag.state = "sleeping";
+          ag.state = "sleepFloor";
           return true;
         }
         return false;
       }
+
       case "outdoors": {
         const start = az * size + ax;
         const open = this.lawfulOpen(ag, world);
@@ -1395,51 +1265,139 @@ export class Agents {
         // No lawful way to fresh air: consider breaking the rules quietly.
         return this.trySneak(ag, world, "outdoors");
       }
-      case "comfort": {
-        let best = -1, bestScore = -Infinity;
-        for (const b of this.memOf(ag, [Obj.Bench2, Obj.Bench4])) {
-          if (world.objKind[b] !== Obj.Bench2 && world.objKind[b] !== Obj.Bench4) continue;
-          const d = Math.abs((b % size) - ax) + Math.abs(((b / size) | 0) - az);
-          const s = 1 / (1 + d);
-          if (s > bestScore) { bestScore = s; best = b; }
-        }
-        if (ag.bedIdx >= 0 && world.objKind[ag.bedIdx] === Obj.Bed) {
-          const d = Math.abs((ag.bedIdx % size) - ax) + Math.abs(((ag.bedIdx / size) | 0) - az);
-          const s = 0.9 / (1 + d);
-          if (s > bestScore) { bestScore = s; best = ag.bedIdx; }
-        }
-        // No bench and no bunk: an armchair or sofa will do just as well.
-        if (best < 0) return this.tryUse(ag, world, "comfort");
-        if (!this.pathAdjacent(ag, world, best, this.lawfulOpen(ag, world))) return false;
-        // Resting on the bunk edge beats standing around (and beats the
-        // lie-down/insta-wake loop a daytime "toSleep" would cause).
-        ag.state = "toSit";
-        ag.interact = best;
-        return true;
-      }
-      case "recreation":
-        return this.tryUse(ag, world, "recreation");
+
       case "hygiene": {
-        // A known shower head in a valid shower room.
-        let best = -1, bd = Infinity;
-        for (const s of this.mem(ag, Obj.Shower)) {
-          if (world.objKind[s] !== Obj.Shower) continue;
-          if (world.roomTypeAt(s) !== RoomType.ShowerRoom) continue;
-          const d = Math.abs((s % size) - ax) + Math.abs(((s / size) | 0) - az);
-          if (d < bd) { bd = d; best = s; }
-        }
-        if (best >= 0) {
-          const path = astar(size, az * size + ax, best,
-            (i) => this.lawfulOpen(ag, world)(i) || i === best);
-          if (path) {
-            ag.path = path; ag.pathI = 0;
-            ag.state = "toShower";
-            return true;
-          }
+        const shower = this.nearestUsableIn(ag, world, [Obj.Shower], RoomType.ShowerRoom);
+        if (shower >= 0 && this.walkToUse(ag, world, shower)) {
+          ag.state = "toUse";
+          ag.interact = shower;
+          return true;
         }
         // No lawful route to a shower: consider a quiet unauthorized one.
         return this.trySneak(ag, world, "hygiene");
       }
+
+      case "recreation": {
+        // With a book in hand, the job is to find somewhere to read it.
+        if (hasItem(ag.inv, Item.Book)) return this.startReading(ag, world);
+        // A television or a pool table needs no props.
+        if (this.tryUse(ag, world, "recreation")) return true;
+        // Otherwise borrow a book — that is what the shelves are for.
+        return this.tryUse(ag, world, "recreation", SHELF_KINDS);
+      }
+
+      // Comfort, exercise, bladder, spirituality: nothing bespoke about any of
+      // them — find a remembered object whose registry row fills it, and go.
+      default:
+        return this.tryUse(ag, world, need);
+    }
+  }
+
+  /** Nearest usable object of these kinds that also sits in the right room. */
+  private nearestUsableIn(
+    ag: Agent, world: World, kinds: number[], roomType: number,
+  ): number {
+    const size = world.size;
+    const ax = Math.floor(ag.x), az = Math.floor(ag.z);
+    let best = -1, bd = Infinity;
+    for (const kind of kinds) {
+      for (const anchor of this.mem(ag, kind)) {
+        if (!this.useable(ag, world, anchor, kind)) continue;
+        if (world.roomTypeAt(anchor) !== roomType) continue;
+        const d = Math.abs((anchor % size) - ax) + Math.abs(((anchor / size) | 0) - az);
+        if (d < bd) { bd = d; best = anchor; }
+      }
+    }
+    return best;
+  }
+
+  // --- Books ------------------------------------------------------------------
+
+  /** He has a book. Settle somewhere to read it — a chair if he knows of one,
+   *  his bunk if not, and failing both, right where he stands. */
+  private startReading(ag: Agent, world: World): boolean {
+    if (this.tryUse(ag, world, "comfort")) return true; // read it in the armchair
+    if (ag.bedIdx >= 0 && this.useable(ag, world, ag.bedIdx, Obj.Bed) &&
+        this.walkToUse(ag, world, ag.bedIdx)) {
+      ag.state = "toUse";
+      ag.interact = ag.bedIdx;
+      return true;
+    }
+    ag.pose = POSE_STAND;
+    ag.timer = READ_TIME;
+    ag.state = "reading";
+    return true;
+  }
+
+  /** Done with it: put it back on a shelf, or slide it under the bunk. */
+  private returnBook(ag: Agent, world: World): boolean {
+    const shelf = this.nearestUsable(ag, world, SHELF_KINDS);
+    if (shelf >= 0 && this.pathAdjacent(ag, world, shelf, this.lawfulOpen(ag, world))) {
+      ag.state = "toShelf";
+      ag.interact = shelf;
+      return true;
+    }
+    if (ag.bedIdx >= 0 && this.pathAdjacent(ag, world, ag.bedIdx, this.lawfulOpen(ag, world))) {
+      ag.state = "toStash";
+      ag.interact = ag.bedIdx;
+      return true;
+    }
+    return false;
+  }
+
+  // --- Stashing ---------------------------------------------------------------
+
+  /** Contraband in your HANDS is contraband a guard can see. Once the pockets
+   *  are full, the only place left to put it is under the bunk. */
+  private needsToStash(ag: Agent): boolean {
+    return ag.inv.hands.some((s) => itemDef(s.kind)?.contraband);
+  }
+
+  private tryStashTrip(ag: Agent, world: World): boolean {
+    if (ag.bedIdx < 0 || !this.needsToStash(ag)) return false;
+    if (!this.pathAdjacent(ag, world, ag.bedIdx, this.lawfulOpen(ag, world))) return false;
+    ag.state = "toStash";
+    ag.interact = ag.bedIdx;
+    return true;
+  }
+
+  /** At the bunk: push whatever is showing in his hands out of sight. */
+  private doStash(ag: Agent) {
+    if (ag.bedIdx < 0) return;
+    const items = this.stashOf(ag.bedIdx);
+    for (const held of [...ag.inv.hands]) {
+      const d = itemDef(held.kind);
+      if (!d) continue;
+      if (!d.contraband && held.kind !== Item.Book) continue;
+      for (let n = held.count; n > 0; n--) {
+        // A pocket is better than the floorboards; the bunk is the fallback.
+        if (d.contraband && canPocket(ag.inv, held.kind)) {
+          removeFromHands(ag.inv, held.kind);
+          pocket(ag.inv, held.kind);
+        } else if (stashAdd(items, held.kind)) {
+          removeFromHands(ag.inv, held.kind);
+        } else break;
+      }
+    }
+  }
+
+  /** Fetch the tools he hid, because a plan needs them on his person. */
+  private tryRetrieveTools(ag: Agent, world: World, kind: number): boolean {
+    if (ag.bedIdx < 0) return false;
+    if (stashCount(this.stashOf(ag.bedIdx), kind) <= 0) return false;
+    if (!this.pathAdjacent(ag, world, ag.bedIdx, this.lawfulOpen(ag, world))) return false;
+    ag.state = "toRetrieve";
+    ag.interact = ag.bedIdx;
+    ag.aux = kind;
+    return true;
+  }
+
+  private doRetrieve(ag: Agent, kind: number) {
+    if (ag.bedIdx < 0) return;
+    const items = this.stashOf(ag.bedIdx);
+    while (stashCount(items, kind) > 0) {
+      if (pocket(ag.inv, kind) || takeInHands(ag.inv, kind)) { stashTake(items, kind); continue; }
+      break; // he cannot carry any more
     }
   }
 
@@ -1464,49 +1422,113 @@ export class Agents {
     ag.useIdx = -1;
   }
 
-  /** Is this remembered anchor still a usable object with room for one more? */
-  private useable(world: World, anchor: number, kind: number): boolean {
+  /** Is this remembered anchor still a usable object with room for one more —
+   *  and does this particular agent qualify to use it right now? */
+  private useable(ag: Agent, world: World, anchor: number, kind: number): boolean {
     if (world.objKind[anchor] !== kind) return false;
     const use = defOf(kind)?.use;
     if (!use) return false;
-    return this.useCount(anchor) < use.capacity;
+    if (this.useCount(anchor) >= use.capacity) return false;
+    // Your bunk is yours.
+    if (use.owned && ag.bedIdx !== anchor) return false;
+    // You can't eat at a table without a tray — unless someone left one there.
+    if (use.requires !== undefined && !hasItem(ag.inv, use.requires)) {
+      if (!(kind === Obj.Table && this.mealTables.has(anchor))) return false;
+    }
+    // You can't take what it hands out if you've no hand free for it.
+    if (use.gives !== undefined) {
+      const d = itemDef(use.gives)!;
+      const room = d.perSlot > 0 ? canPocket(ag.inv, use.gives) || canHold(ag.inv, use.gives)
+        : canHold(ag.inv, use.gives);
+      if (!room) return false;
+    }
+    // A serving counter with nothing on it serves nobody; and at meal times a
+    // cook has to be manning it (off-schedule, a starving man just helps himself).
+    if (kind === Obj.ServingTable) {
+      if ((this.servingStock.get(anchor) ?? 0) <= 0) return false;
+      const mustBeServed = this.curActivity === REG.Eating && ag.needs.food >= 0.15;
+      if (mustBeServed && !this.servers.has(anchor)) return false;
+    }
+    return true;
+  }
+
+  /** A tile a sitter can actually sit on (a bench beside the dining table). */
+  private isSeatTile(world: World, i: number): boolean {
+    const use = defOf(world.objKind[i])?.use;
+    return !!use && use.from === "on" && use.pose === POSE_SIT;
+  }
+
+  /** Where an agent stands to use an object: on it, or on a tile beside it —
+   *  preferring a seat, which is how diners end up on the bench by the table. */
+  private walkToUse(ag: Agent, world: World, anchor: number, trespass = false): boolean {
+    const size = world.size;
+    const use = defOf(world.objKind[anchor])!.use!;
+    const open = this.lawfulOpen(ag, world, trespass);
+
+    if (use.from === "on") {
+      // A bed, an armchair and a bench are all things you stand next to and
+      // then get onto — they are not walkable, so pathing *through* them fails.
+      // Walk to a tile beside it; startUse settles him onto the object itself.
+      return this.pathAdjacent(ag, world, anchor, open);
+    }
+    // Adjacent. A bench beside the table is the obvious place to eat, but a
+    // bench is furniture, not floor — he walks to a tile beside the BENCH and
+    // then sits down on it (startUse does the sitting).
+    ag.seatIdx = -1;
+    for (const [dx, dz] of DIRS) {
+      const nx = (anchor % size) + dx, nz = ((anchor / size) | 0) + dz;
+      if (!world.inBounds(nx, nz)) continue;
+      const seat = nz * size + nx;
+      if (!this.isSeatTile(world, seat)) continue;
+      if (this.pathAdjacent(ag, world, seat, open)) {
+        ag.seatIdx = seat;
+        return true;
+      }
+    }
+    // No seat: stand at it.
+    return this.pathAdjacent(ag, world, anchor, open);
+  }
+
+  /** The tile at the middle of a piece's footprint (a 2-tile bed's middle is
+   *  between its tiles, so the far tile is the honest choice for lying on). */
+  private useCenterTile(world: World, anchor: number): number {
+    const p = world.pieceAtTile(anchor);
+    if (!p) return anchor;
+    const tiles = world.pieceTiles(p);
+    return tiles[Math.floor(tiles.length / 2)] ?? anchor;
   }
 
   /** Walk to the nearest remembered object that fills `need`. */
-  private tryUse(ag: Agent, world: World, need: NeedName): boolean {
+  private tryUse(ag: Agent, world: World, need: NeedName, kinds = kindsServing(need)): boolean {
+    const anchor = this.nearestUsable(ag, world, kinds);
+    if (anchor < 0) return false;
+    if (!this.walkToUse(ag, world, anchor)) return false;
+    ag.state = "toUse";
+    ag.interact = anchor;
+    return true;
+  }
+
+  /** The closest remembered object of any of these kinds that he could use. */
+  private nearestUsable(ag: Agent, world: World, kinds: number[]): number {
     const size = world.size;
     const ax = Math.floor(ag.x), az = Math.floor(ag.z);
-    const kinds = kindsServing(need);
     let best = -1, bd = Infinity;
     for (const kind of kinds) {
       for (const anchor of this.mem(ag, kind)) {
-        if (!this.useable(world, anchor, kind)) continue;
+        if (!this.useable(ag, world, anchor, kind)) continue;
         const d = Math.abs((anchor % size) - ax) + Math.abs(((anchor / size) | 0) - az);
         if (d < bd) { bd = d; best = anchor; }
       }
     }
-    if (best < 0) return false;
-
-    const use = defOf(world.objKind[best])!.use!;
-    const open = this.lawfulOpen(ag, world);
-    if (use.from === "on") {
-      // Stand on the object itself (a sofa, a mat).
-      const path = astar(size, az * size + ax, best, (i) => open(i) || i === best);
-      if (!path) return false;
-      ag.path = path; ag.pathI = 0;
-    } else if (!this.pathAdjacent(ag, world, best, open)) return false;
-
-    ag.state = "toUse";
-    ag.interact = best;
-    return true;
+    return best;
   }
 
-  /** Arrived at a use-slot object: claim it and settle in. */
+  /** Arrived at a use-slot object: claim it, take/consume items, settle in. */
   private startUse(ag: Agent, world: World) {
     const anchor = ag.interact;
     const kind = world.objKind[anchor];
     const use = defOf(kind)?.use;
-    if (!use || !this.useable(world, anchor, kind)) { ag.state = "idle"; return; }
+    if (!use || !this.useable(ag, world, anchor, kind)) { ag.state = "idle"; return; }
 
     let set = this.useClaims.get(anchor);
     if (!set) this.useClaims.set(anchor, set = new Set());
@@ -1515,42 +1537,163 @@ export class Agents {
 
     const size = world.size;
     if (use.from === "on") {
-      ag.x = (anchor % size) + 0.5;
-      ag.z = ((anchor / size) | 0) + 0.5;
+      const tile = use.center ? this.useCenterTile(world, anchor) : anchor;
+      ag.x = (tile % size) + 0.5;
+      ag.z = ((tile / size) | 0) + 0.5;
+      // Lie along the bed, not across it.
+      const p = world.pieceAtTile(anchor);
+      ag.heading = use.center && p
+        ? [0, Math.PI / 2, Math.PI, -Math.PI / 2][p.orient & 3]
+        : ag.heading;
+    } else {
+      // Sit down on the bench he walked over to, if he lined one up.
+      if (ag.seatIdx >= 0 && this.isSeatTile(world, ag.seatIdx) &&
+          this.isNextTo(ag, world, ag.seatIdx)) {
+        ag.x = (ag.seatIdx % size) + 0.5;
+        ag.z = ((ag.seatIdx / size) | 0) + 0.5;
+      }
+      ag.heading = Math.atan2(
+        (((anchor / size) | 0) + 0.5) - ag.z,
+        ((anchor % size) + 0.5) - ag.x,
+      );
     }
-    // Face what you're using.
-    ag.heading = Math.atan2(
-      (((anchor / size) | 0) + 0.5) - ag.z,
-      ((anchor % size) + 0.5) - ag.x,
-    );
-    ag.pose = use.pose;
-    ag.timer = use.seconds;
+    ag.seatIdx = -1;
+
+    // Sitting only works if there's something under you. A man eating at a
+    // table with no bench eats standing, tray in hand.
+    const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
+    ag.pose = (use.pose === POSE_SIT && use.from === "adjacent" && !this.isSeatTile(world, here))
+      ? POSE_STAND : use.pose;
+
+    // Set the tray down on the table before eating it (a leftover if he's
+    // interrupted — which is exactly how leftovers happen today).
+    if (use.requires !== undefined && hasItem(ag.inv, use.requires)) {
+      if (use.consumes !== undefined) {
+        removeItem(ag.inv, use.consumes);
+        if (kind === Obj.Table) { this.mealTables.add(anchor); this.mealsDirty = true; }
+      }
+    }
+    // Take what it hands out.
+    if (use.gives !== undefined) {
+      stow(ag.inv, use.gives);
+      if (kind === Obj.ServingTable) {
+        this.servingStock.set(anchor, (this.servingStock.get(anchor) ?? 1) - 1);
+        this.mealsDirty = true;
+      }
+    }
+
+    // Bedding down during lock-up hours calls for the doors to be shut.
+    if (kind === Obj.Bed && (this.curActivity === REG.Sleep || this.curActivity === REG.Lockup) &&
+        ag.cellRoom >= 0 && this.insideOwnCell(ag, world)) {
+      this.lockCell(ag, world);
+    }
+
+    // A man with a book stays in the chair long enough to actually read it.
+    const base = use.seconds > 0 ? use.seconds : Infinity;
+    ag.timer = hasItem(ag.inv, Item.Book) ? Math.max(base, READ_TIME) : base;
     ag.state = "using";
   }
 
   /** Drain the object's needs into the agent; stop when full, bored, or the
    *  object is gone (a player can erase a bookshelf out from under a reader). */
-  private updateUsing(ag: Agent, dt: number, world: World) {
+  private updateUsing(ag: Agent, dt: number, world: World, isNight: boolean) {
     ag.amp = Math.max(0, ag.amp - dt * 8);
-    const kind = world.objKind[ag.useIdx];
-    const use = ag.useIdx >= 0 ? defOf(kind)?.use : undefined;
+    const kind = ag.useIdx >= 0 ? world.objKind[ag.useIdx] : Obj.None;
+    const use = defOf(kind)?.use;
     if (!use) { this.finishUse(ag, world); return; }
 
+    // Doing this without permission? Bail the moment a uniform appears.
+    if (ag.sneaking) {
+      ag.decideT -= dt;
+      if (ag.decideT <= 0) {
+        ag.decideT = 0.5;
+        if (this.guardInSight(ag, world)) {
+          ag.risk = Math.min(1, ag.risk + 0.15); // a close call, remembered
+          ag.sneaking = false;
+          this.finishUse(ag, world);
+          return;
+        }
+      }
+    }
+
+    // A well-furnished room restores people faster — this is the whole payoff
+    // of the cosmetic objects, and the reason ambience is a number.
+    const mul = world.ambienceMul(world.idx(Math.floor(ag.x), Math.floor(ag.z)));
     let full = true;
     for (const [need, rate] of Object.entries(use.needs) as [NeedName, number][]) {
-      ag.needs[need] = Math.min(1, ag.needs[need] + rate * dt);
+      ag.needs[need] = Math.min(1, ag.needs[need] + rate * mul * dt);
       if (ag.needs[need] < 1) full = false;
     }
+    // A book read in a comfortable chair fills the time on top of whatever the
+    // chair itself was doing for him — and he stays in the chair until he has
+    // finished it, not merely until he is comfortable.
+    if (hasItem(ag.inv, Item.Book)) {
+      ag.needs.recreation = Math.min(1, ag.needs.recreation + BOOK_READ_RATE * mul * dt);
+      if (ag.needs.recreation < 1) full = false;
+    }
+
     ag.timer -= dt;
+    // A man wakes when he's slept enough — earlier if it's daylight.
+    if (kind === Obj.Bed && !isNight && ag.needs.sleep > 0.75) { this.finishUse(ag, world); return; }
     if (full || ag.timer <= 0) this.finishUse(ag, world);
   }
 
   private finishUse(ag: Agent, world: World) {
-    const on = defOf(world.objKind[ag.useIdx])?.use?.from === "on";
+    const kind = ag.useIdx >= 0 ? world.objKind[ag.useIdx] : Obj.None;
+    const use = defOf(kind)?.use;
+    // The meal is finished, so the tray goes.
+    if (kind === Obj.Table && this.mealTables.delete(ag.useIdx)) this.mealsDirty = true;
+    // Eating is also how a man squirrels away a spoon or works a cutter loose.
+    if (kind === Obj.Table) this.mealContraband(ag);
+
+    const on = use?.from === "on";
     this.releaseUse(ag);
     ag.pose = POSE_STAND;
+    ag.sneaking = false;
     ag.state = "idle";
     if (on) this.stepOff(ag, world);
+  }
+
+  /** Meals feed the escape kit: a tucked-away spoon, or progress on a cutter. */
+  private mealContraband(ag: Agent) {
+    if (ag.plan?.method === "cut") {
+      ag.cutterMeals++;
+      if (ag.cutterMeals >= MEALS_PER_CUTTER) {
+        ag.cutterMeals = 0;
+        this.acquire(ag, Item.Cutter);
+      }
+    } else if (ag.plan?.method === "dig") {
+      this.acquire(ag, Item.Spoon);
+    }
+  }
+
+  /** Take an item: into a pocket if it fits, else into a hand. If neither, it
+   *  goes straight under the bunk (he can't very well stand there holding it). */
+  private acquire(ag: Agent, kind: number): boolean {
+    if (stow(ag.inv, kind)) return true;
+    return this.stashUnderBed(ag, kind);
+  }
+
+  /** What a prisoner has hidden under a given bunk (read-only, for the HUD). */
+  stashOfBed(bed: number): Stack[] {
+    return (bed >= 0 && this.stashes.get(bed)) || [];
+  }
+
+  private stashOf(bed: number): Stack[] {
+    let s = this.stashes.get(bed);
+    if (!s) this.stashes.set(bed, s = []);
+    return s;
+  }
+
+  private stashUnderBed(ag: Agent, kind: number): boolean {
+    if (ag.bedIdx < 0) return false;
+    return stashAdd(this.stashOf(ag.bedIdx), kind);
+  }
+
+  /** Everything he owns of a kind — on him and hidden under his bunk. */
+  private toolCount(ag: Agent, kind: number): number {
+    const hidden = ag.bedIdx >= 0 ? stashCount(this.stashOf(ag.bedIdx), kind) : 0;
+    return countItem(ag.inv, kind) + hidden;
   }
 
   // --- Rule-breaking need trips ----------------------------------------------
@@ -1848,9 +1991,15 @@ export class Agents {
     if (plan.stage === "prepare") {
       const ready =
         plan.method === "climb" ||
-        (plan.method === "cut" && ag.cutters >= plan.needed) ||
-        (plan.method === "dig" && ag.spoons >= 4);
+        (plan.method === "cut" && this.toolCount(ag, Item.Cutter) >= plan.needed) ||
+        (plan.method === "dig" && this.toolCount(ag, Item.Spoon) >= SPOONS_TO_DIG);
       if (!ready || ag.escapeDesire < threshold * 0.7) return false; // keep living (and eating)
+      // The kit is his, but half of it may be under the bunk. Go and get it.
+      const tool = plan.method === "cut" ? Item.Cutter : Item.Spoon;
+      if (plan.method !== "climb" && countItem(ag.inv, tool) <= 0 &&
+          this.tryRetrieveTools(ag, world, tool)) {
+        return true;
+      }
       plan.stage = "execute";
       plan.watchdog = 120;
     }
@@ -1913,7 +2062,14 @@ export class Agents {
       ag.state = "climbing";
       ag.timer = CLIMB_TIME;
     } else {
-      if (ag.cutters <= 0) { plan.stage = "prepare"; ag.state = "idle"; return; }
+      if (countItem(ag.inv, Item.Cutter) <= 0) {
+        // He left them under the bunk. Go back for them.
+        if (!this.tryRetrieveTools(ag, world, Item.Cutter)) {
+          plan.stage = "prepare";
+          ag.state = "idle";
+        }
+        return;
+      }
       ag.state = "cutting";
       ag.timer = CUT_TIME;
       ag.interact = b;
@@ -1947,7 +2103,7 @@ export class Agents {
       world.cutFenceAt(b);
       this.cutFences.add(b);
       this.worldDirty = true;
-      ag.cutters--;
+      removeItem(ag.inv, Item.Cutter); // a set of cutters is spent on a fence
       if (ag.known) this.record(ag, world, b);
     }
     ag.state = "idle";
@@ -1988,8 +2144,8 @@ export class Agents {
       ag.plan.method = old.method; // committed to the method (and its tools)
       const ready =
         old.method === "climb" ||
-        (old.method === "cut" && ag.cutters >= ag.plan.needed) ||
-        (old.method === "dig" && ag.spoons >= 4);
+        (old.method === "cut" && this.toolCount(ag, Item.Cutter) >= ag.plan.needed) ||
+        (old.method === "dig" && this.toolCount(ag, Item.Spoon) >= SPOONS_TO_DIG);
       if (ready && old.method !== "dig") {
         ag.plan.stage = "execute";
         ag.decideT = 0;
@@ -2107,7 +2263,7 @@ export class Agents {
         return;
       }
       case "digging": {
-        if (ag.spoons <= 0) {
+        if (countItem(ag.inv, Item.Spoon) <= 0) {
           ag.state = "crawlingBack";
           ag.timer = t.believed / CRAWL_SPEED;
           return;
@@ -2115,7 +2271,7 @@ export class Agents {
         ag.timer -= dt;
         if (ag.timer > 0) return;
         ag.timer = DIG_TILE_TIME;
-        ag.spoons--;
+        removeItem(ag.inv, Item.Spoon); // a spoon wears out per tile of tunnel
         t.believed += 1;
         // Actual digging drifts: heading error accumulates as a random walk.
         t.drift += (Math.random() - 0.5) * 2 * TUNNEL_DRIFT;
@@ -2161,10 +2317,11 @@ export class Agents {
   // --- Capture -------------------------------------------------------------------
 
   private capture(guard: Agent, prisoner: Agent, world: World) {
-    prisoner.cutters = 0;
-    prisoner.spoons = 0;
+    // He is searched on the spot: everything in his hands and pockets is taken.
+    // The stash under his bunk is not — nobody has looked there.
+    seizeContraband(prisoner.inv);
+    clearInventory(prisoner.inv); // the tray and the book go too
     prisoner.cutterMeals = 0;
-    prisoner.carrying = false;
     prisoner.plan = null;
     prisoner.fear = 1;
     prisoner.risk = Math.min(1, prisoner.risk + 0.5); // caught red-handed
@@ -2314,8 +2471,9 @@ export class Agents {
 
     if (ag.state === "chasing") {
       const target = this.agents.find((a) => a.id === ag.chaseId);
+      // Worth chasing: caught in the act, or lying where a sniper put him.
       const bad = target && !target.underground &&
-        (target.state === "climbing" || target.state === "cutting" || target.state === "fleeing");
+        (this.isEscaping(target) || target.state === "knockedOut");
       if (!target || !bad) { ag.chaseId = -1; ag.state = "patrol"; ag.path = null; }
       else {
         if (Math.hypot(target.x - ag.x, target.z - ag.z) < 1.4) {
@@ -2355,6 +2513,22 @@ export class Agents {
     if (ag.decideT <= 0) {
       ag.decideT = 0.4;
 
+      // A man face-down in the yard is the most urgent thing in the prison:
+      // he is a confirmed escaper, and he will get up again shortly.
+      for (const p of this.agents) {
+        if (p.kind !== Obj.Prisoner || p.state !== "knockedOut") continue;
+        if (p.escortedBy >= 0) continue;
+        if (this.agents.some((g) => g.kind === Obj.Guard && g.chaseId === p.id && g.id !== ag.id)) {
+          continue; // someone else is already on their way
+        }
+        const ti = Math.floor(p.z) * size + Math.floor(p.x);
+        if (!this.pathAdjacent(ag, world, ti, (i) => passable(world, i, true))) continue;
+        ag.chaseId = p.id;
+        ag.state = "chasing";
+        ag.aux = 0;
+        return;
+      }
+
       // Prisoners in the act. Climbing/cutting is noisy: heard all around.
       for (const p of this.agents) {
         if (p.kind !== Obj.Prisoner || p.underground) continue;
@@ -2381,9 +2555,9 @@ export class Agents {
         // Ditto a visibly filthy man off to a shower he's allowed to reach —
         // purposeful defiance is tolerated (trespassing still isn't).
         const excused = p.needs.hygiene < 0.1 &&
-          (p.state === "toShower" || p.state === "showering");
+          this.usingKind(world, p) === Obj.Shower;
         const defying = this.curActivity !== REG.Free && !p.compliant &&
-          !this.actingInRegime(this.curActivity, p) && !excused;
+          !this.actingInRegime(this.curActivity, p, world) && !excused;
         if (!outOfLine && !defying) continue;
         if (!this.canSee(ag, world, p.x, p.z)) continue;
         // A starving man gets marched to the canteen, not back to his cell —
@@ -2499,19 +2673,33 @@ export class Agents {
     }
   }
 
-  /** Is this prisoner's current state already serving the given activity? */
-  private actingInRegime(act: number, p: Agent): boolean {
+  /** Is this prisoner's current state already serving the given activity?
+   *
+   *  Since needs run through one generic "toUse"/"using" pair, a state name no
+   *  longer says WHAT he is doing — so ask what he is walking to or using. */
+  private usingKind(world: World, p: Agent): number {
+    if (p.state === "using" && p.useIdx >= 0) return world.objKind[p.useIdx];
+    if ((p.state === "toUse" || p.state === "toQueue") && p.interact >= 0) {
+      return world.objKind[p.interact];
+    }
+    return Obj.None;
+  }
+
+  private actingInRegime(act: number, p: Agent, world: World): boolean {
     const s = p.state;
+    const k = this.usingKind(world, p);
     switch (act) {
       case REG.Sleep:
       case REG.Lockup:
-        return s === "toSleep" || s === "sleeping" || s === "inCell" || s === "regimeToCell";
+        return k === Obj.Bed || s === "sleepFloor" || s === "inCell" || s === "regimeToCell";
       case REG.Eating:
-        return s === "toServe" || s === "queueing" || s === "toTable" || s === "eating" || s === "toEat";
+        // Eating, queueing for a tray, or already walking one to a table.
+        return k === Obj.Table || k === Obj.ServingTable || s === "queueing" ||
+          hasItem(p.inv, Item.Tray);
       case REG.Yard:
         return s === "toYard" || s === "yardTime";
       case REG.Shower:
-        return s === "toShower" || s === "showering" || s === "inCell" || s === "regimeToCell";
+        return k === Obj.Shower || s === "inCell" || s === "regimeToCell";
     }
     return false;
   }
@@ -2570,17 +2758,205 @@ export class Agents {
     return best;
   }
 
+  /** Where a free guard wanders when he has nothing better to do.
+   *
+   *  Guards used to patrol the perimeter almost exclusively, which left the
+   *  prison itself unwatched — all the walls and fences are on the OUTSIDE, so
+   *  a wall-biased patrol is a patrol of the empty edges. So: mostly go where
+   *  the prisoners are, and let the sniper towers watch the fence line. */
   private pickPatrolTarget(ag: Agent, world: World) {
-    // Bias patrols along the fence line; otherwise any built spot.
+    const open = (i: number) =>
+      passable(world, i, true) && world.accessAt(i) !== Access.Forbidden;
+
+    // Head for a crowd. Each prisoner is a vote for his own patch of floor, so
+    // the busiest rooms draw the most guards without any density map.
+    //
+    // The bias has to be strong. A perimeter leg is enormously longer than an
+    // interior one, so even a modest chance of picking the fence would eat most
+    // of a guard's day walking to and from it — which is exactly the problem the
+    // sniper towers exist to solve.
+    const crowd = this.agents.filter((a) => a.kind === Obj.Prisoner && !a.underground);
+    if (crowd.length > 0) {
+      // Weight by how unwatched each man is: the further from any guard, the
+      // more he needs one. This spreads guards out instead of clumping them.
+      let best: Agent | null = null, bestScore = -Infinity;
+      for (let n = 0; n < Math.min(8, crowd.length); n++) {
+        const p = crowd[(Math.random() * crowd.length) | 0];
+        let nearest = Infinity;
+        for (const g of this.agents) {
+          if (g.kind !== Obj.Guard || g.id === ag.id) continue;
+          nearest = Math.min(nearest, Math.abs(g.x - p.x) + Math.abs(g.z - p.z));
+        }
+        const mine = Math.abs(ag.x - p.x) + Math.abs(ag.z - p.z);
+        const score = Math.min(nearest, 60) - mine * 0.35 + Math.random() * 6;
+        if (score > bestScore) { bestScore = score; best = p; }
+      }
+      if (best) {
+        const ti = world.idx(Math.floor(best.x), Math.floor(best.z));
+        if (this.pathAdjacent(ag, world, ti, open)) return;
+      }
+    }
+
+    // Nobody to watch (or nobody he can reach): fall back to walking the line.
+    // This is now the exception, not the rule — the towers watch the wire.
+    //
+    // Even then, pick a stretch of fence NEAR him: a random tile of a 200-tile
+    // perimeter would send him on a march right across the map.
     const fences = world.tilesOfKind(Obj.Fence);
     const walls = world.tilesOfKind(Obj.Wall);
-    const pool = Math.random() < 0.65 && fences.length > 0 ? fences
-      : walls.length > 0 ? walls : fences;
+    const pool = fences.length > 0 ? fences : walls;
     if (pool.length === 0) return;
-    const target = pool[(Math.random() * pool.length) | 0];
-    // Off-duty movement respects Forbidden zones (chases/tasks don't).
-    this.pathAdjacent(ag, world, target,
-      (i) => passable(world, i, true) && world.accessAt(i) !== Access.Forbidden);
+    let best = -1, bd = Infinity;
+    for (let n = 0; n < Math.min(24, pool.length); n++) {
+      const t = pool[(Math.random() * pool.length) | 0];
+      const d = Math.abs((t % world.size) - ag.x) + Math.abs(((t / world.size) | 0) - ag.z) +
+        Math.random() * 10;
+      if (d < bd) { bd = d; best = t; }
+    }
+    if (best >= 0) this.pathAdjacent(ag, world, best, open);
+  }
+
+  // --- Sniper ------------------------------------------------------------------
+  //
+  // A tower is a post that hires itself: build one and a sniper turns up. He
+  // never leaves it. He sees a long way and he shoots escapers — with a
+  // non-lethal round, so a hit is a man face-down in the dirt, not a corpse.
+  //
+  // The point of him is to free the foot guards from the fence line, which is
+  // where they used to spend nearly all their time.
+
+  /** Post a sniper to every tower that hasn't got one, and retire the rest. */
+  private manTowers(world: World) {
+    const towers = world.piecesOfKind(Obj.SniperTower);
+    const manned = new Set<number>();
+    for (let n = this.agents.length - 1; n >= 0; n--) {
+      const ag = this.agents[n];
+      if (ag.kind !== Obj.Sniper) continue;
+      // His tower was demolished under him.
+      if (!towers.some((t) => world.idx(t.x, t.z) === ag.postIdx)) {
+        this.removeAgent(ag);
+        continue;
+      }
+      manned.add(ag.postIdx);
+    }
+    for (const t of towers) {
+      const anchor = world.idx(t.x, t.z);
+      if (manned.has(anchor)) continue;
+      // Stand him at the middle of the platform, up top.
+      const tiles = world.pieceTiles(t);
+      let sx = 0, sz = 0;
+      for (const i of tiles) { sx += i % world.size; sz += (i / world.size) | 0; }
+      this.agents.push({
+        ...this.blankAgent(Obj.Sniper),
+        id: this.nextId++,
+        x: sx / tiles.length + 0.5, z: sz / tiles.length + 0.5,
+        elev: TOWER_HEIGHT,
+        postIdx: anchor,
+        state: "scanning",
+      });
+    }
+  }
+
+  /** Is this man visibly in the middle of getting out? */
+  private isEscaping(p: Agent): boolean {
+    if (p.kind !== Obj.Prisoner || p.underground) return false;
+    if (p.state === "climbing" || p.state === "cutting" || p.state === "fleeing") return true;
+    return p.plan?.stage === "flee";
+  }
+
+  private updateSniper(ag: Agent, dt: number, world: World) {
+    ag.amp = 0;
+    ag.pose = POSE_STAND;
+    ag.timer -= dt;
+
+    // Lining one up already?
+    if (ag.state === "aiming") {
+      const target = this.agents.find((a) => a.id === ag.chaseId);
+      if (!target || !this.isEscaping(target) || !this.canSee(ag, world, target.x, target.z)) {
+        ag.chaseId = -1;
+        ag.state = "scanning";
+        return;
+      }
+      ag.heading = Math.atan2(target.z - ag.z, target.x - ag.x);
+      if (ag.timer <= 0) {
+        this.knockOut(target, world);
+        ag.chaseId = -1;
+        ag.state = "scanning";
+        ag.timer = SNIPER_RELOAD;
+      }
+      return;
+    }
+
+    // Sweep the field of fire.
+    ag.heading += dt * 0.35;
+    if (ag.timer > 0) return; // reloading
+
+    ag.decideT -= dt;
+    if (ag.decideT > 0) return;
+    ag.decideT = 0.25;
+
+    let best: Agent | null = null, bd = Infinity;
+    for (const p of this.agents) {
+      if (!this.isEscaping(p)) continue;
+      // A tower has line of sight over the whole yard, so no facing cone —
+      // he is looking for exactly this and nothing else.
+      if (!this.canSee(ag, world, p.x, p.z, SNIPER_RANGE)) continue;
+      const d = Math.hypot(p.x - ag.x, p.z - ag.z);
+      if (d < bd) { bd = d; best = p; }
+    }
+    if (!best) return;
+    ag.chaseId = best.id;
+    ag.state = "aiming";
+    ag.timer = SNIPER_AIM;
+    // Every guard who can be spared converges on the shot.
+    this.raiseAlarm(best, world);
+  }
+
+  /** A non-lethal round: he goes down, his kit is scattered, the escape is off.
+   *  He comes round in KO_TIME — sooner if a guard collects him first. */
+  private knockOut(p: Agent, world: World) {
+    if (p.state === "knockedOut") return;
+    seizeContraband(p.inv);
+    clearInventory(p.inv);
+    this.releaseUse(p);
+    if (p.tunnel) p.tunnel.occupied = false;
+    p.plan = null;
+    p.path = null;
+    p.underground = false;
+    p.sneaking = false;
+    p.fear = 1;
+    p.risk = Math.min(1, p.risk + 0.6);
+    p.timesCaught++;
+    p.pose = POSE_LIE_FLOOR;
+    p.amp = 0;
+    p.state = "knockedOut";
+    p.timer = KO_TIME;
+    p.escortedBy = -1;
+    this.caughtCount++;
+    this.worldDirty = true;
+    void world;
+  }
+
+  /** An escape in progress outranks every patrol and every posting: the nearest
+   *  few guards drop what they are doing and run at it. */
+  private raiseAlarm(runner: Agent, world: World) {
+    const RESPONDERS = 3;
+    const free = this.agents
+      .filter((a) => a.kind === Obj.Guard && a.state !== "escorting" &&
+        a.state !== "intakeEscort" && a.state !== "regimeEscort" && a.chaseId !== runner.id)
+      .sort((a, b) =>
+        (Math.hypot(a.x - runner.x, a.z - runner.z)) -
+        (Math.hypot(b.x - runner.x, b.z - runner.z)));
+    let sent = 0;
+    for (const g of free) {
+      if (sent >= RESPONDERS) break;
+      const ti = world.idx(Math.floor(runner.x), Math.floor(runner.z));
+      if (!this.pathAdjacent(g, world, ti, (i) => passable(world, i, true))) continue;
+      g.chaseId = runner.id;
+      g.state = "chasing";
+      g.aux = 0;
+      sent++;
+    }
   }
 
   // --- Workman -----------------------------------------------------------------
@@ -2676,7 +3052,7 @@ export class Agents {
             this.mealsDirty = true;
           }
         }
-        ag.carrying = false;
+        removeItem(ag.inv, Item.Tray);
         ag.state = "idle";
       } else if (ag.state === "toServeDuty") {
         ag.state = "manning";
@@ -2713,7 +3089,7 @@ export class Agents {
               this.servers.set(s, ag.id);
               ag.interact = s;
               ag.state = "toServeDuty";
-              ag.carrying = false;
+              removeItem(ag.inv, Item.Tray);
               return;
             }
           }
@@ -2730,7 +3106,7 @@ export class Agents {
         if (best >= 0 && this.pathAdjacent(ag, world, best, (i) => passable(world, i, true))) {
           ag.state = "delivering";
           ag.interact = best;
-          ag.carrying = true;
+          takeInHands(ag.inv, Item.Tray); // both hands, all the way to the counter
         } else {
           ag.timer = 3; // everything full (or no serving table): hold the meal
         }
@@ -2776,17 +3152,22 @@ export class Agents {
   // --- Render data ---------------------------------------------------------------
 
   personInstances(): {
-    prisoners: Float32Array; guards: Float32Array; cooks: Float32Array; workmen: Float32Array;
+    prisoners: Float32Array; guards: Float32Array; cooks: Float32Array;
+    workmen: Float32Array; snipers: Float32Array;
   } {
     const out: Record<number, number[]> = {
       [Obj.Prisoner]: [], [Obj.Guard]: [], [Obj.Cook]: [], [Obj.Workman]: [],
+      [Obj.Sniper]: [],
     };
     for (const ag of this.agents) {
       if (ag.underground) continue;
+      const [h0, h1] = heldSlots(ag.inv);
       out[ag.kind].push(
-        ag.x, ag.z, ag.heading, ag.baton ? 1 : 0,
+        ag.x, ag.z, ag.heading, ag.baton || ag.kind === Obj.Sniper ? 1 : 0,
         ag.pose, ag.phase, ag.amp,
-        (ag.cuffed ? 1 : 0) + (ag.carrying ? 2 : 0), // flags
+        (ag.cuffed ? 1 : 0) + (h0 === Item.Tray || h1 === Item.Tray ? 2 : 0), // flags
+        h0, h1,
+        ag.elev,
       );
     }
     return {
@@ -2794,6 +3175,7 @@ export class Agents {
       guards: new Float32Array(out[Obj.Guard]),
       cooks: new Float32Array(out[Obj.Cook]),
       workmen: new Float32Array(out[Obj.Workman]),
+      snipers: new Float32Array(out[Obj.Sniper]),
     };
   }
 
@@ -2979,6 +3361,9 @@ export class Agents {
       curActivity: this.curActivity,
       escapedCount: this.escapedCount,
       caughtCount: this.caughtCount,
+      stashes: [...this.stashes].map(([bed, items]) => ({
+        bed, items: items.map((i) => ({ ...i })),
+      })),
       mealTables: [...this.mealTables],
       servingStock: [...this.servingStock.entries()],
       tunnels: this.tunnels.map((t) => ({ ...t })),
@@ -2991,6 +3376,7 @@ export class Agents {
         needs: { ...a.needs },
         known: serMap(a.known),
         objMem: serMem(a.objMem),
+        inv: { hands: a.inv.hands.map((x) => ({ ...x })), pockets: a.inv.pockets.map((x) => x && { ...x }) },
         plan: a.plan ? { ...a.plan, breaches: [...a.plan.breaches] } : null,
         tunnel: a.tunnel ? { ...a.tunnel } : null,
         job: a.job ? { ...a.job, claimedBy: -1 } : null,
@@ -3005,6 +3391,7 @@ export class Agents {
     this.claimedBeds.clear();
     this.claimedCookers.clear();
     this.useClaims.clear();
+    this.stashes.clear();
     this.mealTables.clear();
     this.tunnels.length = 0;
     this.cutFences.clear();
@@ -3019,6 +3406,9 @@ export class Agents {
     this.curActivity = data.curActivity ?? REG.Free;
     this.escapedCount = data.escapedCount ?? 0;
     this.caughtCount = data.caughtCount ?? 0;
+    for (const { bed, items } of data.stashes ?? []) {
+      this.stashes.set(bed, items.map((i) => ({ ...i })));
+    }
     for (const i of data.mealTables ?? []) this.mealTables.add(i);
     for (const [i, n] of data.servingStock ?? []) this.servingStock.set(i, n);
     for (const t of data.tunnels ?? []) this.tunnels.push({ ...t });
@@ -3057,7 +3447,16 @@ export class Agents {
         needs: { ...raw.needs, recreation: raw.needs.recreation ?? 0.8 },
         known: deMap(raw.known),
         objMem: deMem(raw as LegacyAgentMem),
+        // Pre-inventory saves have no `inv`; those prisoners start empty-handed.
+        inv: raw.inv
+          ? { hands: (raw.inv.hands ?? []).map((x) => ({ ...x })),
+              pockets: padPockets(raw.inv.pockets) }
+          : newInventory(),
+        cutterMeals: raw.cutterMeals ?? 0,
         useIdx: -1, // claims are re-taken on the next decision
+        seatIdx: -1,
+        elev: raw.elev ?? 0,
+        postIdx: raw.postIdx ?? -1,
         plan: raw.plan ? { ...raw.plan, breaches: [...raw.plan.breaches] } : null,
         tunnel: raw.tunnel ? this.tunnels.find((t) => t.owner === raw.tunnel!.owner && t.entry === raw.tunnel!.entry) ?? { ...raw.tunnel } : null,
         job: null,
@@ -3074,6 +3473,16 @@ export class Agents {
     this.mealsDirty = true;
     this.worldDirty = true;
   }
+}
+
+/** Pockets must always be exactly POCKET_SLOTS long, however a save left them. */
+function padPockets(p: (Stack | null)[] | undefined): (Stack | null)[] {
+  const out: (Stack | null)[] = new Array(POCKET_SLOTS).fill(null);
+  for (let i = 0; i < Math.min(POCKET_SLOTS, p?.length ?? 0); i++) {
+    const s = p![i];
+    out[i] = s ? { ...s } : null;
+  }
+  return out;
 }
 
 /** Per-agent memory as older saves stored it: one array per object type. */

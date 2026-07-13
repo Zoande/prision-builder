@@ -1,10 +1,11 @@
 import { Camera } from "./camera";
 import { invert } from "./math";
-import { DIRS, World, defOf } from "./sim/world";
+import { DIRS, NEEDS, World, defOf } from "./sim/world";
 import {
   Agents, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, TRAY_STACK_KIND,
   REG_NAMES, type Agent,
 } from "./sim/agents";
+import { Item, countItem, itemDef } from "./sim/items";
 import { Editor } from "./editor";
 import { clockLabel, evalAtmosphere, HOUR_SECONDS, hourOf, isNightAt } from "./daynight";
 import { GroundPass } from "./render/groundPass";
@@ -334,7 +335,7 @@ async function main() {
     const start = painting && dragStart ? dragStart : hoverTile;
     const out: { x: number; z: number }[] = [];
     const add = (x: number, z: number) => { if (world.inBounds(x, z)) out.push({ x, z }); };
-    if (cat === "floor") {
+    if (cat === "floor" || cat === "room") {
       const x0 = Math.min(start.x, hoverTile.x), x1 = Math.max(start.x, hoverTile.x);
       const z0 = Math.min(start.z, hoverTile.z), z1 = Math.max(start.z, hoverTile.z);
       for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) add(x, z);
@@ -378,7 +379,7 @@ async function main() {
     const tx = tile.x, tz = tile.z;
     lastTX = tx; lastTZ = tz;
     const cat = editor.tool?.cat;
-    if (cat === "floor") applyFloorRect(tile);
+    if (cat === "floor" || cat === "room") applyFloorRect(tile);
     else if (cat === "wall" || cat === "fence") applyLockedLine(tile);
     else {
       if (tx === lastTX && tz === lastTZ && dragPlaced.has(`${tx},${tz}`)) return;
@@ -411,6 +412,9 @@ async function main() {
     dragStart = tile;
     dragAxis = null;
     dragPlaced = new Set();
+    if (editor.tool?.cat === "room") {
+      editor.roomDrag = world.startRoomPaint(tile.x, tile.z, editor.tool.mat);
+    }
     paintAt(e);
   });
   canvas.addEventListener("pointermove", (e) => { if (painting) paintAt(e); });
@@ -420,6 +424,12 @@ async function main() {
     dragStart = null;
     dragAxis = null;
     dragPlaced = new Set();
+    if (editor.roomDrag > 0) {
+      world.endRoomPaint(editor.roomDrag);
+      editor.roomDrag = 0;
+      dirty = true;
+      saveDirty = true;
+    }
   });
   addEventListener("keydown", (e) => {
     if (e.key === "r" || e.key === "R") {
@@ -465,15 +475,32 @@ async function main() {
     if (ag.known) {
       const pc = (v: number) => `${Math.round(v * 100)}%`.padStart(4);
       const n = ag.needs;
-      s += `\n` +
-        `food     ${pc(n.food)}   sleep   ${pc(n.sleep)}\n` +
-        `outdoors ${pc(n.outdoors)}   comfort ${pc(n.comfort)}\n` +
-        `hygiene  ${pc(n.hygiene)}   boredom ${pc(1 - n.recreation)}\n` +
+      // Two needs per line, straight off the NEEDS list — a new need shows up
+      // here without touching this code.
+      const rows: string[] = [];
+      for (let i = 0; i < NEEDS.length; i += 2) {
+        rows.push(NEEDS.slice(i, i + 2)
+          .map((k) => `${k.padEnd(9)}${pc(n[k])}`).join("  "));
+      }
+      s += `\n${rows.join("\n")}\n` +
         `escape desire ${pc(ag.escapeDesire)}  feasibility ${pc(ag.escapeFeasibility)}`;
+      const hands = ag.inv.hands
+        .map((x) => `${itemDef(x.kind)?.name ?? "?"}${x.count > 1 ? ` x${x.count}` : ""}`);
+      const pockets = ag.inv.pockets
+        .filter((x) => x !== null)
+        .map((x) => `${itemDef(x!.kind)?.name ?? "?"}${x!.count > 1 ? ` x${x!.count}` : ""}`);
+      s += `\nhands: ${hands.length ? hands.join(", ") : "empty"}` +
+        `\npockets: ${pockets.length ? pockets.join(", ") : "empty"}`;
+      const hidden = agents.stashOfBed(ag.bedIdx);
+      if (hidden.length > 0) {
+        s += `\nunder the bunk: ${hidden
+          .map((x) => `${itemDef(x.kind)?.name ?? "?"}${x.count > 1 ? ` x${x.count}` : ""}`)
+          .join(", ")}`;
+      }
       if (ag.plan) {
         s += `\nPLANNING ESCAPE: ${ag.plan.method} (${ag.plan.stage})` +
-          (ag.plan.method === "cut" ? `  cutters ${ag.cutters}/${ag.plan.needed}` : "") +
-          (ag.plan.method === "dig" ? `  spoons ${ag.spoons}` : "");
+          (ag.plan.method === "cut" ? `  cutters ${countItem(ag.inv, Item.Cutter)}/${ag.plan.needed}` : "") +
+          (ag.plan.method === "dig" ? `  spoons ${countItem(ag.inv, Item.Spoon)}` : "");
       }
       s += `\n${ag.cellRoom >= 0 ? "has a cell" : "no cell"}` +
         (ag.cuffed ? " · handcuffed" : "") +
@@ -591,7 +618,11 @@ async function main() {
       if (!p) continue;
       const label = document.createElement("div");
       label.className = "room-label";
-      label.textContent = r.name;
+      // Show the furnishing score once there's anything in the room worth
+      // scoring — this is how the player sees decor doing something.
+      label.textContent = r.ambience > 0
+        ? `${r.name}  ${Math.round(r.ambience * 100)}%`
+        : r.name;
       label.style.left = `${p[0]}px`;
       label.style.top = `${p[1]}px`;
       roomOverlay.appendChild(label);
@@ -673,29 +704,22 @@ async function main() {
       if (ag.cuffed) reasons.push("cuffed");
       if (ag.cellRoom < 0) reasons.push("no cell");
       if (!ag.compliant) reasons.push("not compliant");
-      if (n.food < 0.25) reasons.push(`low food ${n.food.toFixed(2)}`);
-      if (n.sleep < 0.25) reasons.push(`low sleep ${n.sleep.toFixed(2)}`);
-      if (n.outdoors < 0.25) reasons.push(`low outdoors ${n.outdoors.toFixed(2)}`);
-      if (n.hygiene < 0.25) reasons.push(`low hygiene ${n.hygiene.toFixed(2)}`);
-      if (n.recreation < 0.25) reasons.push(`low recreation ${n.recreation.toFixed(2)}`);
+      for (const k of NEEDS) {
+        if (n[k] < 0.25) reasons.push(`low ${k} ${n[k].toFixed(2)}`);
+      }
       if (ag.plan) reasons.push(`escape ${ag.plan.method}/${ag.plan.stage}`);
       if (ag.sneaking) reasons.push("sneaking");
       if (ag.risk > 0.05) reasons.push(`risk ${ag.risk.toFixed(2)}`);
       if (reasons.length > 0) {
+        const needs: Record<string, number> = {};
+        for (const k of NEEDS) needs[k] = Number(n[k].toFixed(2));
         attention.push({
           id: ag.id,
           state: ag.state,
           pos: [Number(ag.x.toFixed(1)), Number(ag.z.toFixed(1))],
           reasons,
           path: ag.path ? `${ag.pathI}/${ag.path.length}` : null,
-          needs: {
-            food: Number(n.food.toFixed(2)),
-            sleep: Number(n.sleep.toFixed(2)),
-            outdoors: Number(n.outdoors.toFixed(2)),
-            comfort: Number(n.comfort.toFixed(2)),
-            hygiene: Number(n.hygiene.toFixed(2)),
-            recreation: Number(n.recreation.toFixed(2)),
-          },
+          needs,
           known: ag.known?.size ?? 0,
           bed: ag.bedIdx,
         });
@@ -851,7 +875,9 @@ async function main() {
           `\n   knows ${selected.known.size} tiles   bed ${selected.bedIdx >= 0 ? "claimed" : "none"}` +
           `   objects ${[...selected.objMem!.values()].reduce((a, m) => a + m.size, 0)}` +
           `\n   escape: desire ${pc(selected.escapeDesire)}   feasibility ${pc(selected.escapeFeasibility)}` +
-          `   caught ${selected.timesCaught}x   cutters ${selected.cutters}   spoons ${selected.spoons}` +
+          `   caught ${selected.timesCaught}x` +
+          `   carrying ${selected.inv.hands.reduce((a, x) => a + x.count, 0)}` +
+          `   hidden ${agents.stashOfBed(selected.bedIdx).reduce((a, x) => a + x.count, 0)}` +
           (selected.plan ? `\n   plan: ${selected.plan.method} (${selected.plan.stage}, ${selected.plan.needed} fences)` : "");
       }
     }

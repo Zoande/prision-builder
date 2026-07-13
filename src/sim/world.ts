@@ -17,10 +17,13 @@
 
 // .ts extensions: the dev scripts import this module through Node's native type
 // stripping, which will not resolve an extensionless specifier.
-import { DIRS, Obj, OBJ_DEFS, defOf } from "./objects.ts";
+import { DIRS, Obj, OBJ_DEFS, RoomType, defOf, roomDef } from "./objects.ts";
 
-export { Obj, DIRS, OBJ_DEFS, PIECE_DEFS, defOf, kindsServing } from "./objects.ts";
-export type { ObjDef, ObjKind, NeedName, UseDef } from "./objects.ts";
+export {
+  Obj, DIRS, OBJ_DEFS, PIECE_DEFS, NEEDS, RoomType, ROOM_DEFS, SHELF_KINDS,
+  defOf, roomDef, kindsServing,
+} from "./objects.ts";
+export type { ObjDef, ObjKind, NeedName, UseDef, RoomDef } from "./objects.ts";
 
 /** A placed footprint object. `w` runs along DIRS[orient], `d` across it. */
 export interface Piece {
@@ -33,6 +36,17 @@ export interface Piece {
   d: number;
 }
 
+/** A patrol beat: an ordered run of tiles a guard walks up and down.
+ *
+ *  Two colours exist for one reason — so two beats can cross without merging
+ *  into one. A tile can carry one route of each colour, never two of the same. */
+export interface PatrolRoute {
+  id: number;
+  color: number; // 0 = blue, 1 = purple
+  tiles: number[];
+}
+export const ROUTE_COLORS = 2;
+
 /** Saves written before pieces existed: separate bed and bench-span lists. */
 interface LegacySave {
   beds?: { x: number; z: number; orient: number }[];
@@ -40,9 +54,6 @@ interface LegacySave {
 }
 
 // --- Rooms & access ---------------------------------------------------------
-export const RoomType = {
-  Empty: 0, Kitchen: 1, Yard: 2, Canteen: 3, Cell: 4, Dorm: 5, ShowerRoom: 6,
-} as const;
 export const Access = { Staff: 0, Prisoners: 1, Forbidden: 2 } as const;
 
 export interface Room {
@@ -51,6 +62,10 @@ export interface Room {
   access: number;
   tiles: Set<number>;
   valid: boolean; // requirements met (invalid rooms behave as Empty)
+  /** Furnishing quality: the room's ambience points spread over its area. */
+  ambience: number;
+  /** How many guards the player has posted here. 0 = none. */
+  guards: number;
 }
 
 export interface RoomLabel {
@@ -58,28 +73,17 @@ export interface RoomLabel {
   name: string;
   valid: boolean;
   issue: string;
+  ambience: number;
   x: number;
   z: number;
 }
 
-// Minimum contained square per room type (0 = none).
-const ROOM_MIN_SQUARE: Record<number, number> = {
-  [RoomType.Empty]: 0, [RoomType.Kitchen]: 5, [RoomType.Yard]: 10,
-  [RoomType.Canteen]: 5, [RoomType.Cell]: 0, [RoomType.Dorm]: 0,
-  [RoomType.ShowerRoom]: 5,
-};
+// How much a well-furnished room speeds up the needs filled inside it. A bare
+// room fills at 1.0x; a lavish one at 1 + AMBIENCE_MAX.
+const AMBIENCE_MAX = 0.5;
+const AMBIENCE_FULL = 1.4; // points per tile that count as fully furnished
 
 const PERSON_KINDS: number[] = OBJ_DEFS.filter((d) => d.place === "person").map((d) => d.kind);
-
-const ROOM_NAMES: Record<number, string> = {
-  [RoomType.Empty]: "Empty Room",
-  [RoomType.Kitchen]: "Kitchen",
-  [RoomType.Yard]: "Yard",
-  [RoomType.Canteen]: "Canteen",
-  [RoomType.Cell]: "Cell",
-  [RoomType.Dorm]: "Dormitory",
-  [RoomType.ShowerRoom]: "Shower Room",
-};
 
 // Light fixture emission: color (linear), reach in tiles, and intensity.
 const LIGHT_DEFS: Record<number, { color: [number, number, number]; radius: number; power: number }> = {
@@ -108,6 +112,11 @@ export class World {
   readonly pieces = new Map<number, Piece>();
   readonly pieceAt: Int32Array;
   private nextPieceId = 1;
+  // Patrol beats. One lookup array per colour, so a blue and a purple beat can
+  // cross on the same tile and stay two separate beats.
+  readonly routes = new Map<number, PatrolRoute>();
+  private routeAt: Int32Array[] = [];
+  private nextRouteId = 1;
   private active = new Set<number>();
   // Rooms: per-tile room id (0 = outside / none) + the room registry.
   readonly roomId: Int32Array;
@@ -130,6 +139,76 @@ export class World {
     this.roomId = new Int32Array(n);
     this.jailClosed = new Uint8Array(n);
     this.pieceAt = new Int32Array(n);
+    for (let c = 0; c < ROUTE_COLORS; c++) this.routeAt.push(new Int32Array(n));
+  }
+
+  // --- Patrol routes --------------------------------------------------------
+
+  /** Begin drawing a beat of this colour. */
+  startRoute(color: number): number {
+    const r: PatrolRoute = { id: this.nextRouteId++, color: color & 1, tiles: [] };
+    this.routes.set(r.id, r);
+    return r.id;
+  }
+
+  /** Extend a beat by a tile. Skips repeats, and refuses to cross itself. */
+  addRouteTile(routeId: number, x: number, z: number): boolean {
+    const r = this.routes.get(routeId);
+    if (!r || !this.inBounds(x, z)) return false;
+    const i = this.idx(x, z);
+    if (r.tiles.length > 0 && r.tiles[r.tiles.length - 1] === i) return false;
+    if (this.routeAt[r.color][i] === r.id) return false;
+    // A tile already used by another beat of the same colour is taken.
+    if (this.routeAt[r.color][i] !== 0) return false;
+    r.tiles.push(i);
+    this.routeAt[r.color][i] = r.id;
+    return true;
+  }
+
+  /** Finish a beat. One tile is a dot, not a patrol — throw it away. */
+  endRoute(routeId: number) {
+    const r = this.routes.get(routeId);
+    if (r && r.tiles.length < 2) this.removeRoute(routeId);
+  }
+
+  removeRoute(routeId: number) {
+    const r = this.routes.get(routeId);
+    if (!r) return;
+    for (const i of r.tiles) {
+      if (this.routeAt[r.color][i] === r.id) this.routeAt[r.color][i] = 0;
+    }
+    this.routes.delete(routeId);
+  }
+
+  /** Any beat covering this tile (either colour), or 0. */
+  routeAtTile(x: number, z: number): number {
+    if (!this.inBounds(x, z)) return 0;
+    const i = this.idx(x, z);
+    for (let c = 0; c < ROUTE_COLORS; c++) {
+      if (this.routeAt[c][i] !== 0) return this.routeAt[c][i];
+    }
+    return 0;
+  }
+
+  /** Beat tiles for the overlay: (x, z, colorId). Only drawn in patrol modes. */
+  routeOverlay(): Float32Array {
+    const out: number[] = [];
+    for (const r of this.routes.values()) {
+      for (const i of r.tiles) {
+        out.push(i % this.size, (i / this.size) | 0, r.color === 0 ? 3 : 4);
+      }
+    }
+    return new Float32Array(out);
+  }
+
+  /** Rooms with guards posted to them, for the same overlay. */
+  postedOverlay(): Float32Array {
+    const out: number[] = [];
+    for (const r of this.rooms.values()) {
+      if (r.guards <= 0) continue;
+      for (const t of r.tiles) out.push(t % this.size, (t / this.size) | 0, 5);
+    }
+    return new Float32Array(out);
   }
 
   // --- Pieces ---------------------------------------------------------------
@@ -498,12 +577,54 @@ export class World {
       }
       const room = join ?? {
         id: this.nextRoomId++, type: RoomType.Empty, access: Access.Staff,
-        tiles: new Set<number>(), valid: true,
+        tiles: new Set<number>(), valid: true, ambience: 0, guards: 0,
       };
       if (!join) this.rooms.set(room.id, room);
       for (const t of tiles) { this.roomId[t] = room.id; room.tiles.add(t); }
     }
 
+    this.validateRooms();
+  }
+
+  /** Begin a room-paint drag, and decide which room every tile of it joins.
+   *
+   *  Start inside a room of the type you're painting and you EXTEND that room,
+   *  however far you drag — even back out over other rooms. Start anywhere else
+   *  and you get a fresh room that OVERRIDES whatever it's dragged across.
+   *  Returns the room id to paint into, or 0 if the start tile isn't enclosed. */
+  startRoomPaint(x: number, z: number, type: number): number {
+    if (!this.inBounds(x, z)) return 0;
+    const cur = this.rooms.get(this.roomId[this.idx(x, z)]);
+    if (!cur) return 0; // not enclosed (or a wall/fence tile)
+    if (cur.type === type) return cur.id;
+    const room: Room = {
+      id: this.nextRoomId++, type,
+      access: roomDef(type)?.prisonerAccess ? Access.Prisoners : cur.access,
+      tiles: new Set<number>(), valid: false, ambience: 0, guards: 0,
+    };
+    this.rooms.set(room.id, room);
+    return room.id;
+  }
+
+  /** Paint one tile into the room a drag claimed. */
+  paintRoomInto(x: number, z: number, roomId: number): boolean {
+    if (!this.inBounds(x, z)) return false;
+    const target = this.rooms.get(roomId);
+    if (!target) return false;
+    const i = this.idx(x, z);
+    const cur = this.rooms.get(this.roomId[i]);
+    if (!cur || cur === target) return false; // not enclosed, or already ours
+    cur.tiles.delete(i);
+    if (cur.tiles.size === 0) this.rooms.delete(cur.id);
+    target.tiles.add(i);
+    this.roomId[i] = roomId;
+    return true;
+  }
+
+  /** End a room-paint drag: drop it if it never covered a tile, then revalidate. */
+  endRoomPaint(roomId: number) {
+    const r = this.rooms.get(roomId);
+    if (r && r.tiles.size === 0) this.rooms.delete(roomId);
     this.validateRooms();
   }
 
@@ -528,12 +649,10 @@ export class World {
     if (!target) {
       if (cur.type === type) return false; // already exactly this
       // Prisoner-facing room types default to prisoner access.
-      const prisonerRoom = type === RoomType.Cell || type === RoomType.Dorm ||
-        type === RoomType.Yard || type === RoomType.Canteen || type === RoomType.ShowerRoom;
       target = {
         id: this.nextRoomId++, type,
-        access: prisonerRoom ? Access.Prisoners : cur.access,
-        tiles: new Set<number>(), valid: false,
+        access: roomDef(type)?.prisonerAccess ? Access.Prisoners : cur.access,
+        tiles: new Set<number>(), valid: false, ambience: 0, guards: 0,
       };
       this.rooms.set(target.id, target);
     }
@@ -555,37 +674,51 @@ export class World {
     return true;
   }
 
-  /** Recheck every room's requirements. */
+  /** Recheck every room's requirements and re-score its furnishing. */
   validateRooms() {
-    for (const r of this.rooms.values()) r.valid = this.roomValid(r);
-  }
-
-  private roomValid(r: Room): boolean {
-    return this.roomIssue(r) === "";
-  }
-
-  private roomIssue(r: Room): string {
-    const sq = ROOM_MIN_SQUARE[r.type] ?? 0;
-    if (sq > 0 && !this.containsSquare(r.tiles, sq)) return `Needs a ${sq}x${sq} clear area.`;
-    const has = (kind: number) => {
-      for (const t of r.tiles) if (this.objKind[t] === kind) return true;
-      return false;
-    };
-    switch (r.type) {
-      case RoomType.Kitchen: return has(Obj.Cooker) ? "" : "Needs a cooker.";
-      case RoomType.Canteen:
-        if (!has(Obj.Table)) return "Needs a table.";
-        if (!has(Obj.Bench2) && !has(Obj.Bench4)) return "Needs a bench.";
-        return "";
-      case RoomType.Cell:
-      case RoomType.Dorm:
-        if (!has(Obj.Bed)) return "Needs a bed.";
-        if (!has(Obj.Toilet)) return "Needs a toilet.";
-        if (!this.roomHasJailDoor(r)) return "Needs a jail door on its boundary.";
-        return "";
-      case RoomType.ShowerRoom: return has(Obj.Shower) ? "" : "Needs a shower.";
-      default: return "";
+    for (const r of this.rooms.values()) {
+      r.valid = this.roomIssue(r) === "";
+      r.ambience = this.roomAmbience(r);
     }
+  }
+
+  /** Why this room doesn't work, straight off its ROOM_DEFS row. "" = it does. */
+  private roomIssue(r: Room): string {
+    const def = roomDef(r.type);
+    if (!def) return "";
+    if (def.minSquare > 0 && !this.containsSquare(r.tiles, def.minSquare)) {
+      return `Needs a ${def.minSquare}x${def.minSquare} clear area.`;
+    }
+    for (const req of def.requires) {
+      let found = false;
+      for (const t of r.tiles) {
+        if (req.kinds.includes(this.objKind[t])) { found = true; break; }
+      }
+      if (!found) return req.issue;
+    }
+    if (def.needsJailDoor && !this.roomHasJailDoor(r)) {
+      return "Needs a jail door on its boundary.";
+    }
+    return "";
+  }
+
+  /** Ambience points per tile, normalised to a 0..1 furnishing score. A piece
+   *  counts once, at its anchor — a 2x2 table isn't four times as nice. */
+  private roomAmbience(r: Room): number {
+    if (r.tiles.size === 0) return 0;
+    let points = 0;
+    for (const t of r.tiles) {
+      const p = this.pieceAtTile(t);
+      if (!p || this.idx(p.x, p.z) !== t) continue; // anchors only
+      points += defOf(p.kind)?.ambience ?? 0;
+    }
+    return Math.min(1, points / r.tiles.size / AMBIENCE_FULL);
+  }
+
+  /** Need-refill multiplier at a tile: nicer rooms restore people faster. */
+  ambienceMul(i: number): number {
+    const r = this.rooms.get(this.roomId[i]);
+    return 1 + (r ? r.ambience * AMBIENCE_MAX : 0);
   }
 
   private containsSquare(tiles: Set<number>, n: number): boolean {
@@ -666,9 +799,10 @@ export class World {
       const issue = this.roomIssue(r);
       labels.push({
         id: r.id,
-        name: ROOM_NAMES[r.type] ?? "Room",
+        name: roomDef(r.type)?.name ?? "Room",
         valid: issue === "",
         issue,
+        ambience: r.ambience,
         x: sx / r.tiles.size + 0.5,
         z: sz / r.tiles.size + 0.5,
       });
@@ -698,11 +832,15 @@ export class World {
       tiles,
       pieces: [...this.pieces.values()].map((p) => ({ ...p })),
       nextPieceId: this.nextPieceId,
+      routes: [...this.routes.values()].map((r) => ({ ...r, tiles: [...r.tiles] })),
+      nextRouteId: this.nextRouteId,
       rooms: [...this.rooms.values()].map((r) => ({
         id: r.id,
         type: r.type,
         access: r.access,
         valid: r.valid,
+        ambience: r.ambience,
+        guards: r.guards,
         tiles: [...r.tiles],
       })),
       nextRoomId: this.nextRoomId,
@@ -720,6 +858,14 @@ export class World {
     this.pieceAt.fill(0);
     this.pieces.clear();
     this.nextPieceId = 1;
+    this.routes.clear();
+    for (const a of this.routeAt) a.fill(0);
+    this.nextRouteId = data.nextRouteId ?? 1;
+    for (const r of data.routes ?? []) {
+      this.routes.set(r.id, { ...r, tiles: [...r.tiles] });
+      for (const i of r.tiles) this.routeAt[r.color & 1][i] = r.id;
+      if (r.id >= this.nextRouteId) this.nextRouteId = r.id + 1;
+    }
     this.active.clear();
     this.rooms.clear();
     this.nextRoomId = data.nextRoomId ?? 1;
@@ -771,6 +917,8 @@ export class World {
         type: r.type,
         access: r.access,
         valid: r.valid,
+        ambience: r.ambience ?? 0,
+        guards: r.guards ?? 0,
         tiles: new Set(r.tiles),
       };
       this.rooms.set(room.id, room);

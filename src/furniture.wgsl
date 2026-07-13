@@ -49,7 +49,7 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   var N = normalize(cross(dpdx(in.world), dpdy(in.world)));
   if (dot(N, U.eye - in.world) < 0.0) { N = -N; }
 
-  var palette = array<vec3<f32>, 16>(
+  var palette = array<vec3<f32>, 24>(
     vec3<f32>(0.82, 0.84, 0.88), // 0 ceramic white
     vec3<f32>(0.68, 0.70, 0.74), // 1 ceramic shade
     vec3<f32>(0.50, 0.52, 0.57), // 2 steel
@@ -66,6 +66,14 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
     vec3<f32>(0.30, 0.45, 0.16), // 13 food (greens)
     vec3<f32>(0.42, 0.28, 0.16), // 14 wood (shelves, warm furniture)
     vec3<f32>(0.60, 0.36, 0.30), // 15 book spines
+    vec3<f32>(0.30, 0.36, 0.44), // 16 upholstery (sofa, armchair)
+    vec3<f32>(0.26, 0.17, 0.12), // 17 dark wood
+    vec3<f32>(0.22, 0.45, 0.18), // 18 foliage
+    vec3<f32>(0.16, 0.17, 0.18), // 19 rubber (mats, bags, treadmill belt)
+    vec3<f32>(0.06, 0.08, 0.11), // 20 screen glass
+    vec3<f32>(0.09, 0.38, 0.22), // 21 baize (pool table)
+    vec3<f32>(0.55, 0.30, 0.22), // 22 terracotta (pots, rugs)
+    vec3<f32>(0.72, 0.58, 0.26), // 23 brass (altar)
   );
   let albedo = palette[u32(in.part + 0.5)];
 

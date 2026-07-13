@@ -2,7 +2,7 @@
 // current tool. Placement itself is driven by main (pointer + picking); this
 // module owns tool state and the UI.
 
-import { Access, Obj, PIECE_DEFS, RoomType, World, defOf } from "./sim/world";
+import { Access, OBJ_DEFS, Obj, ROOM_DEFS, RoomType, World, defOf } from "./sim/world";
 import { FLOOR_MATS, WALL_MATS, FENCE_MAT } from "./render/materials";
 
 // Structural tools get their own cat because each has a bespoke world setter
@@ -32,6 +32,27 @@ function objItem(kind: number, cat: ToolCat): Item {
   return { label: d.palette!.label, swatch: d.palette!.swatch, tool: { cat, mat: 0 } };
 }
 
+// The few kinds that need a bespoke world setter rather than placePiece.
+const SPECIAL_CAT: Record<number, ToolCat> = {
+  [Obj.Door]: "door", [Obj.JailDoor]: "jaildoor",
+  [Obj.FenceDoor]: "fencedoor", [Obj.FenceJailDoor]: "fencejaildoor",
+  [Obj.Lamp]: "lamp", [Obj.WallLight]: "walllight", [Obj.RoofLight]: "rooflight",
+};
+
+/** One build tab per palette group in the registry, in registry order. */
+function groupCats(): Cat[] {
+  const order: string[] = [];
+  const byGroup = new Map<string, Item[]>();
+  for (const d of OBJ_DEFS) {
+    if (!d.palette || d.place === "person") continue;
+    const g = d.palette.group;
+    if (!byGroup.has(g)) { byGroup.set(g, []); order.push(g); }
+    const special = SPECIAL_CAT[d.kind];
+    byGroup.get(g)!.push(special ? objItem(d.kind, special) : pieceItem(d.kind));
+  }
+  return order.map((g) => ({ key: g.toLowerCase(), label: g, items: byGroup.get(g)! }));
+}
+
 const CATS: Cat[] = [
   {
     key: "floor", label: "Floors",
@@ -44,19 +65,8 @@ const CATS: Cat[] = [
       { label: "Fence", swatch: "#9aa0a6", tool: { cat: "fence", mat: FENCE_MAT.id } },
     ],
   },
-  {
-    key: "furniture", label: "Furniture",
-    items: [
-      objItem(Obj.Door, "door"),
-      objItem(Obj.JailDoor, "jaildoor"),
-      objItem(Obj.FenceDoor, "fencedoor"),
-      objItem(Obj.FenceJailDoor, "fencejaildoor"),
-      ...PIECE_DEFS.map((d) => pieceItem(d.kind)),
-      objItem(Obj.Lamp, "lamp"),
-      objItem(Obj.WallLight, "walllight"),
-      objItem(Obj.RoofLight, "rooflight"),
-    ],
-  },
+  // One tab per registry group, so the catalog stays browsable as it grows.
+  ...groupCats(),
   {
     key: "people", label: "People",
     items: [
@@ -69,15 +79,11 @@ const CATS: Cat[] = [
   },
   {
     key: "rooms", label: "Rooms",
-    items: [
-      { label: "Kitchen", swatch: "#c96f3b", tool: { cat: "room", mat: RoomType.Kitchen } },
-      { label: "Yard", swatch: "#7fae5a", tool: { cat: "room", mat: RoomType.Yard } },
-      { label: "Canteen", swatch: "#caa84f", tool: { cat: "room", mat: RoomType.Canteen } },
-      { label: "Cell", swatch: "#7f8fa6", tool: { cat: "room", mat: RoomType.Cell } },
-      { label: "Dormitory", swatch: "#9aa7c0", tool: { cat: "room", mat: RoomType.Dorm } },
-      { label: "Shower Room", swatch: "#8fb8c8", tool: { cat: "room", mat: RoomType.ShowerRoom } },
-      { label: "Empty Room", swatch: "#9a9a9a", tool: { cat: "room", mat: RoomType.Empty } },
-    ],
+    items: ROOM_DEFS
+      .filter((r) => r.type !== RoomType.Empty)
+      .map((r) => ({ label: r.name, swatch: r.swatch, tool: { cat: "room", mat: r.type } as Tool }))
+      // "Empty" is how you un-paint, so it belongs last, not first.
+      .concat([{ label: "Empty Room", swatch: "#9a9a9a", tool: { cat: "room", mat: RoomType.Empty } }]),
   },
   {
     key: "access", label: "Access",
@@ -93,6 +99,8 @@ const CATS: Cat[] = [
 export class Editor {
   tool: Tool | null = null;
   orient = 0; // 0..3 quarter turns
+  /** The room a room-paint drag is filling (0 = not dragging). Set by main. */
+  roomDrag = 0;
   onChange?: () => void; // called when a tool is (de)selected, to update build mode
 
   private palette: HTMLElement;
@@ -177,7 +185,11 @@ export class Editor {
       case "cook": world.setPerson(x, z, Obj.Cook, this.orient); return true;
       case "workman": world.setPerson(x, z, Obj.Workman, this.orient); return true;
       case "baton": world.setBaton(x, z); return true;
-      case "room": return world.paintRoom(x, z, this.tool.mat);
+      // Rooms are dragged out like floors; main claims the room on pointerdown.
+      case "room":
+        return this.roomDrag > 0
+          ? world.paintRoomInto(x, z, this.roomDrag)
+          : world.paintRoom(x, z, this.tool.mat);
       case "access": return world.setRoomAccess(x, z, this.tool.mat);
       case "erase": world.erase(x, z); return true;
     }
