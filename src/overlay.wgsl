@@ -1,6 +1,8 @@
-// Debug overlay: translucent per-tile quads visualizing a selected agent's
-// memory. color id: 0 = known walkable (cyan), 1 = known blocked (red),
-// 2 = remembered spot (yellow). (Globals from the shared prelude.)
+// Translucent per-tile quads. Two jobs, never on screen at once:
+//   a selected agent's memory — 0 known walkable (cyan), 1 blocked (red),
+//     2 remembered object (yellow)
+//   the staff layer — 3 blue beat, 4 purple beat, 5 room with guards posted
+// (Globals from the shared prelude.)
 
 struct VSOut {
   @builtin(position) clip : vec4<f32>,
@@ -28,6 +30,9 @@ fn vs(
 fn fs(in : VSOut) -> @location(0) vec4<f32> {
   var col = vec4<f32>(0.0, 0.55, 0.9, 0.22);
   if (in.c > 1.5) { col = vec4<f32>(0.95, 0.8, 0.1, 0.5); }
+  if (in.c > 2.5) { col = vec4<f32>(0.20, 0.45, 0.95, 0.62); } // blue beat
+  if (in.c > 3.5) { col = vec4<f32>(0.62, 0.28, 0.92, 0.62); } // purple beat
+  if (in.c > 4.5) { col = vec4<f32>(0.95, 0.75, 0.15, 0.30); } // posted room
   else if (in.c > 0.5) { col = vec4<f32>(0.9, 0.15, 0.1, 0.3); }
   return vec4<f32>(toSRGB(col.rgb) * col.a, col.a); // premultiplied
 }

@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "textures": "node scripts/compress-textures.mjs",
-    "check": "node scripts/check-roofs.ts"
+    "check": "node scripts/check-roofs.ts",
+    "sim-check": "node scripts/sim-golden.ts"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.40",

@@ -15,10 +15,14 @@ export type ToolCat =
   | "lamp" | "walllight" | "rooflight"
   | "piece"
   | "prisoner" | "guard" | "cook" | "workman" | "baton"
-  | "room" | "access" | "erase";
+  | "room" | "access"
+  | "patrol" | "unpatrol" | "deploy" | "undeploy"
+  | "erase";
 export interface Tool { cat: ToolCat; mat: number }
 interface Item { label: string; swatch: string; tool: Tool }
 interface Cat { key: string; label: string; items: Item[] }
+
+interface RoomGroup { key: string; label: string; types: number[] }
 
 /** A palette button straight from the object registry. */
 function pieceItem(kind: number): Item {
@@ -30,6 +34,11 @@ function pieceItem(kind: number): Item {
 function objItem(kind: number, cat: ToolCat): Item {
   const d = defOf(kind)!;
   return { label: d.palette!.label, swatch: d.palette!.swatch, tool: { cat, mat: 0 } };
+}
+
+function roomItem(type: number): Item {
+  const d = ROOM_DEFS.find((r) => r.type === type)!;
+  return { label: d.name, swatch: d.swatch, tool: { cat: "room", mat: type } };
 }
 
 // The few kinds that need a bespoke world setter rather than placePiece.
@@ -51,6 +60,21 @@ function groupCats(): Cat[] {
     byGroup.get(g)!.push(special ? objItem(d.kind, special) : pieceItem(d.kind));
   }
   return order.map((g) => ({ key: g.toLowerCase(), label: g, items: byGroup.get(g)! }));
+}
+
+const ROOM_GROUPS: RoomGroup[] = [
+  { key: "prisoner", label: "Prisoner", types: [RoomType.Cell, RoomType.Dorm, RoomType.Canteen, RoomType.ShowerRoom, RoomType.Yard] },
+  { key: "living", label: "Living", types: [RoomType.CommonRoom, RoomType.Library, RoomType.Gym, RoomType.Chapel] },
+  { key: "staff", label: "Staff", types: [RoomType.Kitchen, RoomType.StaffRoom] },
+  { key: "utility", label: "Utility", types: [RoomType.Empty] },
+];
+
+function roomCats(): Cat[] {
+  return ROOM_GROUPS.map((group) => ({
+    key: group.key,
+    label: group.label,
+    items: group.types.map((type) => roomItem(type)),
+  }));
 }
 
 const CATS: Cat[] = [
@@ -77,20 +101,30 @@ const CATS: Cat[] = [
       { label: "Baton", swatch: "#202024", tool: { cat: "baton", mat: 0 } },
     ],
   },
-  {
-    key: "rooms", label: "Rooms",
-    items: ROOM_DEFS
-      .filter((r) => r.type !== RoomType.Empty)
-      .map((r) => ({ label: r.name, swatch: r.swatch, tool: { cat: "room", mat: r.type } as Tool }))
-      // "Empty" is how you un-paint, so it belongs last, not first.
-      .concat([{ label: "Empty Room", swatch: "#9a9a9a", tool: { cat: "room", mat: RoomType.Empty } }]),
-  },
+  ...roomCats(),
   {
     key: "access", label: "Access",
     items: [
       { label: "Staff", swatch: "#e8d44d", tool: { cat: "access", mat: Access.Staff } },
       { label: "Prisoners", swatch: "#f07018", tool: { cat: "access", mat: Access.Prisoners } },
       { label: "Forbidden", swatch: "#d63030", tool: { cat: "access", mat: Access.Forbidden } },
+    ],
+  },
+  {
+    key: "patrol", label: "Patrol",
+    items: [
+      // Two colours so two beats can cross without becoming one beat.
+      { label: "Blue Beat", swatch: "#3372f2", tool: { cat: "patrol", mat: 0 } },
+      { label: "Purple Beat", swatch: "#9e47eb", tool: { cat: "patrol", mat: 1 } },
+      { label: "Clear Beat", swatch: "#d66666", tool: { cat: "unpatrol", mat: 0 } },
+    ],
+  },
+  {
+    key: "deploy", label: "Deploy",
+    items: [
+      // Click a beat to put a guard on it; click a room to post one inside.
+      { label: "Assign Guard", swatch: "#f2c53d", tool: { cat: "deploy", mat: 0 } },
+      { label: "Remove Guard", swatch: "#d66666", tool: { cat: "undeploy", mat: 0 } },
     ],
   },
   { key: "erase", label: "Erase", items: [{ label: "Erase", swatch: "#d66666", tool: { cat: "erase", mat: 0 } }] },
@@ -101,41 +135,117 @@ export class Editor {
   orient = 0; // 0..3 quarter turns
   /** The room a room-paint drag is filling (0 = not dragging). Set by main. */
   roomDrag = 0;
+  /** The beat a patrol drag is drawing (0 = not dragging). Set by main. */
+  routeDrag = 0;
   onChange?: () => void; // called when a tool is (de)selected, to update build mode
 
   private palette: HTMLElement;
   private cats: HTMLElement;
   private activeCat = CATS[0];
+  private visibleCats: Cat[] = CATS;
   private itemButtons: HTMLButtonElement[] = [];
+  private candidate: Item | null = null;
+  private detailType: HTMLElement;
+  private detailName: HTMLElement;
+  private detailCopy: HTMLElement;
+
+  private readonly categoryHelp: Record<string, string> = {
+    floor: "Choose a surface finish for paths, interiors, and yards.",
+    wall: "Build the perimeter and define secure interior spaces.",
+    prisoner: "Core prisoner spaces for meals, sleep, hygiene, and yard access.",
+    living: "Shared welfare rooms that raise comfort and routine.",
+    staff: "Back-of-house rooms for the prison team.",
+    utility: "Empty room lets you clear a painted area back to nothing.",
+    people: "Place residents and operational staff.",
+    access: "Control where staff and prisoners are permitted to go.",
+    patrol: "Lay out patrol routes and security coverage.",
+    deploy: "Assign guards to rooms and patrol routes.",
+    erase: "Remove a structure, object, or resident from the yard.",
+  };
 
   constructor() {
     this.cats = document.getElementById("cats")!;
     this.palette = document.getElementById("palette")!;
+    this.detailType = document.getElementById("detailType")!;
+    this.detailName = document.getElementById("detailName")!;
+    this.detailCopy = document.getElementById("detailCopy")!;
 
-    CATS.forEach((cat) => {
-      const b = document.createElement("button");
-      b.className = "build-cat";
-      b.textContent = cat.label;
-      b.onclick = () => this.selectCat(cat, b);
-      this.cats.appendChild(b);
-      (cat as Cat & { el?: HTMLButtonElement }).el = b;
-    });
+    this.setMode("build", false);
 
     addEventListener("keydown", (e) => {
       if (e.key === "Escape") this.clear();
       if (e.key === "r" || e.key === "R") this.orient = (this.orient + 1) % 4;
     });
+  }
 
-    this.selectCat(CATS[0], (CATS[0] as Cat & { el?: HTMLButtonElement }).el!);
+  private renderCategories() {
+    this.cats.innerHTML = "";
+    this.visibleCats.forEach((cat) => {
+      const b = document.createElement("button");
+      b.className = "build-cat";
+      b.textContent = cat.label;
+      b.onclick = () => this.selectCat(cat, b, true);
+      this.cats.appendChild(b);
+      (cat as Cat & { el?: HTMLButtonElement }).el = b;
+    });
   }
 
   get active(): boolean { return this.tool !== null; }
 
-  private selectCat(cat: Cat, btn: HTMLButtonElement) {
+  /** Open a catalog section from the operations rail. */
+  setMode(mode: string, clearTool = true) {
+    const modeKeys: Record<string, string[]> = {
+      build: ["floor", "wall", "doors", "lights"],
+      rooms: ["prisoner", "living", "staff", "utility", "access"],
+      objects: ["cells", "dining", "library", "seating", "gym", "common", "chapel", "staff", "decor", "security"],
+      staff: ["people", "deploy"],
+      logistics: ["patrol", "access"],
+      intelligence: ["access", "patrol"],
+      admin: ["erase"],
+    };
+    const keys = modeKeys[mode] ?? modeKeys.build;
+    this.visibleCats = CATS.filter((cat) => keys.includes(cat.key));
+    this.renderCategories();
+    const first = this.visibleCats[0] ?? CATS[0];
+    this.selectCat(first, (first as Cat & { el?: HTMLButtonElement }).el!, clearTool);
+  }
+
+  selectCategory(key: string) {
+    const cat = CATS.find((x) => x.key === key) ?? CATS[0];
+    if (!this.visibleCats.includes(cat)) {
+      this.visibleCats = [cat];
+      this.renderCategories();
+    }
+    this.selectCat(cat, (cat as Cat & { el?: HTMLButtonElement }).el!, true);
+  }
+
+  private selectCat(cat: Cat, btn: HTMLButtonElement, clearTool: boolean) {
     this.activeCat = cat;
     this.cats.querySelectorAll(".build-cat").forEach((e) => e.classList.remove("on"));
     btn.classList.add("on");
+    if (clearTool) {
+      this.tool = null;
+      this.candidate = null;
+      this.onChange?.();
+    }
+    this.updateCatalogHeading();
     this.renderPalette();
+  }
+
+  private updateCatalogHeading() {
+    const icon = document.getElementById("catalogIcon")!;
+    const title = document.getElementById("toolName")!;
+    const hint = document.getElementById("toolHint")!;
+    const icons: Record<string, string> = {
+      floor: "\u25A4", wall: "\u25A5", rooms: "\u25A6", people: "\u2659", access: "\u25C9",
+      patrol: "\u2301", deploy: "\u2691", erase: "\u00D7",
+    };
+    icon.textContent = icons[this.activeCat.key] ?? "\u25C8";
+    title.textContent = this.activeCat.label;
+    hint.textContent = this.categoryHelp[this.activeCat.key] ?? "Choose an item, then confirm construction.";
+    this.detailType.textContent = this.activeCat.label;
+    this.detailName.textContent = "Choose an item";
+    this.detailCopy.textContent = this.categoryHelp[this.activeCat.key] ?? "Select an item from the catalog to see its placement details.";
   }
 
   private renderPalette() {
@@ -144,25 +254,65 @@ export class Editor {
     this.activeCat.items.forEach((item) => {
       const b = document.createElement("button");
       b.className = "build-item";
-      b.innerHTML = `<span class="sw" style="background:${item.swatch}"></span>${item.label}`;
+      const swatch = document.createElement("span");
+      swatch.className = "item-swatch";
+      swatch.style.background = `linear-gradient(135deg, rgba(255,255,255,.15), transparent 52%), ${item.swatch}`;
+      const title = document.createElement("span");
+      title.className = "item-title";
+      title.textContent = item.label;
+      const meta = document.createElement("span");
+      meta.className = "item-meta";
+      meta.textContent = this.itemMeta(item);
+      b.append(swatch, title, meta);
       b.onclick = () => this.selectItem(item, b);
-      if (this.tool && sameTool(this.tool, item.tool)) b.classList.add("on");
+      if (this.candidate && sameTool(this.candidate.tool, item.tool)) b.classList.add("on");
       this.palette.appendChild(b);
       this.itemButtons.push(b);
     });
   }
 
+  private itemMeta(item: Item): string {
+    if (item.tool.cat === "floor") return "Surface finish";
+    if (item.tool.cat === "wall" || item.tool.cat === "fence") return "Structural";
+    if (item.tool.cat === "room") return "Room designation";
+    if (item.tool.cat === "patrol" || item.tool.cat === "deploy") return "Security tool";
+    if (item.tool.cat === "erase") return "Removal tool";
+    return "Ready to place";
+  }
+
   private selectItem(item: Item, btn: HTMLButtonElement) {
     this.tool = item.tool;
+    this.candidate = item;
     this.itemButtons.forEach((b) => b.classList.remove("on"));
     btn.classList.add("on");
+    this.detailType.textContent = this.activeCat.label;
+    this.detailName.textContent = item.label;
+    this.detailCopy.textContent = this.itemDescription(item);
     this.onChange?.();
+  }
+
+  private itemDescription(item: Item): string {
+    if (item.tool.cat === "floor") return `Lay ${item.label.toLowerCase()} across a selected area. Drag to fill a rectangle.`;
+    if (item.tool.cat === "wall" || item.tool.cat === "fence") return `Draw a straight run of ${item.label.toLowerCase()} to shape and secure the prison.`;
+    if (item.tool.cat === "room") return `Mark a zone as a ${item.label.toLowerCase()} so residents and staff understand its purpose.`;
+    if (item.tool.cat === "patrol" || item.tool.cat === "deploy") return `Use this ${item.label.toLowerCase()} tool directly on the yard.`;
+    return `Place ${item.label.toLowerCase()} in the world. Use R to rotate before placement where applicable.`;
   }
 
   clear() {
     this.tool = null;
+    this.candidate = null;
     this.itemButtons.forEach((b) => b.classList.remove("on"));
+    this.detailName.textContent = "Choose an item";
+    this.detailCopy.textContent = this.categoryHelp[this.activeCat.key] ?? "Select an item from the catalog to see its placement details.";
     this.onChange?.();
+  }
+
+  /** Do the staff tools show their layer? Beats and postings are invisible
+   *  clutter the rest of the time, so they only appear while you're editing. */
+  get showStaffLayer(): boolean {
+    const c = this.tool?.cat;
+    return c === "patrol" || c === "unpatrol" || c === "deploy" || c === "undeploy";
   }
 
   /** Apply the current tool to a tile. Returns true if the world likely changed. */
@@ -191,6 +341,19 @@ export class Editor {
           ? world.paintRoomInto(x, z, this.roomDrag)
           : world.paintRoom(x, z, this.tool.mat);
       case "access": return world.setRoomAccess(x, z, this.tool.mat);
+      // Patrol and deploy are wired up by main (they need agent state), but the
+      // drag itself runs through here.
+      case "patrol":
+        return this.routeDrag > 0 && world.addRouteTile(this.routeDrag, x, z);
+      case "unpatrol": {
+        const r = world.routeAtTile(x, z);
+        if (r === 0) return false;
+        world.removeRoute(r);
+        return true;
+      }
+      case "deploy":
+      case "undeploy":
+        return false; // handled in main: it owns the guard roster
       case "erase": world.erase(x, z); return true;
     }
   }

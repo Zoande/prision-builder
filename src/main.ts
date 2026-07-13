@@ -7,7 +7,7 @@ import {
 } from "./sim/agents";
 import { Item, countItem, itemDef } from "./sim/items";
 import { Editor } from "./editor";
-import { clockLabel, evalAtmosphere, HOUR_SECONDS, hourOf, isNightAt } from "./daynight";
+import { clockLabel, dayOf, evalAtmosphere, HOUR_SECONDS, hourOf, isNightAt } from "./daynight";
 import { GroundPass } from "./render/groundPass";
 import { FloorPass } from "./render/floorPass";
 import { WallPass } from "./render/wallPass";
@@ -60,9 +60,10 @@ async function main() {
   const quality: Quality = localStorage.getItem("texQuality") === "1k" ? "1k" : "4k";
   configureAssets({ quality, bcSupported });
   const qualBtn = document.getElementById("qualBtn") as HTMLButtonElement;
-  if (!bcSupported) { qualBtn.textContent = "Quality: Raw (no BC)"; qualBtn.disabled = true; }
+  if (!bcSupported) { qualBtn.textContent = "RAW"; qualBtn.title = "Raw textures (BC compression unavailable)"; qualBtn.disabled = true; }
   else {
-    qualBtn.textContent = quality === "4k" ? "Quality: High (4K)" : "Quality: Low (1K)";
+    qualBtn.textContent = quality === "4k" ? "HQ" : "LQ";
+    qualBtn.title = quality === "4k" ? "Texture quality: High (4K)" : "Texture quality: Low (1K)";
     qualBtn.addEventListener("click", () => {
       localStorage.setItem("texQuality", quality === "4k" ? "1k" : "4k");
       location.reload();
@@ -265,13 +266,34 @@ async function main() {
   const editor = new Editor();
   editor.onChange = () => { camera.buildMode = editor.active; };
 
+  const buildPanel = document.getElementById("build")!;
+  let activeMode = "";
+  document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.mode ?? "build";
+      if (activeMode === mode) {
+        activeMode = "";
+        btn.classList.remove("on");
+        buildPanel.classList.remove("open");
+        editor.clear();
+        return;
+      }
+      document.querySelectorAll(".mode-btn").forEach((x) => x.classList.remove("on"));
+      btn.classList.add("on");
+      activeMode = mode;
+      buildPanel.classList.add("open");
+      editor.setMode(mode);
+    });
+  });
+
   // Roof transparency toggle.
   let roofAlpha = ROOF_SOLID;
   const roofBtn = document.getElementById("roofBtn") as HTMLButtonElement;
   roofBtn.addEventListener("click", () => {
     const solid = roofAlpha === ROOF_SOLID;
     roofAlpha = solid ? ROOF_GHOST : ROOF_SOLID;
-    roofBtn.textContent = solid ? "Roof: Transparent" : "Roof: Solid";
+    roofBtn.textContent = solid ? "\u25B1" : "\u2302";
+    roofBtn.title = solid ? "Roof: Transparent" : "Roof: Solid";
     roofBtn.classList.toggle("off", solid);
   });
 
@@ -300,6 +322,20 @@ async function main() {
     if (dragPlaced.has(key)) return;
     dragPlaced.add(key);
     if (editor.apply(world, tx, tz)) { dirty = true; saveDirty = true; }
+    // Deployment acts on the guard roster, not on tiles, so it lives here.
+    const dcat = editor.tool?.cat;
+    if (dcat === "deploy" || dcat === "undeploy") {
+      const step = dcat === "deploy" ? 1 : -1;
+      const route = world.routeAtTile(tx, tz);
+      if (route > 0) {
+        agents.setRouteQuota(route, Math.max(0, agents.routeQuota(route) + step));
+      } else {
+        const room = world.roomAt(world.idx(tx, tz));
+        if (room) room.guards = Math.max(0, room.guards + step);
+      }
+      dirty = true;
+      saveDirty = true;
+    }
     // Tools that act on live agents rather than tiles.
     if (editor.tool?.cat === "erase") { agents.eraseAt(tx, tz); saveDirty = true; }
     if (editor.tool?.cat === "baton") { agents.giveBatonAt(tx, tz); saveDirty = true; }
@@ -379,6 +415,10 @@ async function main() {
     const tx = tile.x, tz = tile.z;
     lastTX = tx; lastTZ = tz;
     const cat = editor.tool?.cat;
+    if (cat === "deploy" || cat === "undeploy") {
+      if (!dragPlaced.has(`${tx},${tz}`)) applyBuildAt(tx, tz);
+      return;
+    }
     if (cat === "floor" || cat === "room") applyFloorRect(tile);
     else if (cat === "wall" || cat === "fence") applyLockedLine(tile);
     else {
@@ -390,6 +430,7 @@ async function main() {
   // Agent inspection (click with no tool active).
   let selected: Agent | null = null;
   let overlayT = 0;
+  let staffLayerWasUp = false;
   function selectAt(e: PointerEvent) {
     const rect = canvas.getBoundingClientRect();
     const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -400,6 +441,24 @@ async function main() {
     selected = agents.agentNear(hit[0], hit[1], 1.5);
     overlayT = 0;
     if (!selected) overlay.clear();
+    updateInspector();
+  }
+
+  const inspector = document.getElementById("inspector")!;
+  const inspectName = document.getElementById("inspectName")!;
+  const inspectState = document.getElementById("inspectState")!;
+  const inspectStats = document.getElementById("inspectStats")!;
+  function updateInspector() {
+    if (!selected) { inspector.classList.remove("show"); return; }
+    const kind = selected.kind === 8 ? "Prisoner" : selected.kind === 9 ? "Guard" : selected.kind === 20 ? "Cook" : "Workman";
+    const pct = (v: number) => `${Math.round(v * 100)}%`;
+    inspectName.textContent = `${kind} #${selected.id}`;
+    inspectState.textContent = STATE_TEXT[selected.state] ?? selected.state;
+    inspectStats.innerHTML = [
+      ["Food", pct(selected.needs.food)], ["Rest", pct(selected.needs.sleep)],
+      ["Comfort", pct(selected.needs.comfort)], ["Outdoors", pct(selected.needs.outdoors)],
+    ].map(([label, value]) => `<div class="inspect-stat"><small>${label}</small><strong>${value}</strong></div>`).join("");
+    inspector.classList.add("show");
   }
 
   canvas.addEventListener("pointerdown", (e) => {
@@ -415,6 +474,9 @@ async function main() {
     if (editor.tool?.cat === "room") {
       editor.roomDrag = world.startRoomPaint(tile.x, tile.z, editor.tool.mat);
     }
+    if (editor.tool?.cat === "patrol") {
+      editor.routeDrag = world.startRoute(editor.tool.mat);
+    }
     paintAt(e);
   });
   canvas.addEventListener("pointermove", (e) => { if (painting) paintAt(e); });
@@ -427,6 +489,12 @@ async function main() {
     if (editor.roomDrag > 0) {
       world.endRoomPaint(editor.roomDrag);
       editor.roomDrag = 0;
+      dirty = true;
+      saveDirty = true;
+    }
+    if (editor.routeDrag > 0) {
+      world.endRoute(editor.routeDrag);
+      editor.routeDrag = 0;
       dirty = true;
       saveDirty = true;
     }
@@ -612,7 +680,7 @@ async function main() {
     roomOverlay.innerHTML = "";
     for (const t of previewTiles()) addPreviewTile(viewProj, t.x, t.z);
     addPreviewArrow(viewProj);
-    capEl.textContent = `Prisoners: ${agents.prisonerCount()}/${world.prisonerCapacity()}`;
+    capEl.innerHTML = `<span class="status-label">Population</span><span class="status-value">${agents.prisonerCount()} / ${world.prisonerCapacity()}</span>`;
     for (const r of world.roomLabels()) {
       const p = projectToScreen(viewProj, r.x, 0.12, r.z);
       if (!p) continue;
@@ -697,7 +765,13 @@ async function main() {
       simTrack.set(ag.id, { x: ag.x, z: ag.z, state: ag.state, stillFor });
       const n = ag.needs;
       const reasons: string[] = [];
-      if (stillFor > 90 && !["sleeping", "eating", "showering", "sitting", "inCell", "cuffed"].includes(ag.state)) {
+      // States where standing still for a long time is the whole point, so they
+      // are not evidence of a stuck agent.
+      const RESTING = [
+        "using", "sleepFloor", "reading", "inCell", "cuffed", "queueing",
+        "knockedOut", "stakeout", "manning", "cooking", "scanning", "aiming",
+      ];
+      if (stillFor > 90 && !RESTING.includes(ag.state)) {
         reasons.push(`same state/tile ${Math.round(stillFor)}s`);
       }
       if (ag.state === "idle" && stillFor > 45) reasons.push(`idle ${Math.round(stillFor)}s`);
@@ -774,18 +848,43 @@ async function main() {
     const atmo = evalAtmosphere(worldTime);
 
     // Clock + regime UI.
-    clockEl.textContent = clockLabel(worldTime);
+    const clockHour = hourOf(worldTime);
+    const clockMinutes = Math.floor((clockHour - Math.floor(clockHour)) * 60);
+    clockEl.innerHTML = `<span class="clock-day">DAY ${dayOf(worldTime)}</span>` +
+      `<span class="clock-time">${String(Math.floor(clockHour)).padStart(2, "0")}:${String(clockMinutes).padStart(2, "0")}</span>` +
+      `<span class="clock-sun">${isNightAt(worldTime) ? "☾" : "☀"}</span>`;
     regimeBtn.textContent = `Regime: ${REG_NAMES[agents.regime[Math.floor(hourOf(worldTime))]]}`;
+    const escapedEl = document.getElementById("escaped");
+    const caughtEl = document.getElementById("caught");
+    if (escapedEl) escapedEl.textContent = String(agents.escapedCount);
+    if (caughtEl) caughtEl.textContent = String(agents.caughtCount);
 
     people.update(device, agents.personInstances());
     if (agents.takeWorldDirty()) { dirty = true; saveDirty = true; } // fences cut / repaired
     else if (agents.takeMealsDirty()) { refreshFurniture(); saveDirty = true; }
-    if (selected && !agents.agents.includes(selected)) { selected = null; overlay.clear(); }
+    if (selected && !agents.agents.includes(selected)) { selected = null; overlay.clear(); updateInspector(); }
+    if (selected) updateInspector();
     overlayT -= dt;
-    if (selected && overlayT <= 0) {
+    // The overlay does two jobs and never both at once: while a staff tool is
+    // up it shows the beats and the posted rooms; otherwise, the selected
+    // agent's memory.
+    if (editor.showStaffLayer) {
+      if (overlayT <= 0) {
+        overlayT = 0.25;
+        const routes = world.routeOverlay();
+        const posted = world.postedOverlay();
+        const both = new Float32Array(routes.length + posted.length);
+        both.set(posted, 0);
+        both.set(routes, posted.length); // beats draw over the room tint
+        overlay.set(device, both);
+      }
+    } else if (selected && overlayT <= 0) {
       overlayT = 0.5;
       overlay.set(device, agents.knownOverlay(selected, world));
+    } else if (!selected && staffLayerWasUp) {
+      overlay.clear();
     }
+    staffLayerWasUp = editor.showStaffLayer;
 
     const aspect = canvas.width / canvas.height;
     const viewProj = camera.viewProj(aspect);
