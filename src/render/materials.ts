@@ -8,6 +8,7 @@ export interface FloorMat {
   col: string;
   nrm: string;
   swatch: string;
+  buildable?: boolean;
 }
 
 export const FLOOR_MATS: FloorMat[] = [
@@ -15,6 +16,10 @@ export const FLOOR_MATS: FloorMat[] = [
   { id: 2, name: "Worn Concrete", col: "concrete_col", nrm: "concrete_nrm", swatch: "#bdb9b1" },
   { id: 3, name: "Wood", col: "wood_col", nrm: "wood_nrm", swatch: "#b98a57" },
   { id: 4, name: "Metal", col: "galv_col", nrm: "galv_nrm", swatch: "#b7bbc0" },
+  // Infrastructure-only. They are intentionally absent from Editor's floor
+  // catalog (the editor filters these by `buildable`).
+  { id: 5, name: "Road Black", col: "black_col", nrm: "black_nrm", swatch: "#17191b", buildable: false },
+  { id: 6, name: "Road White", col: "white_col", nrm: "floor2_nrm", swatch: "#f4f4ef", buildable: false },
 ];
 
 export interface WallMat {

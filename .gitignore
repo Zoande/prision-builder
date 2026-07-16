@@ -15,6 +15,7 @@ assets/textures-src/
 
 # Local state written by the dev-server middleware in vite.config.mjs
 prototype-save.json
+prototype-save.v1-backup.json
 sim-log.jsonl
 
 # Editor / OS

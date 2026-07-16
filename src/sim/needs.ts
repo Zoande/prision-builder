@@ -123,7 +123,7 @@ export function trySatisfy(A: Agents, ag: Agent, world: World, need: NeedName): 
       const open = lawfulOpen(ag, world);
       const spot = bfsFind(size, start, open, (i) => open(i) && world.roofed[i] === 0);
       if (spot >= 0) {
-        const path = astar(size, start, spot, open);
+        const path = astar(size, start, spot, open, 30000, (from, to) => world.canNavigateEdge(from, to));
         if (path) {
           ag.path = path; ag.pathI = 0;
           ag.state = "toOutside";
@@ -229,7 +229,7 @@ export function trySneak(A: Agents, ag: Agent, world: World, need: "outdoors" | 
   if (need === "outdoors") {
     const spot = bfsFind(size, start, open, (i) => open(i) && world.roofed[i] === 0);
     if (spot >= 0) {
-      const path = astar(size, start, spot, open);
+      const path = astar(size, start, spot, open, 30000, (from, to) => world.canNavigateEdge(from, to));
       if (path) {
         ag.path = path; ag.pathI = 0;
         ag.state = "toOutside";
@@ -323,7 +323,7 @@ export function explore(ag: Agent, world: World, trespass = false) {
     if (s > bestScore) { bestScore = s; best = i; }
   }
   if (best >= 0) {
-    const path = astar(size, start, best, open);
+    const path = astar(size, start, best, open, 30000, (from, to) => world.canNavigateEdge(from, to));
     if (path) {
       ag.path = path; ag.pathI = 0;
       ag.state = "exploring";
@@ -333,7 +333,7 @@ export function explore(ag: Agent, world: World, trespass = false) {
   const keys = [...ag.known!.keys()].filter(open);
   if (keys.length > 0) {
     const t = keys[(rnd() * keys.length) | 0];
-    const path = astar(size, start, t, open);
+    const path = astar(size, start, t, open, 30000, (from, to) => world.canNavigateEdge(from, to));
     if (path) {
       ag.path = path; ag.pathI = 0;
       ag.state = "wandering";
@@ -342,4 +342,3 @@ export function explore(ag: Agent, world: World, trespass = false) {
   }
   ag.state = "idle";
 }
-

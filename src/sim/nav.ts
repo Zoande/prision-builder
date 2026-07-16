@@ -47,6 +47,7 @@ export function isFenceKind(k: number): boolean {
 export function astar(
   size: number, start: number, goal: number,
   open: (i: number) => boolean, maxNodes = 30000,
+  canStep: (from: number, to: number) => boolean = () => true,
 ): number[] | null {
   if (start === goal) return [start];
   const gx = goal % size, gz = (goal / size) | 0;
@@ -100,7 +101,7 @@ export function astar(
       const nx = cx + dx, nz = cz + dz;
       if (nx < 0 || nz < 0 || nx >= size || nz >= size) continue;
       const ni = nz * size + nx;
-      if (!open(ni)) continue;
+      if (!open(ni) || !canStep(cur, ni)) continue;
       const ng = gc + 1;
       if (ng >= (g.get(ni) ?? Infinity)) continue;
       g.set(ni, ng); from.set(ni, cur);

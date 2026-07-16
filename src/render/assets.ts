@@ -30,7 +30,7 @@ const RAW: Record<string, string> = {
   concrete_col: "concrete_col.jpg", concrete_nrm: "concrete_nrm.png",
   wall_col: "wall_col.png", wall_nrm: "wall_nrm.png",
   wood_col: "wood_col.jpg", wood_nrm: "wood_nrm.png",
-  black_col: "black_col.jpg",
+  black_col: "black_col.jpg", black_nrm: "black_nrm.png",
   galv_col: "galv_col.png", galv_nrm: "galv_nrm.png",
   corroded_col: "corroded_col.png", corroded_nrm: "corroded_nrm.png",
   fabric_col: "fabric_col.png",
@@ -62,6 +62,14 @@ export async function loadTex(device: GPUDevice, name: string, srgb: boolean): P
 }
 
 async function loadTexUncached(device: GPUDevice, name: string, srgb: boolean): Promise<GPUTexture> {
+  if (name === "white_col") {
+    const texture = device.createTexture({
+      size: [1, 1, 1], format: srgb ? "rgba8unorm-srgb" : "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture({ texture }, new Uint8Array([245, 245, 240, 255]), { bytesPerRow: 4 }, [1, 1, 1]);
+    return texture;
+  }
   if (bcSupported && COMPRESSED.has(name)) {
     try {
       return await loadKtxTexture(device, `/textures/compressed/${name}.${quality}.ktx`, srgb);

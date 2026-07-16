@@ -65,8 +65,8 @@ function groupCats(): Cat[] {
 const ROOM_GROUPS: RoomGroup[] = [
   { key: "prisoner", label: "Prisoner", types: [RoomType.Cell, RoomType.Dorm, RoomType.Canteen, RoomType.ShowerRoom, RoomType.Yard] },
   { key: "living", label: "Living", types: [RoomType.CommonRoom, RoomType.Library, RoomType.Gym, RoomType.Chapel] },
-  { key: "staff", label: "Staff", types: [RoomType.Kitchen, RoomType.StaffRoom] },
-  { key: "utility", label: "Utility", types: [RoomType.Empty] },
+  { key: "staff", label: "Staff", types: [RoomType.Kitchen, RoomType.StaffRoom, RoomType.Reception] },
+  { key: "utility", label: "Utility", types: [RoomType.Delivery, RoomType.Exports, RoomType.Empty] },
 ];
 
 function roomCats(): Cat[] {
@@ -80,7 +80,8 @@ function roomCats(): Cat[] {
 const CATS: Cat[] = [
   {
     key: "floor", label: "Floors",
-    items: FLOOR_MATS.map((m) => ({ label: m.name, swatch: m.swatch, tool: { cat: "floor", mat: m.id } })),
+    items: FLOOR_MATS.filter((m) => m.buildable !== false)
+      .map((m) => ({ label: m.name, swatch: m.swatch, tool: { cat: "floor", mat: m.id } })),
   },
   {
     key: "wall", label: "Walls",
@@ -94,7 +95,6 @@ const CATS: Cat[] = [
   {
     key: "people", label: "People",
     items: [
-      objItem(Obj.Prisoner, "prisoner"),
       objItem(Obj.Guard, "guard"),
       objItem(Obj.Cook, "cook"),
       objItem(Obj.Workman, "workman"),
@@ -199,7 +199,7 @@ export class Editor {
       rooms: ["prisoner", "living", "staff", "utility", "access"],
       objects: ["cells", "dining", "library", "seating", "gym", "common", "chapel", "staff", "decor", "security"],
       staff: ["people", "deploy"],
-      logistics: ["patrol", "access"],
+      logistics: ["logistics", "access"],
       intelligence: ["access", "patrol"],
       admin: ["erase"],
     };

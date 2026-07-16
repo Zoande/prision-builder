@@ -36,6 +36,9 @@ export const Obj = {
   PottedPlant: 49, LargePlant: 50, Rug: 51, TrashCan: 52,
   // --- Security ---
   SniperTower: 53, Sniper: 54,
+  // --- Logistics / reception ---
+  LoadingPallet: 55, Freezer: 56, Sink: 57, SearchTable: 58, UniformRack: 59,
+  SecureBridge: 60,
 } as const;
 export type ObjKind = (typeof Obj)[keyof typeof Obj];
 
@@ -451,6 +454,32 @@ export const OBJ_DEFS: ObjDef[] = [
     palette: { label: "Sniper Tower", swatch: "#5c6b52", group: "Security" },
   }),
 
+  // --- Logistics / reception ----------------------------------------------
+  def(Obj.LoadingPallet, "Loading Pallet", {
+    w: 2, d: 2, render: "furniture",
+    palette: { label: "Loading Pallet", swatch: "#8f7048", group: "Logistics" },
+  }),
+  def(Obj.Freezer, "Freezer", {
+    w: 2, render: "furniture",
+    palette: { label: "Freezer", swatch: "#cbd8df", group: "Dining" },
+  }),
+  def(Obj.Sink, "Sink", {
+    render: "furniture",
+    palette: { label: "Sink", swatch: "#b8c7cc", group: "Dining" },
+  }),
+  def(Obj.SearchTable, "Search Table", {
+    w: 2, render: "furniture",
+    palette: { label: "Search Table", swatch: "#8c7356", group: "Logistics" },
+  }),
+  def(Obj.UniformRack, "Uniform Rack", {
+    render: "furniture",
+    palette: { label: "Uniform Rack", swatch: "#667580", group: "Logistics" },
+  }),
+  def(Obj.SecureBridge, "Secure Bridge", {
+    w: 10, d: 2, walkable: true, render: "furniture",
+    palette: { label: "Secure Bridge", swatch: "#59636b", group: "Security" },
+  }),
+
   // --- People ---------------------------------------------------------------
   // No palette button: a sniper is posted by building him a tower.
   def(Obj.Sniper, "Sniper", { place: "person" }),
@@ -475,6 +504,7 @@ export const OBJ_DEFS: ObjDef[] = [
 export const RoomType = {
   Empty: 0, Kitchen: 1, Yard: 2, Canteen: 3, Cell: 4, Dorm: 5, ShowerRoom: 6,
   Library: 7, Gym: 8, CommonRoom: 9, Chapel: 10, StaffRoom: 11,
+  Delivery: 12, Exports: 13, Reception: 14,
 } as const;
 
 /** A requirement is satisfied by any one of `kinds`. */
@@ -491,6 +521,9 @@ export interface RoomDef {
   needsJailDoor: boolean;
   /** Defaults to prisoner access when painted. */
   prisonerAccess: boolean;
+  /** Room must be outdoors (no roof over any designated tile). */
+  openSky: boolean;
+  needsRoadGate: boolean;
 }
 
 function room(
@@ -499,6 +532,8 @@ function room(
   return {
     type, name, swatch,
     minSquare: 0, requires: [], needsJailDoor: false, prisonerAccess: false,
+    openSky: false,
+    needsRoadGate: false,
     ...o,
   };
 }
@@ -516,7 +551,11 @@ export const ROOM_DEFS: RoomDef[] = [
   room(RoomType.Empty, "Empty Room", "#9a9a9a"),
   room(RoomType.Kitchen, "Kitchen", "#c96f3b", {
     minSquare: 5,
-    requires: [{ kinds: [Obj.Cooker], issue: "Needs a cooker." }],
+    requires: [
+      { kinds: [Obj.Cooker], issue: "Needs a cooker." },
+      { kinds: [Obj.Freezer], issue: "Needs a freezer." },
+      { kinds: [Obj.Sink], issue: "Needs a sink." },
+    ],
   }),
   room(RoomType.Yard, "Yard", "#7fae5a", { minSquare: 10, prisonerAccess: true }),
   room(RoomType.Canteen, "Canteen", "#caa84f", {
@@ -575,6 +614,22 @@ export const ROOM_DEFS: RoomDef[] = [
     requires: [
       { kinds: SEATS, issue: "Needs somewhere to sit." },
       { kinds: [Obj.CoffeeMachine, Obj.VendingMachine], issue: "Needs a coffee or vending machine." },
+    ],
+  }),
+  room(RoomType.Delivery, "Delivery Yard", "#d29a57", {
+    minSquare: 6, openSky: true, needsRoadGate: true,
+    requires: [{ kinds: [Obj.LoadingPallet], issue: "Needs a loading pallet." }],
+  }),
+  room(RoomType.Exports, "Exports", "#a26f55", {
+    minSquare: 5, openSky: true, needsRoadGate: true,
+    requires: [{ kinds: [Obj.LoadingPallet], issue: "Needs a loading pallet." }],
+  }),
+  room(RoomType.Reception, "Reception", "#6e91a8", {
+    minSquare: 5,
+    requires: [
+      { kinds: [Obj.SearchTable], issue: "Needs a search table." },
+      { kinds: [Obj.UniformRack], issue: "Needs a uniform rack." },
+      { kinds: [...SEATS, ...BENCHES], issue: "Needs seating." },
     ],
   }),
 ];

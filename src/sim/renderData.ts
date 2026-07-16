@@ -5,6 +5,8 @@ import { K_CUT, K_OPEN, type Agent } from "./agent.ts";
 import { Obj } from "./objects.ts";
 import type { Agents } from "./agents.ts";
 import type { World } from "./world.ts";
+import type { LogisticsSystem } from "./logistics.ts";
+import type { IntakeSystem } from "./intake.ts";
 
 export const PERSON_INSTANCE_FLOATS = 11;
 
@@ -115,6 +117,25 @@ export function holeInstances(A: Agents, world: World): { entries: Float32Array;
     if (t.surfHole >= 0) surfs.push(t.surfHole % world.size, (t.surfHole / world.size) | 0, 0);
   }
   return { entries: new Float32Array(entries), surfs: new Float32Array(surfs) };
+}
+
+export function logisticsInstances(logistics: LogisticsSystem, intake: IntakeSystem): {
+  trucks: Float32Array; intakeTrucks: Float32Array; cargo: Float32Array; drivers: Float32Array;
+} {
+  const trucks: number[] = [], intakeTrucks: number[] = [], cargo: number[] = [], drivers: number[] = [];
+  for (const truck of logistics.trucks) {
+    trucks.push(truck.x - 1, truck.z - 3, 0);
+    if (truck.state === "unloading" || truck.state === "blocked") drivers.push(371, 375 + (truck.id & 1), 2);
+  }
+  for (const truck of intake.vehicles) {
+    intakeTrucks.push(truck.x - 1, truck.z - 3, 0);
+    if (truck.state === "processing" || truck.state === "waiting") drivers.push(371, 373, 2);
+  }
+  for (const pkg of logistics.packages.values()) {
+    if (pkg.state === "in-transit" || pkg.state === "ordered") continue;
+    cargo.push(pkg.x + (pkg.id % 3) * 0.22, pkg.z + (Math.floor(pkg.id / 3) % 3) * 0.22, pkg.id & 3);
+  }
+  return { trucks: new Float32Array(trucks), intakeTrucks: new Float32Array(intakeTrucks), cargo: new Float32Array(cargo), drivers: new Float32Array(drivers) };
 }
 
 export function knownOverlay(ag: Agent, world: World): Float32Array {

@@ -1,7 +1,7 @@
 import type { IssueLabel } from "../sim/agent";
 import type { RoomLabel } from "../sim/world";
 
-export interface PreviewTile { x: number; z: number }
+export interface PreviewTile { x: number; z: number; tone?: "blue" | "red"; planned?: boolean }
 
 interface PositionedElement {
   el: HTMLDivElement;
@@ -116,6 +116,7 @@ export class WorldOverlay {
       const maxX = Math.max(p0[0], p1[0], p2[0], p3[0]);
       const maxY = Math.max(p0[1], p1[1], p2[1], p3[1]);
       const el = this.preview(visible++);
+      el.className = `build-preview ${tile.tone === "red" ? "invalid" : "planned"}${tile.planned ? " persistent" : ""}`;
       el.style.display = "";
       el.style.left = `${minX}px`;
       el.style.top = `${minY}px`;

@@ -44,10 +44,14 @@ import {
 } from "./agent.ts";
 import { releaseUse, startUse, updateUsing, useable } from "./useSlots.ts";
 import { decide, finishOutside, tryTunnelTrip } from "./needs.ts";
+import type { ConstructionSystem } from "./construction.ts";
+import type { KitchenSystem } from "./kitchen.ts";
 
 // The public face of the sim: everything main.ts and the render passes import.
 export {
   FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, TRAY_STACK_KIND,
+  TRUCK_KIND, INTAKE_TRUCK_KIND, CARGO_KIND,
+  DRIVER_KIND,
   REG, REG_NAMES, defaultRegime,
   POSE_STAND, POSE_SIT, POSE_LIE_BED, POSE_LIE_FLOOR, POSE_CLIMB,
 } from "./agent.ts";
@@ -92,6 +96,10 @@ export class Agents {
   caughtCount = 0;
   mealsDirty = false; // any tray/hole render change
   worldDirty = false; // sim mutated world tiles (cut/repair)
+  construction: ConstructionSystem | null = null;
+  kitchen: KitchenSystem | null = null;
+  staffPerformance = 1;
+  roadVehicleZ: number[] = [];
 
   takeMealsDirty(): boolean { const d = this.mealsDirty; this.mealsDirty = false; return d; }
   takeWorldDirty(): boolean { const d = this.worldDirty; this.worldDirty = false; return d; }
@@ -133,6 +141,7 @@ export class Agents {
     releaseUse(this, ag);
     if (ag.tunnel) ag.tunnel.occupied = false;
     if (ag.job) ag.job.claimedBy = -1;
+    if (ag.kind === Obj.Cook && (ag.state === "toCooker" || ag.state === "cooking")) this.kitchen?.releaseMealSet();
     for (const [s, id] of this.servers) if (id === ag.id) this.servers.delete(s);
     const n = this.agents.indexOf(ag);
     if (n >= 0) this.agents.splice(n, 1);
@@ -211,11 +220,22 @@ export class Agents {
 
     for (let n = this.agents.length - 1; n >= 0; n--) {
       const ag = this.agents[n];
+      if (!ag.underground && world.inBounds(Math.floor(ag.x), Math.floor(ag.z))) {
+        const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
+        ag.elev = world.objKind[here] === Obj.SecureBridge ? 2.86 : ag.kind === Obj.Sniper ? ag.elev : 0;
+      }
+      if (ag.path && ag.pathI < ag.path.length) {
+        const next = ag.path[ag.pathI], nx = next % world.size, nz = (next / world.size) | 0;
+        if (nx >= 372 && nx <= 377 && this.roadVehicleZ.some((z) => Math.abs(z - nz) < 5)) {
+          ag.amp = Math.max(0, ag.amp - dt * 8);
+          continue; // wait safely for the moving vehicle to clear the crossing
+        }
+      }
       if (ag.kind === Obj.Prisoner) this.updatePrisoner(ag, dt, world, isNight);
-      else if (ag.kind === Obj.Cook) this.updateCook(ag, dt, world);
-      else if (ag.kind === Obj.Guard) this.updateGuard(ag, dt, world);
-      else if (ag.kind === Obj.Sniper) this.updateSniper(ag, dt, world);
-      else this.updateWorkman(ag, dt, world);
+      else if (ag.kind === Obj.Cook) this.updateCook(ag, dt * this.staffPerformance, world);
+      else if (ag.kind === Obj.Guard) this.updateGuard(ag, dt * this.staffPerformance, world);
+      else if (ag.kind === Obj.Sniper) this.updateSniper(ag, dt * this.staffPerformance, world);
+      else this.updateWorkman(ag, dt * this.staffPerformance, world);
     }
   }
 
@@ -396,7 +416,7 @@ export class Agents {
           if (world.inBounds(nx, nz)) {
             const ni = world.idx(nx, nz);
             if (world.roomTypeAt(ni) === RoomType.Yard && lawfulOpen(ag, world)(ni)) {
-              const p = astar(size, world.idx(x, z), ni, lawfulOpen(ag, world), 2000);
+              const p = astar(size, world.idx(x, z), ni, lawfulOpen(ag, world), 2000, (from, to) => world.canNavigateEdge(from, to));
               if (p) { ag.path = p; ag.pathI = 0; }
             }
           }
@@ -450,7 +470,7 @@ export class Agents {
       }
       case "toShelf": {
         // Put the book back where it came from.
-        removeItem(ag.inv, Item.Book);
+        if (removeItem(ag.inv, Item.Book)) this.kitchen?.returnBook();
         ag.state = "idle";
         return;
       }
@@ -853,7 +873,7 @@ export class Agents {
     const tx = Math.max(2, Math.min(size - 3, Math.floor(ag.x + dir[0] * 40)));
     const tz = Math.max(2, Math.min(size - 3, Math.floor(ag.z + dir[1] * 40)));
     const start = Math.floor(ag.z) * size + Math.floor(ag.x);
-    const path = astar(size, start, tz * size + tx, fleeOpen(ag), 12000);
+    const path = astar(size, start, tz * size + tx, fleeOpen(ag), 12000, (from, to) => world.canNavigateEdge(from, to));
     if (path) {
       ag.path = path; ag.pathI = 0;
       ag.state = "fleeing";
@@ -1589,7 +1609,7 @@ export class Agents {
     const size = world.size;
     const start = world.idx(Math.floor(ag.x), Math.floor(ag.z));
     const open = (i: number) => passable(world, i, true);
-    const path = astar(size, start, t, open);
+    const path = astar(size, start, t, open, 30000, (from, to) => world.canNavigateEdge(from, to));
     if (!path) return false;
     ag.path = path; ag.pathI = 0;
     return true;
@@ -1604,7 +1624,7 @@ export class Agents {
     for (let n = 0; n < 12; n++) {
       const t = tiles[(rnd() * tiles.length) | 0];
       if (!open(t)) continue;
-      const path = astar(world.size, world.idx(Math.floor(ag.x), Math.floor(ag.z)), t, open);
+      const path = astar(world.size, world.idx(Math.floor(ag.x), Math.floor(ag.z)), t, open, 30000, (from, to) => world.canNavigateEdge(from, to));
       if (path) { ag.path = path; ag.pathI = 0; return true; }
     }
     return false;
@@ -1663,8 +1683,68 @@ export class Agents {
   updateWorkman(ag: Agent, dt: number, world: World) {
     const size = world.size;
     if (ag.path) {
+      if (ag.state === "deliverBuildCargo" && this.construction) this.construction.moveBundle(ag.interact, ag.x, ag.z);
+      if ((ag.state === "deliverBookCargo" || ag.state === "deliverExportCargo") && this.kitchen) {
+        this.kitchen.moveCarried(ag.interact, ag.x, ag.z);
+      }
       const done = followPath(ag, dt, world, true);
       if (done && ag.job) { ag.state = "repairing"; ag.timer = REPAIR_TIME; }
+      else if (done && ag.state === "toBuildCargo" && this.construction) {
+        const target = this.construction.groups.get(ag.buildGroup)?.targets.find((t) => t.id === ag.buildTarget);
+        if (target && this.construction.pickUpBundle(ag.buildGroup, ag.buildTarget, ag.interact, ag.id, ag.x, ag.z) &&
+            pathAdjacent(ag, world, world.idx(target.x, target.z), (i) => passable(world, i, true))) {
+          ag.state = "deliverBuildCargo";
+        } else {
+          this.construction.releaseClaim(ag.buildGroup, ag.buildTarget, ag.id, "Unreachable construction site");
+          ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
+        }
+      } else if (done && ag.state === "deliverBuildCargo" && this.construction) {
+        this.construction.deliverBundle(ag.buildGroup, ag.buildTarget, ag.interact, ag.id);
+        ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
+      }
+      else if (done && ag.buildGroup >= 0 && this.construction) {
+        const group = this.construction.groups.get(ag.buildGroup);
+        const target = group?.targets.find((t) => t.id === ag.buildTarget);
+        if (!target) {
+          ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
+        } else {
+          ag.state = group!.operation === "demolish" ? "demolishing" : "constructing";
+          ag.timer = target.workSeconds;
+        }
+      } else if (done && ag.state === "toBookCargo" && this.kitchen) {
+        const pkg = this.kitchen.logistics.packages.get(ag.interact);
+        if (pkg && pkg.reservedBy === `workman:${ag.id}`) {
+          pkg.state = "carried";
+          if (pathAdjacent(ag, world, ag.aux, (i) => passable(world, i, true))) ag.state = "deliverBookCargo";
+          else { pkg.state = "delivery"; pkg.reservedBy = null; ag.state = "idle"; }
+        } else ag.state = "idle";
+      } else if (done && ag.state === "deliverBookCargo" && this.kitchen) {
+        const pkg = this.kitchen.logistics.packages.get(ag.interact);
+        if (pkg) this.kitchen.acceptBookPackage(pkg);
+        ag.state = "idle";
+      } else if (done && ag.state === "toExportCargo" && this.kitchen) {
+        const pkg = this.kitchen.logistics.packages.get(ag.interact);
+        if (pkg && pkg.reservedBy === `workman:${ag.id}`) {
+          pkg.state = "carried";
+          if (pathAdjacent(ag, world, ag.aux, (i) => passable(world, i, true))) ag.state = "deliverExportCargo";
+          else { pkg.state = "site"; pkg.reservedBy = null; ag.state = "idle"; }
+        } else ag.state = "idle";
+      } else if (done && ag.state === "deliverExportCargo" && this.kitchen) {
+        const pkg = this.kitchen.logistics.packages.get(ag.interact);
+        if (pkg) { pkg.reservedBy = null; this.kitchen.logistics.moveToExports(pkg.id, ag.x, ag.z); }
+        ag.state = "idle";
+      }
+      return;
+    }
+    if ((ag.state === "constructing" || ag.state === "demolishing") && ag.buildGroup >= 0 && this.construction) {
+      ag.amp = Math.min(1, ag.amp + dt * 6);
+      ag.timer -= dt;
+      const group = this.construction.groups.get(ag.buildGroup);
+      const target = group?.targets.find((t) => t.id === ag.buildTarget);
+      if (target) this.construction.setProgress(group!.id, target.id, ag.id, 1 - ag.timer / target.workSeconds);
+      if (ag.timer > 0) return;
+      if (target && this.construction.complete(group!.id, target.id, ag.id, world)) this.worldDirty = true;
+      ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
       return;
     }
     if (ag.state === "repairing" && ag.job) {
@@ -1684,6 +1764,7 @@ export class Agents {
           job.claimedBy = -1;
           ag.job = null;
           ag.state = "idle";
+          this.construction?.logistics.release(`repair:${job.kind}:${job.idx}`);
           return;
         }
         if (t) {
@@ -1698,6 +1779,7 @@ export class Agents {
       }
       const ji = this.repairJobs.indexOf(job);
       if (ji >= 0) this.repairJobs.splice(ji, 1);
+      this.construction?.logistics.consume(`repair:${job.kind}:${job.idx}`);
       ag.job = null;
       ag.state = "idle";
       return;
@@ -1715,10 +1797,73 @@ export class Agents {
       const d = Math.abs((job.idx % size) - ag.x) + Math.abs(((job.idx / size) | 0) - ag.z);
       if (d < bd) { bd = d; best = job; }
     }
-    if (best && pathAdjacent(ag, world, best.idx, (i) => passable(world, i, true))) {
+    if (best && this.construction) {
+      const recipe: Record<string, number> = best.kind === "fence" ? { metal: 1 } : { concrete: 2 };
+      const owner = `repair:${best.kind}:${best.idx}`;
+      if (this.construction.logistics.reserve(recipe, owner)) {
+        if (pathAdjacent(ag, world, best.idx, (i) => passable(world, i, true))) {
+          best.claimedBy = ag.id;
+          ag.job = best;
+          ag.state = "toJob";
+          return;
+        }
+        this.construction.logistics.release(owner);
+      }
+    } else if (best && pathAdjacent(ag, world, best.idx, (i) => passable(world, i, true))) {
       best.claimedBy = ag.id;
       ag.job = best;
       ag.state = "toJob";
+      return;
+    }
+
+    // Construction is below security repairs in the work priority. The order
+    // system itself sorts oldest-first and uses distance as its tie breaker.
+    if (this.construction) {
+      const claim = this.construction.claimNext(ag.id, ag.x, ag.z, world);
+      if (claim) {
+        const pkg = claim.packageId >= 0 ? this.construction.logistics.packages.get(claim.packageId) : null;
+        const idx = pkg
+          ? world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(pkg.x))), Math.max(0, Math.min(world.size - 1, Math.floor(pkg.z))))
+          : world.idx(claim.target.x, claim.target.z);
+        if (pathAdjacent(ag, world, idx, (i) => passable(world, i, true))) {
+          ag.buildGroup = claim.group.id;
+          ag.buildTarget = claim.target.id;
+          ag.interact = claim.packageId;
+          ag.state = claim.phase === "haul" ? "toBuildCargo" : "toBuild";
+          return;
+        }
+        this.construction.releaseClaim(claim.group.id, claim.target.id, ag.id, "Unreachable construction site");
+      }
+    }
+
+    if (this.kitchen) {
+      // Books are institutional cargo and workmen stock them after active
+      // construction. One box is carried at a time.
+      const shelf = world.tilesOfKind(Obj.Bookshelf)[0] ?? world.tilesOfKind(Obj.BookshelfLarge)[0] ?? world.tilesOfKind(Obj.BookshelfTall)[0] ?? -1;
+      if (shelf >= 0) {
+        const book = this.kitchen.logistics.packagesForHandler("workman")
+          .find((pkg) => pkg.commodity === "book" && pkg.state === "delivery" && !pkg.reservedBy);
+        if (book) {
+          const tile = world.idx(Math.floor(book.x), Math.floor(book.z));
+          book.reservedBy = `workman:${ag.id}`;
+          if (pathAdjacent(ag, world, tile, (i) => passable(world, i, true))) {
+            ag.interact = book.id; ag.aux = shelf; ag.state = "toBookCargo"; return;
+          }
+          book.reservedBy = null;
+        }
+      }
+      const exports = [...world.rooms.values()].find((room) => room.type === RoomType.Exports && room.valid);
+      const salvage = this.kitchen.logistics.packagesForHandler("workman")
+        .find((pkg) => pkg.state === "site" && !pkg.reservedBy);
+      if (exports && salvage) {
+        const destination = [...exports.tiles].find((i) => world.objKind[i] === Obj.LoadingPallet) ?? exports.tiles.values().next().value ?? -1;
+        const tile = world.idx(Math.floor(salvage.x), Math.floor(salvage.z));
+        salvage.reservedBy = `workman:${ag.id}`;
+        if (destination >= 0 && pathAdjacent(ag, world, tile, (i) => passable(world, i, true))) {
+          ag.interact = salvage.id; ag.aux = destination; ag.state = "toExportCargo"; return;
+        }
+        salvage.reservedBy = null;
+      }
     }
   }
 
@@ -1733,6 +1878,7 @@ export class Agents {
     }
 
     if (ag.path) {
+      if (ag.state === "deliverCargo" && this.kitchen) this.kitchen.moveCarried(ag.interact, ag.x, ag.z);
       const arrived = followPath(ag, dt, world, true);
       if (!arrived) return;
       if (ag.state === "toCooker") {
@@ -1759,6 +1905,21 @@ export class Agents {
           (((ag.interact / size) | 0) + 0.5) - ag.z,
           ((ag.interact % size) + 0.5) - ag.x,
         );
+      } else if (ag.state === "toCargo" && this.kitchen) {
+        if (!this.kitchen.pickUp(ag.interact, ag.id) ||
+            !pathAdjacent(ag, world, ag.aux, (i) => passable(world, i, true))) {
+          const pkg = this.kitchen.logistics.packages.get(ag.interact);
+          if (pkg) { pkg.reservedBy = null; pkg.state = "delivery"; }
+          ag.state = "idle";
+        } else {
+          ag.state = "deliverCargo";
+        }
+      } else if (ag.state === "deliverCargo" && this.kitchen) {
+        this.kitchen.deliver(ag.interact, ag.id);
+        ag.state = "idle";
+      } else if (ag.state === "toSink") {
+        ag.state = "washing";
+        ag.timer = 8;
       }
       return;
     }
@@ -1773,6 +1934,12 @@ export class Agents {
       }
       return;
     }
+    if (ag.state === "washing" && this.kitchen) {
+      ag.timer -= dt;
+      ag.amp = Math.min(1, ag.amp + dt * 5);
+      if (ag.timer <= 0) { this.kitchen.finishWash(ag.id); ag.state = "idle"; }
+      return;
+    }
 
     /** Serving tables in valid canteens. */
     const servingTables = () => world.tilesOfKind(Obj.ServingTable)
@@ -1785,6 +1952,7 @@ export class Agents {
           for (const s of servingTables()) {
             if (this.servers.has(s) || (this.servingStock.get(s) ?? 0) <= 0) continue;
             if (pathAdjacent(ag, world, s, (i) => passable(world, i, true))) {
+              this.kitchen?.releaseMealSet();
               this.servers.set(s, ag.id);
               ag.interact = s;
               ag.state = "toServeDuty";
@@ -1812,6 +1980,25 @@ export class Agents {
         return;
       }
       default: {
+        if (this.kitchen) {
+          const haul = this.kitchen.claimHaul(ag.id, world);
+          if (haul) {
+            const pkg = this.kitchen.logistics.packages.get(haul.packageId)!;
+            const packageTile = world.idx(Math.floor(pkg.x), Math.floor(pkg.z));
+            if (pathAdjacent(ag, world, packageTile, (i) => passable(world, i, true))) {
+              ag.interact = haul.packageId; ag.aux = haul.destination; ag.state = "toCargo";
+              return;
+            }
+            pkg.reservedBy = null;
+          }
+          const sink = world.tilesOfKind(Obj.Sink)[0] ?? -1;
+          if (sink >= 0 && this.kitchen.claimWash(ag.id) > 0) {
+            if (pathAdjacent(ag, world, sink, (i) => passable(world, i, true))) {
+              ag.interact = sink; ag.state = "toSink"; return;
+            }
+            this.kitchen.releaseWash(ag.id);
+          }
+        }
         // Eating hour: someone has to hand the trays out.
         if (this.curActivity === REG.Eating) {
           for (const s of servingTables()) {
@@ -1840,8 +2027,11 @@ export class Agents {
           this.claimedCookers.set(best, ag.id);
           ag.cookerIdx = best;
         }
+        if (this.kitchen && !this.kitchen.reserveMealSet()) return;
         if (pathAdjacent(ag, world, ag.cookerIdx, (i) => passable(world, i, true))) {
           ag.state = "toCooker";
+        } else if (this.kitchen) {
+          this.kitchen.releaseMealSet();
         }
         return;
       }
@@ -2087,12 +2277,17 @@ export class Agents {
         plan: raw.plan ? { ...raw.plan, breaches: [...raw.plan.breaches] } : null,
         tunnel: raw.tunnel ? this.tunnels.find((t) => t.owner === raw.tunnel!.owner && t.entry === raw.tunnel!.entry) ?? { ...raw.tunnel } : null,
         job: null,
+        buildGroup: -1,
+        buildTarget: -1,
         stakeTunnel: null,
         escortedBy: -1,
         risk: raw.risk ?? 0, // older saves predate risk memory
         sneaking: raw.sneaking ?? false,
       } as Agent;
       if (ag.state === "using" || ag.state === "toUse") ag.state = "idle";
+      if (["toBuild", "constructing", "demolishing", "toCargo", "deliverCargo",
+        "toBookCargo", "deliverBookCargo", "toExportCargo", "deliverExportCargo",
+        "toSink", "washing"].includes(ag.state)) ag.state = "idle";
       this.agents.push(ag);
       if (ag.bedIdx >= 0) this.claimedBeds.set(ag.bedIdx, ag.id);
       if (ag.cookerIdx >= 0) this.claimedCookers.set(ag.cookerIdx, ag.id);

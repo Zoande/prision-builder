@@ -15,6 +15,10 @@ export const FOOD_KIND = 1000;
 export const HOLE_ENTRY_KIND = 1001;
 export const HOLE_SURF_KIND = 1002;
 export const TRAY_STACK_KIND = 1003; // stocked serving tables
+export const TRUCK_KIND = 1004;
+export const INTAKE_TRUCK_KIND = 1005;
+export const CARGO_KIND = 1006;
+export const DRIVER_KIND = 1007;
 
 // --- The regime -------------------------------------------------------------
 
@@ -215,6 +219,9 @@ export interface Agent {
   postRoom: number;
   cookerIdx: number;
   job: RepairJob | null;
+  /** Physical construction claim, separate from urgent security repairs. */
+  buildGroup: number;
+  buildTarget: number;
   chaseId: number;
   stakeTunnel: Tunnel | null;
 }
@@ -258,6 +265,8 @@ export function blankAgent(kind: number): Agent {
     routeDir: 1,
     postRoom: -1,
     cookerIdx: -1,
+    buildGroup: -1,
+    buildTarget: -1,
     job: null,
     chaseId: -1,
     stakeTunnel: null,

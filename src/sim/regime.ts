@@ -79,7 +79,7 @@ export function regimeTick(A: Agents, ag: Agent, world: World): boolean {
       const spot = bfsFind(size, here, open, (i) =>
         open(i) && world.roomTypeAt(i) === RoomType.Yard);
       if (spot < 0) return false;
-      const path = astar(size, here, spot, open);
+      const path = astar(size, here, spot, open, 30000, (from, to) => world.canNavigateEdge(from, to));
       if (!path) return false;
       ag.path = path; ag.pathI = 0;
       ag.state = "toYard";
@@ -191,4 +191,3 @@ export function cellHasShower(world: World, ag: Agent): boolean {
   for (const t of r.tiles) if (world.objKind[t] === Obj.Shower) return true;
   return false;
 }
-

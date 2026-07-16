@@ -1,8 +1,8 @@
 # Prison Builder
 
 A prison-management sandbox rendered in the browser with **WebGPU**. You paint
-floors, walls, fences and doors onto a tile grid, furnish rooms, staff them, and
-watch prisoners, guards and cooks act out a daily regime under a day/night cycle.
+construction orders onto a tile grid, receive physical supplies by truck, and
+watch workmen build the prison while staff and prisoners follow a daily regime.
 
 Everything is hand-rolled — no game or 3D engine. The renderer is a set of small
 WGSL passes; the simulation is a plain TypeScript tile world.
@@ -28,28 +28,31 @@ npm run dev      # vite dev server
 | `npm run preview` | Serve the built `dist/`. |
 | `npm run runtime-textures` | Rebuild committed 1K derivatives from licensed 4K sources. |
 | `npm run textures` | Re-encode the compressed textures (see below). |
-| `npm run check` | Sanity-check `World.recomputeRoofs()` on a 6x6 room. |
+| `npm run check` | Run roof, stability, asset, construction, logistics, economy, kitchen, and intake checks. |
 
 ## Controls
 
 Camera is an orbit rig over the ground plane:
 
-- **Left-drag** — orbit, but only when no build tool is selected; with a tool
-  active, left-drag places instead.
+- **Left-drag with a build tool** — show a transient blue construction preview;
+  release to commit one grouped order.
+- **Left-click a planned ghost** — cancel every unfinished target in its group.
 - **Middle-drag** — orbit, always.
 - **Right-drag / WASD** — pan. **Wheel** — zoom.
-- **R** — rotate the pending object. **Esc** — clear the current tool.
+- **R** — rotate the pending object. **Esc/right-click** — discard the current
+  transient preview.
 
 Tools live in the build palette (bottom of screen): floors, walls, fences, doors
-and jail doors, beds, toilets, showers, tables, benches, cookers, lights, people
-(prisoner / guard / cook / workman), plus room painting and access zones.
+and jail doors, furniture, logistics fixtures, staff, room painting, and access
+zones. Prisoners arrive through scheduled intake rather than a normal placement
+tool. Logistics mode opens stock, vehicle, export, and ledger data.
 
 ## Layout
 
 ```
 src/
   main.ts          bootstrap, frame loop, HUD wiring
-  editor.ts        build palette + tool → world mutations
+  editor.ts        build palette + tool selection
   camera.ts        orbit camera
   daynight.ts      sun/sky cycle
   textures.ts      texture loading entry
@@ -61,7 +64,13 @@ src/
     materials.ts   material table (name → texture pair)
   sim/
     world.ts       tile grid: floors, objects, auto-roofing, rooms
-    agents.ts      prisoner / guard / cook behaviour and scheduling
+    agents.ts      prisoner / guard / staff behaviour and scheduling
+    construction.ts grouped plans, reservations, work and demolition
+    logistics.ts   packages, manifests, trucks, pallets and exports
+    economy.ts     cash, payroll, fees, grants, interest and ledger
+    kitchen.ts     frozen meals, trays, spoons, washing and books
+    infrastructure.ts immutable road and starter delivery yard
+    intake.ts      seeded daily transports and Reception processing
 scripts/
   compress-textures.mjs   offline texture encoder
   check-roofs.ts          roof recompute check
@@ -106,7 +115,9 @@ the 1k entries re-encode from `public/textures/` alone. Encoding is slow
 ## Dev-server endpoints
 
 `vite.config.mjs` adds a small middleware so the prototype can persist to disk.
-Both files are gitignored local state.
+Both files are gitignored local state. Saves are version 2; an incompatible
+version-1 save is copied to `prototype-save.v1-backup.json` before the first v2
+write and is never mutated in place.
 
 | Route | Methods | File |
 | --- | --- | --- |

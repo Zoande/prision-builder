@@ -1,8 +1,9 @@
 import { defineConfig } from "vite";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const savePath = resolve(process.cwd(), "prototype-save.json");
+const v1BackupPath = resolve(process.cwd(), "prototype-save.v1-backup.json");
 const simLogPath = resolve(process.cwd(), "sim-log.jsonl");
 
 function readBody(req) {
@@ -28,7 +29,11 @@ export default defineConfig({
           }
           if (req.method === "POST") {
             const body = await readBody(req);
-            JSON.parse(body);
+            const incoming = JSON.parse(body);
+            if (incoming?.version === 2 && existsSync(savePath)) {
+              const existing = JSON.parse(readFileSync(savePath, "utf8"));
+              if (existing?.version !== 2 && !existsSync(v1BackupPath)) copyFileSync(savePath, v1BackupPath);
+            }
             writeFileSync(savePath, body, "utf8");
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ ok: true }));

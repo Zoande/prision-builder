@@ -111,6 +111,8 @@ export class World {
   // of every bed in the prison, run for every tile every agent could see.
   readonly pieces = new Map<number, Piece>();
   readonly pieceAt: Int32Array;
+  /** 0 = player world, 1 = immutable fixed infrastructure. */
+  readonly infrastructure: Uint8Array;
   private nextPieceId = 1;
   // Patrol beats. One lookup array per colour, so a blue and a purple beat can
   // cross on the same tile and stay two separate beats.
@@ -139,6 +141,7 @@ export class World {
     this.roomId = new Int32Array(n);
     this.jailClosed = new Uint8Array(n);
     this.pieceAt = new Int32Array(n);
+    this.infrastructure = new Uint8Array(n);
     for (let c = 0; c < ROUTE_COLORS; c++) this.routeAt.push(new Int32Array(n));
   }
 
@@ -252,7 +255,10 @@ export class World {
     };
     const tiles = this.pieceTiles(piece);
     if (tiles.length === 0) return false; // ran off the map
-    for (const i of tiles) if (this.objKind[i] !== Obj.None) return false;
+    for (const i of tiles) {
+      if (this.objKind[i] !== Obj.None) return false;
+      if (this.infrastructure[i] && kind !== Obj.SecureBridge) return false;
+    }
 
     this.nextPieceId++;
     this.pieces.set(piece.id, piece);
@@ -299,10 +305,51 @@ export class World {
     if (z > this.bz1) this.bz1 = z;
   }
 
+  isInfrastructure(x: number, z: number): boolean {
+    return this.inBounds(x, z) && this.infrastructure[this.idx(x, z)] !== 0;
+  }
+
+  /** Secure bridges are the one specialized elevated path. Their long ends
+   *  are open; their two long sides are railings for navigation and room flood. */
+  canNavigateEdge(from: number, to: number): boolean {
+    const fromPiece = this.pieceAtTile(from);
+    const toPiece = this.pieceAtTile(to);
+    const bridge = fromPiece?.kind === Obj.SecureBridge ? fromPiece
+      : toPiece?.kind === Obj.SecureBridge ? toPiece : null;
+    if (!bridge || (fromPiece?.id === bridge.id && toPiece?.id === bridge.id)) return true;
+    const inside = fromPiece?.id === bridge.id ? from : to;
+    const outside = inside === from ? to : from;
+    const ix = inside % this.size, iz = (inside / this.size) | 0;
+    const ox = outside % this.size, oz = (outside / this.size) | 0;
+    // Fixed east/west orientation: only x-adjacent entry/exit at x=anchor or
+    // x=anchor+w-1. Both z lanes are valid open ends.
+    if (iz !== oz) return false;
+    return (ix === bridge.x && ox === bridge.x - 1) ||
+      (ix === bridge.x + bridge.w - 1 && ox === bridge.x + bridge.w);
+  }
+
+  bridgeIsSecure(piece: Piece): boolean {
+    if (piece.kind !== Obj.SecureBridge) return false;
+    const barrier = (x: number, z: number) => this.inBounds(x, z) && this.roomBarrier(this.idx(x, z));
+    const left = piece.x, right = piece.x + piece.w - 1;
+    return barrier(left, piece.z - 1) && barrier(left, piece.z + piece.d) &&
+      barrier(right, piece.z - 1) && barrier(right, piece.z + piece.d);
+  }
+
+  /** InfrastructureSystem is the only caller allowed to write fixed tiles. */
+  setInfrastructureFloor(x: number, z: number, mat: number): void {
+    if (!this.inBounds(x, z)) return;
+    const i = this.idx(x, z);
+    this.floorMat[i] = mat;
+    this.infrastructure[i] = 1;
+    this.touch(x, z);
+  }
+
   // --- Edits -------------------------------------------------------------
   setFloor(x: number, z: number, mat: number): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.infrastructure[i]) return false;
     if (this.floorMat[i] === mat) return false;
     this.floorMat[i] = mat;
     this.touch(x, z);
@@ -312,7 +359,8 @@ export class World {
   /** Structural placement never bulldozes furniture — erase the piece first. */
   private canObj(x: number, z: number): boolean {
     if (!this.inBounds(x, z)) return false;
-    return this.pieceAt[this.idx(x, z)] === 0;
+    const i = this.idx(x, z);
+    return this.infrastructure[i] === 0 && this.pieceAt[i] === 0;
   }
 
   setWall(x: number, z: number, mat: number): boolean {
@@ -359,6 +407,7 @@ export class World {
   setPerson(x: number, z: number, kind: number, orient: number): boolean {
     if (!this.canObj(x, z) || !PERSON_KINDS.includes(kind)) return false;
     const i = this.idx(x, z);
+    if (this.objKind[i] !== Obj.None) return false;
     const facing = orient & 3;
     const baton = kind === Obj.Guard ? 1 : 0;
     if (this.objKind[i] === kind && this.objOrient[i] === facing &&
@@ -375,6 +424,7 @@ export class World {
   setBaton(x: number, z: number): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.infrastructure[i]) return false;
     if (!PERSON_KINDS.includes(this.objKind[i]) || this.objMat[i] === 1) return false;
     this.objMat[i] = 1;
     this.touch(x, z);
@@ -386,6 +436,7 @@ export class World {
   setFenceGate(x: number, z: number, locked: boolean): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.infrastructure[i]) return false;
     const k = this.objKind[i];
     if (k !== Obj.Fence && k !== Obj.FenceDoor && k !== Obj.FenceJailDoor) return false;
     const horiz = this.isFence(x - 1, z) && this.isFence(x + 1, z);
@@ -403,6 +454,7 @@ export class World {
   setWallLight(x: number, z: number): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.infrastructure[i]) return false;
     if (this.objKind[i] !== Obj.Wall && this.objKind[i] !== Obj.WallLight) return false;
     // Facing order: +X, +Z, -X, -Z. Prefer an open neighbour with a built
     // floor (a room interior), else any open neighbour.
@@ -430,6 +482,7 @@ export class World {
   setRoofLight(x: number, z: number): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.infrastructure[i]) return false;
     if (this.roofed[i] !== 1 || this.objKind[i] !== Obj.None) return false;
     this.objKind[i] = Obj.RoofLight;
     this.objMat[i] = 0;
@@ -443,6 +496,7 @@ export class World {
   setDoor(x: number, z: number, jail = false): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.infrastructure[i]) return false;
     const k = this.objKind[i];
     if (k !== Obj.Wall && k !== Obj.Door && k !== Obj.JailDoor) return false;
     const horiz = this.wallLike(x - 1, z) && this.wallLike(x + 1, z);
@@ -460,6 +514,7 @@ export class World {
   erase(x: number, z: number): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.infrastructure[i]) return false;
     const piece = this.pieceAtTile(i);
     if (piece) { this.removePiece(piece); return true; }
     if (this.objKind[i] !== Obj.None) {
@@ -567,7 +622,8 @@ export class World {
       const z = stack.pop()!, x = stack.pop()!;
       for (const [nx, nz] of [[x + 1, z], [x - 1, z], [x, z + 1], [x, z - 1]]) {
         if (nx < x0 || nx > x1 || nz < z0 || nz > z1) continue;
-        if (reached[ri(nx, nz)] || this.roomBarrier(this.idx(nx, nz))) continue;
+        const ni = this.idx(nx, nz), cur = this.idx(x, z);
+        if (reached[ri(nx, nz)] || this.roomBarrier(ni) || !this.canNavigateEdge(cur, ni)) continue;
         reached[ri(nx, nz)] = 1; stack.push(nx, nz);
       }
     }
@@ -603,7 +659,7 @@ export class World {
         for (const [nx, nz] of [[cx + 1, cz], [cx - 1, cz], [cx, cz + 1], [cx, cz - 1]]) {
           if (nx < x0 || nx > x1 || nz < z0 || nz > z1) continue;
           const ni = this.idx(nx, nz);
-          if (seen.has(ni) || this.roomBarrier(ni) || reached[ri(nx, nz)]) continue;
+          if (seen.has(ni) || this.roomBarrier(ni) || reached[ri(nx, nz)] || !this.canNavigateEdge(cur, ni)) continue;
           if (this.roomId[ni] !== 0) {
             const r = this.rooms.get(this.roomId[ni]);
             if (r && r.type === RoomType.Empty && !join) join = r;
@@ -727,6 +783,11 @@ export class World {
     if (def.minSquare > 0 && !this.containsSquare(r.tiles, def.minSquare)) {
       return `Needs a ${def.minSquare}x${def.minSquare} clear area.`;
     }
+    if (def.openSky) {
+      for (const t of r.tiles) if (this.roofed[t]) return "Must be outdoors under open sky.";
+    } else if (r.type === RoomType.Reception) {
+      for (const t of r.tiles) if (!this.roofed[t]) return "Must be enclosed and roofed.";
+    }
     for (const req of def.requires) {
       let found = false;
       for (const t of r.tiles) {
@@ -737,7 +798,27 @@ export class World {
     if (def.needsJailDoor && !this.roomHasJailDoor(r)) {
       return "Needs a jail door on its boundary.";
     }
+    if (def.needsRoadGate && !this.roomHasRoadGate(r)) {
+      return "Needs a road-facing gate.";
+    }
     return "";
+  }
+
+  private roomHasRoadGate(r: Room): boolean {
+    for (const t of r.tiles) {
+      const x = t % this.size, z = (t / this.size) | 0;
+      for (const [dx, dz] of DIRS) {
+        const gx = x + dx, gz = z + dz;
+        if (!this.inBounds(gx, gz)) continue;
+        const gate = this.objKind[this.idx(gx, gz)];
+        if (gate !== Obj.FenceDoor && gate !== Obj.FenceJailDoor && gate !== Obj.Door && gate !== Obj.JailDoor) continue;
+        for (let distance = 1; distance <= 3; distance++) {
+          const rx = gx + dx * distance, rz = gz + dz * distance;
+          if (this.isInfrastructure(rx, rz)) return true;
+        }
+      }
+    }
+    return false;
   }
 
   /** Ambience points per tile, normalised to a 0..1 furnishing score. A piece
@@ -894,6 +975,8 @@ export class World {
     this.roomId.fill(0);
     this.jailClosed.fill(0);
     this.pieceAt.fill(0);
+    // The immutable mask is rebuilt by InfrastructureSystem after loading.
+    this.infrastructure.fill(0);
     this.pieces.clear();
     this.nextPieceId = 1;
     this.routes.clear();

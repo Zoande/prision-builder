@@ -1,12 +1,14 @@
 import { Camera } from "./camera";
 import { invert } from "./math";
-import { DIRS, NEEDS, World, defOf } from "./sim/world";
+import { DIRS, NEEDS, Obj, RoomType, World, defOf } from "./sim/world";
 import {
-  Agents, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, TRAY_STACK_KIND,
+  Agents, CARGO_KIND, DRIVER_KIND, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND,
+  INTAKE_TRUCK_KIND, TRAY_STACK_KIND, TRUCK_KIND,
   REG_NAMES, type Agent, type IssueLabel,
 } from "./sim/agents";
 import {
   PersonInstanceStager, foodInstances, holeInstances, knownOverlay, trayStackInstances,
+  logisticsInstances,
 } from "./sim/renderData";
 import { Item, countItem, itemDef } from "./sim/items";
 import { Editor } from "./editor";
@@ -24,10 +26,18 @@ import { PeoplePass } from "./render/peoplePass";
 import { OverlayPass } from "./render/overlayPass";
 import { RoomLinePass } from "./render/roomLinePass";
 import { SkyPass } from "./render/skyPass";
+import { GhostPass } from "./render/ghostPass";
 import { pickGround } from "./render/pick";
 import { configureAssets, type Quality } from "./render/assets";
 import { GLOBALS_SIZE, writeGlobals } from "./render/shaderCommon";
 import { WorldOverlay, type PreviewTile } from "./ui/worldOverlay";
+import { EconomySystem } from "./sim/economy";
+import { LogisticsSystem } from "./sim/logistics";
+import { ConstructionSystem } from "./sim/construction";
+import { InfrastructureSystem } from "./sim/infrastructure";
+import { KitchenSystem } from "./sim/kitchen";
+import { IntakeSystem } from "./sim/intake";
+import { commodityDef, recipeCost } from "./sim/commodities";
 
 const WORLD_SIZE = 500; // playable/buildable area (tiles)
 const BORDER_TILES = 50; // extra hazed ground around it: no building, camera stays out
@@ -138,6 +148,7 @@ async function main() {
   ]);
   const lights = LightsPass.create(device, format, uniformBuf, light.view, light.samp);
   const furniture = FurniturePass.create(device, format, uniformBuf, light);
+  const ghosts = GhostPass.create(device, format, uniformBuf);
   const people = PeoplePass.create(device, format, uniformBuf, light);
   const overlay = OverlayPass.create(device, format, uniformBuf);
   const roomLines = RoomLinePass.create(device, format, uniformBuf);
@@ -145,6 +156,14 @@ async function main() {
 
   // --- Living agents -----------------------------------------------------
   const agents = new Agents();
+  const economy = new EconomySystem();
+  const logistics = new LogisticsSystem(economy);
+  const construction = new ConstructionSystem(logistics);
+  const kitchen = new KitchenSystem(logistics);
+  const intake = new IntakeSystem(economy);
+  const infrastructure = new InfrastructureSystem(world);
+  agents.construction = construction;
+  agents.kitchen = kitchen;
   const personStager = new PersonInstanceStager();
   let saveDirty = false;
 
@@ -155,6 +174,11 @@ async function main() {
     const holes = holeInstances(agents, world);
     byKind.set(HOLE_ENTRY_KIND, holes.entries);
     byKind.set(HOLE_SURF_KIND, holes.surfs);
+    const logisticsRender = logisticsInstances(logistics, intake);
+    byKind.set(TRUCK_KIND, logisticsRender.trucks);
+    byKind.set(INTAKE_TRUCK_KIND, logisticsRender.intakeTrucks);
+    byKind.set(CARGO_KIND, logisticsRender.cargo);
+    byKind.set(DRIVER_KIND, logisticsRender.drivers);
     furniture.setInstances(device, byKind);
   }
 
@@ -219,16 +243,32 @@ async function main() {
 
   // World clock driving the day/night cycle; start at 08:00 on day 1.
   let worldTime = 8 * HOUR_SECONDS;
+  let loadedV2 = false;
+  let incompatibleSave = false;
   try {
     const res = await fetch("/api/save");
     const data = await res.json();
-    if (data?.world && data?.agents) {
+    if (data?.version === 2 && data?.world && data?.agents) {
       world.loadData(data.world);
+      infrastructure.loadData(data.infrastructure);
       agents.loadData(data.agents);
+      economy.loadData(data.economy ?? {});
+      logistics.loadData(data.logistics ?? {});
+      construction.loadData(data.construction ?? {});
+      kitchen.loadData(data.kitchen ?? {});
+      intake.loadData(data.intake ?? {});
       if (typeof data.worldTime === "number") worldTime = data.worldTime;
+      loadedV2 = true;
+    } else if (data?.world || data?.version === 1) {
+      incompatibleSave = true;
     }
   } catch {
     // File-backed saves only exist in the Vite dev server.
+  }
+  if (!loadedV2) {
+    infrastructure.installNewGame();
+    camera.target = [368, 0, 375];
+    camera.distance = 72;
   }
   rebuild();
 
@@ -289,6 +329,7 @@ async function main() {
   editor.onChange = () => { camera.buildMode = editor.active; };
 
   const buildPanel = document.getElementById("build")!;
+  const logisticsDashboard = document.getElementById("logisticsDashboard")!;
   let activeMode = "";
   document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -298,6 +339,7 @@ async function main() {
         btn.classList.remove("on");
         buildPanel.classList.remove("open");
         editor.clear();
+        logisticsDashboard.classList.remove("show");
         return;
       }
       document.querySelectorAll(".mode-btn").forEach((x) => x.classList.remove("on"));
@@ -305,6 +347,7 @@ async function main() {
       activeMode = mode;
       buildPanel.classList.add("open");
       editor.setMode(mode);
+      logisticsDashboard.classList.toggle("show", mode === "logistics");
     });
   });
 
@@ -326,6 +369,14 @@ async function main() {
   let dragPlaced = new Set<string>();
   let hoverTile: { x: number; z: number } | null = null;
 
+  function isOrderTool(): boolean {
+    const cat = editor.tool?.cat;
+    return !!cat && [
+      "floor", "wall", "fence", "door", "jaildoor", "fencedoor",
+      "fencejaildoor", "lamp", "walllight", "rooflight", "piece", "erase",
+    ].includes(cat);
+  }
+
   function tileFromEvent(e: PointerEvent): { x: number; z: number } | null {
     const rect = canvas.getBoundingClientRect();
     const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -343,7 +394,14 @@ async function main() {
     const key = `${tx},${tz}`;
     if (dragPlaced.has(key)) return;
     dragPlaced.add(key);
-    if (editor.apply(world, tx, tz)) { dirty = true; saveDirty = true; }
+    const cat = editor.tool?.cat;
+    if (cat === "guard" || cat === "cook" || cat === "workman") {
+      const i = world.idx(tx, tz);
+      if (world.objKind[i] !== Obj.None || world.pieceAt[i] !== 0 || world.infrastructure[i]) return;
+      const kind = cat === "guard" ? Obj.Guard : cat === "cook" ? Obj.Cook : Obj.Workman;
+      if (!economy.hire(kind, worldTime)) return;
+    }
+    if (!isOrderTool() && editor.apply(world, tx, tz)) { dirty = true; saveDirty = true; }
     // Deployment acts on the guard roster, not on tiles, so it lives here.
     const dcat = editor.tool?.cat;
     if (dcat === "deploy" || dcat === "undeploy") {
@@ -364,7 +422,6 @@ async function main() {
       if (changed) { dirty = true; saveDirty = true; }
     }
     // Tools that act on live agents rather than tiles.
-    if (editor.tool?.cat === "erase" && agents.eraseAt(tx, tz)) saveDirty = true;
     if (editor.tool?.cat === "baton" && agents.giveBatonAt(tx, tz)) saveDirty = true;
   }
 
@@ -395,20 +452,23 @@ async function main() {
   const previewScratch: PreviewTile[] = [];
   function previewTiles(): number {
     let count = 0;
+    const add = (x: number, z: number, tone: "blue" | "red" = "blue", planned = false) => {
+      if (!world.inBounds(x, z)) return;
+      let tile = previewScratch[count];
+      if (!tile) { tile = { x, z, tone, planned }; previewScratch.push(tile); }
+      else { tile.x = x; tile.z = z; tile.tone = tone; tile.planned = planned; }
+      count++;
+    };
     if (!editor.tool || !hoverTile) return count;
     const cat = editor.tool.cat;
     const start = painting && dragStart ? dragStart : hoverTile;
-    const add = (x: number, z: number) => {
-      if (!world.inBounds(x, z)) return;
-      let tile = previewScratch[count];
-      if (!tile) { tile = { x, z }; previewScratch.push(tile); }
-      else { tile.x = x; tile.z = z; }
-      count++;
-    };
+    const transient = orderTargets();
+    const invalid = isOrderTool() && construction.preview(editor.tool, transient, editor.orient, world).some((g) => !g.valid);
+    const tone: "blue" | "red" = cat === "erase" || invalid ? "red" : "blue";
     if (cat === "floor" || cat === "room") {
       const x0 = Math.min(start.x, hoverTile.x), x1 = Math.max(start.x, hoverTile.x);
       const z0 = Math.min(start.z, hoverTile.z), z1 = Math.max(start.z, hoverTile.z);
-      for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) add(x, z);
+      for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) add(x, z, tone);
       return count;
     }
     if (cat === "wall" || cat === "fence") {
@@ -416,10 +476,10 @@ async function main() {
       const axis = dragAxis ?? (Math.abs(dx) >= Math.abs(dz) ? "x" : "z");
       if (axis === "x") {
         const x0 = Math.min(start.x, hoverTile.x), x1 = Math.max(start.x, hoverTile.x);
-        for (let x = x0; x <= x1; x++) add(x, start.z);
+        for (let x = x0; x <= x1; x++) add(x, start.z, tone);
       } else {
         const z0 = Math.min(start.z, hoverTile.z), z1 = Math.max(start.z, hoverTile.z);
-        for (let z = z0; z <= z1; z++) add(start.x, z);
+        for (let z = z0; z <= z1; z++) add(start.x, z, tone);
       }
       return count;
     }
@@ -432,13 +492,13 @@ async function main() {
         const [bx, bz] = DIRS[(o + 1) & 3];
         for (let a = 0; a < d.w; a++) {
           for (let b = 0; b < d.d; b++) {
-            add(hoverTile.x + ax * a + bx * b, hoverTile.z + az * a + bz * b);
+            add(hoverTile.x + ax * a + bx * b, hoverTile.z + az * a + bz * b, tone);
           }
         }
       }
       return count;
     }
-    add(hoverTile.x, hoverTile.z);
+    add(hoverTile.x, hoverTile.z, tone);
     return count;
   }
 
@@ -449,6 +509,7 @@ async function main() {
     const tx = tile.x, tz = tile.z;
     lastTX = tx; lastTZ = tz;
     const cat = editor.tool?.cat;
+    if (isOrderTool()) return; // dragging only changes the transient preview
     if (cat === "deploy" || cat === "undeploy") {
       if (!dragPlaced.has(`${tx},${tz}`)) applyBuildAt(tx, tz);
       return;
@@ -459,6 +520,51 @@ async function main() {
       if (tx === lastTX && tz === lastTZ && dragPlaced.has(`${tx},${tz}`)) return;
       applyBuildAt(tx, tz);
     }
+  }
+
+  function orderTargets(): { x: number; z: number }[] {
+    if (!editor.tool || !hoverTile) return [];
+    const cat = editor.tool.cat;
+    const start = dragStart ?? hoverTile;
+    const result: { x: number; z: number }[] = [];
+    if (cat === "floor") {
+      const x0 = Math.min(start.x, hoverTile.x), x1 = Math.max(start.x, hoverTile.x);
+      const z0 = Math.min(start.z, hoverTile.z), z1 = Math.max(start.z, hoverTile.z);
+      for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) result.push({ x, z });
+    } else if (cat === "wall" || cat === "fence") {
+      const dx = hoverTile.x - start.x, dz = hoverTile.z - start.z;
+      const axis = dragAxis ?? (Math.abs(dx) >= Math.abs(dz) ? "x" : "z");
+      if (axis === "x") {
+        const x0 = Math.min(start.x, hoverTile.x), x1 = Math.max(start.x, hoverTile.x);
+        for (let x = x0; x <= x1; x++) result.push({ x, z: start.z });
+      } else {
+        const z0 = Math.min(start.z, hoverTile.z), z1 = Math.max(start.z, hoverTile.z);
+        for (let z = z0; z <= z1; z++) result.push({ x: start.x, z });
+      }
+    } else {
+      result.push({ ...hoverTile });
+    }
+    return result;
+  }
+
+  function commitOrder(): boolean {
+    if (!editor.tool) return false;
+    const targets = orderTargets();
+    if (targets.length === 0) return false;
+    if (editor.tool.cat === "erase") {
+      const target = targets[0];
+      const agent = agents.agentNear(target.x + 0.5, target.z + 0.5, 0.6);
+      if (agent) {
+        if (agent.kind === Obj.Prisoner) return false; // prisoners are intake-controlled
+        agents.removeAgent(agent); // firing is immediate and has no refund
+        saveDirty = true;
+        return true;
+      }
+    }
+    const group = construction.plan(editor.tool, targets, editor.orient, worldTime, world);
+    if (!group) return false;
+    saveDirty = true;
+    return true;
   }
 
   // Agent inspection (click with no tool active).
@@ -514,9 +620,15 @@ async function main() {
 
   canvas.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
-    if (!editor.active) { selectAt(e); return; }
     const tile = tileFromEvent(e);
     if (!tile) return;
+    // Persistent planned ghosts always win the click, even if another build
+    // tool is selected. Cancellation keeps already completed group targets.
+    if (construction.cancelAt(tile.x, tile.z, world)) {
+      saveDirty = true;
+      return;
+    }
+    if (!editor.active) { selectAt(e); return; }
     painting = true;
     lastTX = lastTZ = -99999;
     dragStart = tile;
@@ -528,11 +640,23 @@ async function main() {
     if (editor.tool?.cat === "patrol") {
       editor.routeDrag = world.startRoute(editor.tool.mat);
     }
-    paintAt(e);
+    if (!isOrderTool()) paintAt(e);
   });
-  canvas.addEventListener("pointermove", (e) => { if (painting) paintAt(e); });
+  canvas.addEventListener("pointermove", (e) => {
+    const tile = tileFromEvent(e);
+    if (tile) {
+      hoverTile = tile;
+      if (painting && dragStart && !dragAxis) {
+        const dx = tile.x - dragStart.x, dz = tile.z - dragStart.z;
+        if (dx !== 0 || dz !== 0) dragAxis = Math.abs(dx) >= Math.abs(dz) ? "x" : "z";
+      }
+    }
+    if (painting && !isOrderTool()) paintAt(e);
+  });
   addEventListener("pointerup", (e) => {
     if (e.button !== 0) return;
+    if (!painting) return;
+    if (isOrderTool()) commitOrder();
     painting = false;
     dragStart = null;
     dragAxis = null;
@@ -550,7 +674,22 @@ async function main() {
       saveDirty = true;
     }
   });
+  const discardTransient = () => {
+    painting = false;
+    dragStart = null;
+    dragAxis = null;
+    dragPlaced.clear();
+    if (editor.roomDrag > 0) { world.endRoomPaint(editor.roomDrag); editor.roomDrag = 0; }
+    if (editor.routeDrag > 0) { world.removeRoute(editor.routeDrag); editor.routeDrag = 0; }
+  };
+  canvas.addEventListener("pointercancel", discardTransient);
+  canvas.addEventListener("contextmenu", (e) => {
+    if (!painting) return;
+    e.preventDefault();
+    discardTransient();
+  });
   addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && painting) discardTransient();
     if (e.key === "r" || e.key === "R") {
       // Editor owns the actual orientation change; this just ensures the
       // overlay redraws even if the mouse is not moving.
@@ -637,8 +776,17 @@ async function main() {
       ? { x: Math.floor(hit[0]), z: Math.floor(hit[1]) }
       : null;
     const ag = hit ? agents.agentNear(hit[0], hit[1], 1.2) : null;
-    if (!ag) { tip.style.display = "none"; return; }
-    tip.textContent = tipText(ag);
+    const group = hoverTile ? construction.groupAt(hoverTile.x, hoverTile.z, world) : null;
+    if (!ag && !group) { tip.style.display = "none"; return; }
+    if (ag) tip.textContent = tipText(ag);
+    else if (group) {
+      const done = group.targets.filter((target) => target.completed).length;
+      const recipe = construction.groupRecipe(group);
+      const resources = Object.entries(recipe).map(([id, amount]) => `${commodityDef(id).name} ${amount}`).join(", ") || "none";
+      tip.textContent = `${group.operation.toUpperCase()} GROUP ${group.id}\n` +
+        `${done}/${group.targets.length} targets complete · ${group.state}\n` +
+        `Resources: ${resources}\n${group.blocker || "Click to cancel unfinished targets"}`;
+    }
     tip.style.display = "block";
     tip.style.left = `${Math.min(e.clientX + 16, innerWidth - 360)}px`;
     tip.style.top = `${Math.min(e.clientY + 12, innerHeight - 200)}px`;
@@ -670,6 +818,40 @@ async function main() {
         issue: `${room.name} is invalid: ${room.issue}`,
       });
     }
+    if (incompatibleSave) issues.push({
+      id: "save-v1", x: 366, z: 375,
+      issue: "The version 1 save was preserved as a backup. This is a new version 2 logistics world.",
+    });
+    let warningI = 0;
+    const activeOrders = [...construction.groups.values()].some((group) => group.state !== "complete" && group.state !== "cancelled");
+    if (activeOrders && !agents.agents.some((agent) => agent.kind === Obj.Workman)) issues.push({
+      id: "no-workmen", x: 366.5, z: 375.5, issue: "Construction is waiting: hire a workman.",
+    });
+    const hasSalvage = [...logistics.packages.values()].some((pkg) => pkg.state === "site");
+    const validExports = [...world.rooms.values()].some((room) => room.type === RoomType.Exports && room.valid);
+    if (hasSalvage && !validExports) issues.push({
+      id: "no-exports", x: 367.5, z: 376.5, issue: "Recovered goods are waiting for a valid Exports room.",
+    });
+    const validReception = [...world.rooms.values()].some((room) => room.type === RoomType.Reception && room.valid);
+    if (!validReception) issues.push({
+      id: "no-reception", x: 369.5, z: 374.5, issue: "No valid Reception: the next prisoner transport will wait on the road.",
+    });
+    for (const bridge of world.piecesOfKind(Obj.SecureBridge)) if (!world.bridgeIsSecure(bridge)) issues.push({
+      id: `bridge-${bridge.id}`, x: bridge.x + bridge.w / 2, z: bridge.z + 1,
+      issue: "Secure Bridge ends are not enclosed by connected walls or fences.",
+    });
+    for (const warning of logistics.warnings) issues.push({
+      id: `logistics-${warningI++}`, x: 370.5, z: 375.5 + warningI,
+      issue: warning,
+    });
+    for (const warning of kitchen.warnings) issues.push({
+      id: `kitchen-${warningI++}`, x: 368.5, z: 373.5 + warningI,
+      issue: warning,
+    });
+    for (const warning of intake.warnings) issues.push({
+      id: `intake-${warningI++}`, x: 374.5, z: 370.5 + warningI,
+      issue: warning,
+    });
     worldOverlay.updateData(rooms, issues, agents.prisonerCount(), world.prisonerCapacity());
   }
 
@@ -683,11 +865,17 @@ async function main() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          version: 1,
+          version: 2,
           savedAt: new Date().toISOString(),
           worldTime,
           world: world.saveData(),
           agents: agents.saveData(),
+          infrastructure: infrastructure.saveData(),
+          economy: economy.saveData(),
+          logistics: logistics.saveData(),
+          construction: construction.saveData(),
+          kitchen: kitchen.saveData(),
+          intake: intake.saveData(),
         }),
       });
       saveDirty = false;
@@ -802,9 +990,51 @@ async function main() {
   const hud = document.getElementById("hud")!;
   const escapedEl = document.getElementById("escaped");
   const caughtEl = document.getElementById("caught");
+  const cashEl = document.getElementById("cash");
+  const netHourlyEl = document.getElementById("netHourly");
   let last = performance.now();
   let fpsAccum = 0, fpsFrames = 0, fps = 0;
   let clockUiKey = "";
+  let logisticsUiT = 0;
+  let logisticsRenderT = 0;
+  let ghostRenderT = 0;
+
+  function updateLogisticsUi(): void {
+    const lines = logistics.stockLines();
+    const stockRows = lines.length > 0 ? lines.map((line) =>
+      `<tr><td>${commodityDef(line.commodity).name}</td><td>${line.available}</td><td>${line.inTransit}</td><td>${line.reserved}</td></tr>`).join("")
+      : `<tr><td colspan="4">No stock ordered</td></tr>`;
+    const blocked = logistics.trucks.filter((truck) => truck.state === "blocked").length +
+      intake.vehicles.filter((vehicle) => vehicle.state === "waiting" && vehicle.warning).length;
+    const recent = economy.ledger.slice(-8).reverse().map((entry) =>
+      `${entry.amount >= 0 ? "+" : "−"}$${Math.abs(Math.round(entry.amount))}  ${entry.memo}`).join("<br>") || "No ledger entries yet";
+    const daily = new Map<string, number>();
+    for (const entry of economy.ledger) if (entry.time >= worldTime - HOUR_SECONDS * 24) {
+      daily.set(entry.kind, (daily.get(entry.kind) ?? 0) + entry.amount);
+    }
+    const dailyRows = ["grant", "wage", "purchase", "loss", "fee", "export", "interest", "hire"]
+      .map((kind) => `<tr><td>${kind}</td><td>${(daily.get(kind) ?? 0) >= 0 ? "+" : "−"}$${Math.abs(Math.round(daily.get(kind) ?? 0))}</td></tr>`).join("");
+    logisticsDashboard.innerHTML = `<div class="log-title">Physical logistics</div>` +
+      `<div class="log-summary"><div class="log-kpi"><small>Vehicles</small><strong>${logistics.trucks.length + intake.vehicles.length}</strong></div>` +
+      `<div class="log-kpi"><small>Blocked</small><strong>${blocked}</strong></div>` +
+      `<div class="log-kpi"><small>Exports</small><strong>$${Math.round(logistics.expectedExportCredit())}</strong></div></div>` +
+      `<table class="log-table"><thead><tr><th>Commodity</th><th>Here</th><th>Transit</th><th>Reserved</th></tr></thead><tbody>${stockRows}</tbody></table>` +
+      `<table class="log-table"><thead><tr><th>Last 24 hours</th><th>Amount</th></tr></thead><tbody>${dailyRows}</tbody></table>` +
+      `<div class="log-ledger"><strong>Recent ledger</strong><br>${recent}</div>`;
+
+    const detail = document.querySelector<HTMLElement>("#detailCost strong");
+    if (detail && editor.tool && isOrderTool()) {
+      const count = Math.max(1, orderTargets().length);
+      const recipe = construction.estimate(editor.tool, count);
+      const parts = Object.entries(recipe).map(([id, need]) => {
+        const available = Math.max(0, logistics.quantity(id) - logistics.reserved(id));
+        const ordered = logistics.incoming(id);
+        const missing = Math.max(0, need - available - ordered);
+        return `${commodityDef(id).name} ${available}/${need}${ordered ? ` +${ordered} inbound` : ""}${missing ? ` (${missing} missing)` : ""}`;
+      });
+      detail.textContent = `$${recipeCost(recipe).toLocaleString()} · ${parts.join(", ")}`;
+    }
+  }
 
   function frame(now: number) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -817,8 +1047,30 @@ async function main() {
     // high speeds don't let agents tunnel through walls.
     let simDt = dt * speed;
     worldTime += simDt;
+    const staffCounts = new Map<number, number>();
+    for (const ag of agents.agents) if (ag.kind !== Obj.Prisoner) staffCounts.set(ag.kind, (staffCounts.get(ag.kind) ?? 0) + 1);
+    economy.setStaffCounts(staffCounts);
+    economy.tick(worldTime, staffCounts);
+    kitchen.tick(worldTime, world);
+    if (agents.repairJobs.length > 0) {
+      const repairDemand = { metal: 0, concrete: 0 };
+      for (const job of agents.repairJobs) {
+        if (job.claimedBy >= 0) continue;
+        if (job.kind === "fence") repairDemand.metal++;
+        else repairDemand.concrete += 2;
+      }
+      logistics.request(repairDemand, worldTime, false, "security-repairs");
+    }
+    agents.staffPerformance = economy.performanceMultiplier;
     while (simDt > 0) {
       const step = Math.min(0.1, simDt);
+      logistics.tick(step, worldTime, world);
+      construction.tick(step);
+      intake.tick(step, worldTime, world, agents);
+      agents.roadVehicleZ = [
+        ...logistics.trucks.filter((truck) => truck.state === "arriving" || truck.state === "departing").map((truck) => truck.z),
+        ...intake.vehicles.filter((vehicle) => vehicle.state === "arriving" || vehicle.state === "departing").map((vehicle) => vehicle.z),
+      ];
       agents.update(step, world, isNightAt(worldTime), hourOf(worldTime));
       simDt -= step;
     }
@@ -840,6 +1092,27 @@ async function main() {
     const escapedText = String(agents.escapedCount), caughtText = String(agents.caughtCount);
     if (escapedEl && escapedEl.textContent !== escapedText) escapedEl.textContent = escapedText;
     if (caughtEl && caughtEl.textContent !== caughtText) caughtEl.textContent = caughtText;
+    const cashText = `${economy.cash < 0 ? "−" : ""}$${Math.abs(Math.round(economy.cash)).toLocaleString()}`;
+    const net = economy.netHourly();
+    const netText = `${net >= 0 ? "+" : "−"}$${Math.abs(Math.round(net)).toLocaleString()}`;
+    if (cashEl && cashEl.textContent !== cashText) {
+      cashEl.textContent = cashText;
+      cashEl.style.color = economy.cash < 0 ? "#e18a82" : "";
+    }
+    if (netHourlyEl && netHourlyEl.textContent !== netText) netHourlyEl.textContent = netText;
+    logisticsUiT -= dt;
+    if (logisticsUiT <= 0) { logisticsUiT = 0.5; updateLogisticsUi(); }
+    logisticsRenderT -= dt;
+    if (logisticsRenderT <= 0) { logisticsRenderT = 0.2; refreshFurniture(); }
+    ghostRenderT -= dt;
+    if (ghostRenderT <= 0) {
+      ghostRenderT = 0.08;
+      const renderedGhosts = construction.persistentGhosts();
+      if (editor.tool && hoverTile && isOrderTool()) {
+        renderedGhosts.push(...construction.preview(editor.tool, orderTargets(), editor.orient, world));
+      }
+      ghosts.set(device, renderedGhosts);
+    }
 
     people.update(device, personStager.stage(agents.agents));
     if (agents.takeWorldDirty()) { dirty = true; saveDirty = true; } // fences cut / repaired
@@ -934,6 +1207,7 @@ async function main() {
     beds.draw(pass);
     lights.draw(pass);
     furniture.draw(pass);
+    ghosts.draw(pass);
     people.draw(pass);
     roomLines.draw(pass);
     if (selected) overlay.draw(pass); // debug: selected agent's memory

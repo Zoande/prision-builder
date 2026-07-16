@@ -9,7 +9,7 @@
 // table eats the tray. That is what `gives`, `requires` and `consumes` are for.
 
 import { World } from "./world.ts";
-import { DIRS, Obj, defOf, kindsServing, type NeedName } from "./objects.ts";
+import { DIRS, Obj, SHELF_KINDS, defOf, kindsServing, type NeedName } from "./objects.ts";
 import { Item, canHold, canPocket, hasItem, itemDef, removeItem, stow } from "./items.ts";
 import { isNextTo, lawfulOpen, pathAdjacent, stepOff } from "./move.ts";
 import {
@@ -44,6 +44,7 @@ export function useable(A: Agents, ag: Agent, world: World, anchor: number, kind
   const use = defOf(kind)?.use;
   if (!use) return false;
   if (useCount(A, anchor) >= use.capacity) return false;
+  if (SHELF_KINDS.includes(kind) && A.kitchen && A.kitchen.books <= 0) return false;
   // Your bunk is yours.
   if (use.owned && ag.bedIdx !== anchor) return false;
   // You can't eat at a table without a tray — unless someone left one there.
@@ -196,9 +197,10 @@ export function startUse(A: Agents, ag: Agent, world: World) {
   }
   // Take what it hands out.
   if (use.gives !== undefined) {
-    stow(ag.inv, use.gives);
+    if (use.gives !== Item.Book || !A.kitchen || A.kitchen.borrowBook()) stow(ag.inv, use.gives);
     if (kind === Obj.ServingTable) {
       A.servingStock.set(anchor, (A.servingStock.get(anchor) ?? 1) - 1);
+      A.kitchen?.mealTaken();
       A.mealsDirty = true;
     }
   }
@@ -267,7 +269,10 @@ export function finishUse(A: Agents, ag: Agent, world: World) {
   // The meal is finished, so the tray goes.
   if (kind === Obj.Table && A.mealTables.delete(ag.useIdx)) A.mealsDirty = true;
   // Eating is also how a man squirrels away a spoon or works a cutter loose.
-  if (kind === Obj.Table) mealContraband(A, ag);
+  if (kind === Obj.Table) {
+    const spoonStolen = mealContraband(A, ag);
+    A.kitchen?.finishMeal(spoonStolen);
+  }
 
   const on = use?.from === "on";
   releaseUse(A, ag);
@@ -276,4 +281,3 @@ export function finishUse(A: Agents, ag: Agent, world: World) {
   ag.state = "idle";
   if (on) stepOff(ag, world);
 }
-

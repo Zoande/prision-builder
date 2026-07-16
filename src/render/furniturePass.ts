@@ -4,7 +4,7 @@
 // furniture kind.
 
 import furnitureShader from "../furniture.wgsl?raw";
-import { FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, TRAY_STACK_KIND } from "../sim/agents";
+import { CARGO_KIND, DRIVER_KIND, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, INTAKE_TRUCK_KIND, TRAY_STACK_KIND, TRUCK_KIND } from "../sim/agents";
 import { Obj } from "../sim/world";
 import { FENCE_H, PRELUDE, sceneLightEntries, type SceneLight } from "./shaderCommon";
 
@@ -82,6 +82,70 @@ const tableMesh = () => new Float32Array([
   ...box(0.84, 0.90, 0.00, 0.72, 0.10, 0.16, STEEL),
   ...box(0.10, 0.16, 0.00, 0.72, 0.84, 0.90, STEEL),
   ...box(0.84, 0.90, 0.00, 0.72, 0.84, 0.90, STEEL),
+]);
+
+const truckMesh = (accent: number) => new Float32Array([
+  ...box(0.05, 1.95, 0.42, 1.90, 0.05, 4.20, CERAMIC),
+  ...box(0.08, 1.92, 0.42, 1.62, 4.20, 5.85, accent),
+  ...box(0.18, 0.82, 1.34, 1.56, 5.86, 5.90, SCREEN),
+  ...box(1.18, 1.82, 1.34, 1.56, 5.86, 5.90, SCREEN),
+  ...box(0.02, 0.32, 0.16, 0.72, 0.55, 1.20, BLACK),
+  ...box(1.68, 1.98, 0.16, 0.72, 0.55, 1.20, BLACK),
+  ...box(0.02, 0.32, 0.16, 0.72, 4.70, 5.35, BLACK),
+  ...box(1.68, 1.98, 0.16, 0.72, 4.70, 5.35, BLACK),
+]);
+
+const cargoMesh = () => new Float32Array([
+  ...box(0.05, 0.55, 0.00, 0.48, 0.05, 0.55, WOOD),
+  ...box(0.03, 0.57, 0.19, 0.25, 0.02, 0.58, DARKWOOD),
+]);
+
+const driverMesh = () => new Float32Array([
+  ...box(0.34, 0.66, 1.52, 1.88, 0.34, 0.66, CERAMIC),
+  ...box(0.27, 0.73, 0.72, 1.52, 0.30, 0.70, ORANGE),
+  ...box(0.30, 0.47, 0.00, 0.72, 0.35, 0.55, DARK),
+  ...box(0.53, 0.70, 0.00, 0.72, 0.35, 0.55, DARK),
+]);
+
+const loadingPalletMesh = () => new Float32Array([
+  ...box(0.05, 1.95, 0.10, 0.18, 0.05, 1.95, WOOD),
+  ...box(0.10, 0.25, 0.00, 0.10, 0.12, 1.88, DARKWOOD),
+  ...box(0.92, 1.08, 0.00, 0.10, 0.12, 1.88, DARKWOOD),
+  ...box(1.75, 1.90, 0.00, 0.10, 0.12, 1.88, DARKWOOD),
+]);
+
+const freezerMesh = () => new Float32Array([
+  ...box(0.04, 1.96, 0.00, 1.75, 0.10, 0.90, CERAMIC),
+  ...box(0.02, 1.98, 0.82, 0.87, 0.08, 0.92, STEEL),
+  ...box(0.92, 1.08, 0.25, 1.55, 0.075, 0.11, DARK),
+  ...box(0.80, 0.86, 0.95, 1.35, 0.04, 0.10, CHROME),
+]);
+
+const sinkMesh = () => new Float32Array([
+  ...box(0.08, 0.92, 0.70, 0.82, 0.08, 0.92, STEEL),
+  ...box(0.17, 0.83, 0.72, 0.80, 0.17, 0.83, DARK),
+  ...box(0.10, 0.18, 0.00, 0.70, 0.10, 0.18, STEEL),
+  ...box(0.82, 0.90, 0.00, 0.70, 0.82, 0.90, STEEL),
+  ...box(0.46, 0.54, 0.80, 1.25, 0.82, 0.90, CHROME),
+  ...box(0.46, 0.78, 1.18, 1.25, 0.82, 0.90, CHROME),
+]);
+
+const uniformRackMesh = () => new Float32Array([
+  ...box(0.10, 0.18, 0.00, 2.00, 0.12, 0.20, STEEL),
+  ...box(0.82, 0.90, 0.00, 2.00, 0.12, 0.20, STEEL),
+  ...box(0.10, 0.90, 1.88, 1.98, 0.12, 0.20, STEEL),
+  ...box(0.18, 0.42, 0.55, 1.82, 0.16, 0.48, CLOTH),
+  ...box(0.58, 0.82, 0.55, 1.82, 0.16, 0.48, SEAT),
+]);
+
+const secureBridgeMesh = () => new Float32Array([
+  ...box(0.00, 10.00, 2.55, 2.78, 0.00, 2.00, STEEL),
+  ...box(0.00, 10.00, 2.78, 2.88, 0.00, 0.10, DARK),
+  ...box(0.00, 10.00, 2.78, 2.88, 1.90, 2.00, DARK),
+  ...box(0.00, 10.00, 2.88, 4.15, 0.02, 0.08, LINK),
+  ...box(0.00, 10.00, 2.88, 4.15, 1.92, 1.98, LINK),
+  ...box(0.00, 10.00, 4.05, 4.18, 0.00, 0.10, STEEL),
+  ...box(0.00, 10.00, 4.05, 4.18, 1.90, 2.00, STEEL),
 ]);
 
 // Bench spanning `len` tiles along +X: seat plank + slab legs.
@@ -596,6 +660,16 @@ export class FurniturePass {
       [Obj.TrashCan, trashCanMesh()],
       // Security
       [Obj.SniperTower, sniperTowerMesh()],
+      [Obj.LoadingPallet, loadingPalletMesh()],
+      [Obj.Freezer, freezerMesh()],
+      [Obj.Sink, sinkMesh()],
+      [Obj.SearchTable, woodTableMesh(2, 1)],
+      [Obj.UniformRack, uniformRackMesh()],
+      [Obj.SecureBridge, secureBridgeMesh()],
+      [TRUCK_KIND, truckMesh(CERAMIC_DK)],
+      [INTAKE_TRUCK_KIND, truckMesh(ORANGE)],
+      [CARGO_KIND, cargoMesh()],
+      [DRIVER_KIND, driverMesh()],
       [FOOD_KIND, foodMesh()],
       [TRAY_STACK_KIND, trayStackMesh()],
       [HOLE_ENTRY_KIND, holeEntryMesh()],
@@ -630,4 +704,32 @@ export class FurniturePass {
       pass.draw(slot.verts, slot.count);
     }
   }
+}
+
+/** The ghost pass consumes the exact same authored meshes as completed
+ * furniture, so planned objects do not collapse into generic cubes. */
+export function furnitureMeshRegistry(): Map<number, Float32Array> {
+  return new Map<number, Float32Array>([
+    [Obj.Toilet, toiletMesh()], [Obj.Shower, showerMesh()], [Obj.Drain, drainMesh()],
+    [Obj.FenceDoor, fenceGateMesh(ORANGE)], [Obj.FenceJailDoor, fenceGateMesh(RED)],
+    [Obj.Table, tableMesh()], [Obj.Bench2, benchMesh(2)], [Obj.Bench4, benchMesh(4)],
+    [Obj.Cooker, cookerMesh()], [Obj.ServingTable, servingTableMesh()],
+    [Obj.Bookshelf, bookshelfMesh(1, 1.15)], [Obj.BookshelfLarge, bookshelfMesh(2, 1.95)],
+    [Obj.BookshelfTall, bookshelfMesh(2, 2.60)], [Obj.ReadingDesk, readingDeskMesh(2)],
+    [Obj.WoodenTable, woodTableMesh(2, 1)], [Obj.WoodenTableLarge, woodTableMesh(2, 2)],
+    [Obj.Chair, chairMesh()], [Obj.Armchair, armchairMesh()], [Obj.Sofa, sofaMesh(2)],
+    [Obj.WeightBench, weightBenchMesh(2)], [Obj.Treadmill, treadmillMesh()],
+    [Obj.PunchingBag, punchingBagMesh()], [Obj.PullUpBar, pullUpBarMesh(2)],
+    [Obj.ExerciseMat, matMesh(2, 2)], [Obj.Television, tvMesh()],
+    [Obj.PoolTable, poolTableMesh(2)], [Obj.ChessTable, chessTableMesh()],
+    [Obj.CoffeeTable, coffeeTableMesh()], [Obj.Altar, altarMesh()], [Obj.Pew, pewMesh(3)],
+    [Obj.Lectern, lecternMesh()], [Obj.CoffeeMachine, coffeeMachineMesh()],
+    [Obj.VendingMachine, vendingMachineMesh()], [Obj.WaterCooler, waterCoolerMesh()],
+    [Obj.Lockers, lockersMesh()], [Obj.PottedPlant, plantMesh(1.0)],
+    [Obj.LargePlant, plantMesh(1.9)], [Obj.Rug, rugMesh()], [Obj.TrashCan, trashCanMesh()],
+    [Obj.SniperTower, sniperTowerMesh()], [Obj.LoadingPallet, loadingPalletMesh()],
+    [Obj.Freezer, freezerMesh()], [Obj.Sink, sinkMesh()],
+    [Obj.SearchTable, woodTableMesh(2, 1)], [Obj.UniformRack, uniformRackMesh()],
+    [Obj.SecureBridge, secureBridgeMesh()],
+  ]);
 }

@@ -8,25 +8,39 @@
 import { World } from "./world.ts";
 import {
   Item, type Stack,
-  canPocket, itemDef, pocket, removeFromHands, stashAdd, stashCount, stashTake,
+  canPocket, itemDef, pocket, removeFromHands, removeItem, stashAdd, stashCount, stashTake,
   countItem, stow, takeInHands,
 } from "./items.ts";
 import { pathAdjacent } from "./move.ts";
-import { MEALS_PER_CUTTER, type Agent } from "./agent.ts";
+import type { Agent } from "./agent.ts";
 import { lawfulOpen } from "./move.ts";
 import type { Agents } from "./agents.ts";
 
 /** Meals feed the escape kit: a tucked-away spoon, or progress on a cutter. */
-export function mealContraband(A: Agents, ag: Agent) {
-  if (ag.plan?.method === "cut") {
-    ag.cutterMeals++;
-    if (ag.cutterMeals >= MEALS_PER_CUTTER) {
-      ag.cutterMeals = 0;
+export function mealContraband(A: Agents, ag: Agent): boolean {
+  if (!A.kitchen || !ag.plan) return false;
+  if (ag.plan.method === "dig") {
+    if (toolCount(A, ag, Item.Spoon) >= 4) return false;
+    return acquire(A, ag, Item.Spoon);
+  }
+  if (ag.plan.method === "cut") {
+    const stolen = acquire(A, ag, Item.Spoon);
+    if (!stolen) return false;
+    if (toolCount(A, ag, Item.Spoon) >= 3) {
+      consumeTools(A, ag, Item.Spoon, 3);
       acquire(A, ag, Item.Cutter);
     }
-  } else if (ag.plan?.method === "dig") {
-    acquire(A, ag, Item.Spoon);
+    return true;
   }
+  return false;
+}
+
+function consumeTools(A: Agents, ag: Agent, kind: number, count: number): void {
+  let left = count;
+  while (left > 0 && removeItem(ag.inv, kind)) left--;
+  if (ag.bedIdx < 0) return;
+  const hidden = stashOf(A, ag.bedIdx);
+  while (left > 0 && stashTake(hidden, kind)) left--;
 }
 
 
@@ -115,4 +129,3 @@ export function doRetrieve(A: Agents, ag: Agent, kind: number) {
     break; // he cannot carry any more
   }
 }
-

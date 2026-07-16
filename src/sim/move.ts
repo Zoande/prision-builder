@@ -90,7 +90,7 @@ export function pathAdjacent(
     if (!world.inBounds(nx, nz)) continue;
     const ni = nz * size + nx;
     if (!open(ni) && ni !== start) continue;
-    const p = astar(size, start, ni, open);
+    const p = astar(size, start, ni, open, 30000, (from, to) => world.canNavigateEdge(from, to));
     if (p && (!best || p.length < best.length)) best = p;
   }
   if (!best) return false;
