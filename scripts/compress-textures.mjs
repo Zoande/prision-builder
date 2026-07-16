@@ -34,11 +34,16 @@ const MANIFEST = [
   ["wood_col", "color", hi("wood4k/4K/Poliigon_WoodVeneerOak_7760_BaseColor.jpg"), "public/textures/wood_col.jpg"],
   ["black_col", "color", hi("black_texture_4k/4K/Poliigon_PlasticMoldDryBlast_7495_BaseColor.jpg"), "public/textures/black_col.jpg"],
   ["concrete_col", "color", null, "public/textures/concrete_col.jpg"], // roof; no 4k source
+  ["galv_col", "color", hi("lightgreymetaltexture/MetalGalvanizedSteelWorn001_COL_4K_METALNESS.jpg"), "public/textures/galv_col.png"],
+  ["corroded_col", "color", hi("corrodedmetal/MetalCorrodedHeavy001_COL_4K_METALNESS.jpg"), "public/textures/corroded_col.png"],
+  ["fabric_col", "color", hi("fabricplain/FabricPlainNaturalSheer009_COL_4K.jpg"), "public/textures/fabric_col.png"],
   // --- normal (linear) ---
   ["grass_nrm", "normal", hi("grass4k/4K/Poliigon_GrassPatchyGround_4585_Normal.png"), "public/textures/grass_nrm.png"],
   ["dirt_nrm", "normal", hi("dirt4k/GroundDirtWeedsPatchy004_NRM_4K.jpg"), "public/textures/dirt_nrm.jpg"],
   ["floor2_nrm", "normal", hi("floor4k/4K/Poliigon_ConcreteFloorPoured_7656_Normal.png"), "public/textures/floor2_nrm.png"],
   ["concrete_nrm", "normal", null, "public/textures/concrete_nrm.png"], // roof; no 4k source
+  ["galv_nrm", "normal", hi("lightgreymetaltexture/MetalGalvanizedSteelWorn001_NRM_4K_METALNESS.jpg"), "public/textures/galv_nrm.png"],
+  ["corroded_nrm", "normal", hi("corrodedmetal/MetalCorrodedHeavy001_NRM_4K_METALNESS.jpg"), "public/textures/corroded_nrm.png"],
 ];
 
 function basisu(args) {

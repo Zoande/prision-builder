@@ -3,8 +3,11 @@ import { invert } from "./math";
 import { DIRS, NEEDS, World, defOf } from "./sim/world";
 import {
   Agents, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, TRAY_STACK_KIND,
-  REG_NAMES, type Agent,
+  REG_NAMES, type Agent, type IssueLabel,
 } from "./sim/agents";
+import {
+  PersonInstanceStager, foodInstances, holeInstances, knownOverlay, trayStackInstances,
+} from "./sim/renderData";
 import { Item, countItem, itemDef } from "./sim/items";
 import { Editor } from "./editor";
 import { clockLabel, dayOf, evalAtmosphere, HOUR_SECONDS, hourOf, isNightAt } from "./daynight";
@@ -24,6 +27,7 @@ import { SkyPass } from "./render/skyPass";
 import { pickGround } from "./render/pick";
 import { configureAssets, type Quality } from "./render/assets";
 import { GLOBALS_SIZE, writeGlobals } from "./render/shaderCommon";
+import { WorldOverlay, type PreviewTile } from "./ui/worldOverlay";
 
 const WORLD_SIZE = 500; // playable/buildable area (tiles)
 const BORDER_TILES = 50; // extra hazed ground around it: no building, camera stays out
@@ -44,7 +48,24 @@ async function main() {
   const canvas = document.getElementById("gfx") as HTMLCanvasElement;
 
   if (!("gpu" in navigator)) fail("WebGPU is not available. Try Chrome/Edge 113+.");
-  const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+  let adapter: GPUAdapter | null = null;
+  let adapterError: unknown;
+  try {
+    adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+  } catch (error) {
+    adapterError = error;
+    // A few Windows drivers reject the power preference even though WebGPU is
+    // available. Retry with the browser's default adapter selection.
+    try {
+      adapter = await navigator.gpu.requestAdapter();
+    } catch (retryError) {
+      adapterError = retryError;
+    }
+  }
+  if (!adapter) {
+    const detail = adapterError instanceof Error ? adapterError.message : String(adapterError ?? "no adapter");
+    fail(`WebGPU could not initialize (${detail}). Open this app at the Vite URL (http://localhost:5173) in Chrome or Edge, rather than opening index.html directly.`);
+  }
   if (!adapter) fail("No suitable GPU adapter found.");
   const bcSupported = adapter.features.has("texture-compression-bc");
   const device = await adapter.requestDevice({
@@ -124,13 +145,14 @@ async function main() {
 
   // --- Living agents -----------------------------------------------------
   const agents = new Agents();
+  const personStager = new PersonInstanceStager();
   let saveDirty = false;
 
   function refreshFurniture() {
     const byKind = world.furnitureInstances();
-    byKind.set(FOOD_KIND, agents.foodInstances(world));
-    byKind.set(TRAY_STACK_KIND, agents.trayStackInstances(world));
-    const holes = agents.holeInstances(world);
+    byKind.set(FOOD_KIND, foodInstances(agents, world));
+    byKind.set(TRAY_STACK_KIND, trayStackInstances(agents, world));
+    const holes = holeInstances(agents, world);
     byKind.set(HOLE_ENTRY_KIND, holes.entries);
     byKind.set(HOLE_SURF_KIND, holes.surfs);
     furniture.setInstances(device, byKind);
@@ -326,19 +348,24 @@ async function main() {
     const dcat = editor.tool?.cat;
     if (dcat === "deploy" || dcat === "undeploy") {
       const step = dcat === "deploy" ? 1 : -1;
+      let changed = false;
       const route = world.routeAtTile(tx, tz);
       if (route > 0) {
-        agents.setRouteQuota(route, Math.max(0, agents.routeQuota(route) + step));
+        const before = agents.routeQuota(route);
+        const after = Math.max(0, before + step);
+        if (after !== before) { agents.setRouteQuota(route, after); changed = true; }
       } else {
         const room = world.roomAt(world.idx(tx, tz));
-        if (room) room.guards = Math.max(0, room.guards + step);
+        if (room) {
+          const after = Math.max(0, room.guards + step);
+          if (after !== room.guards) { room.guards = after; changed = true; }
+        }
       }
-      dirty = true;
-      saveDirty = true;
+      if (changed) { dirty = true; saveDirty = true; }
     }
     // Tools that act on live agents rather than tiles.
-    if (editor.tool?.cat === "erase") { agents.eraseAt(tx, tz); saveDirty = true; }
-    if (editor.tool?.cat === "baton") { agents.giveBatonAt(tx, tz); saveDirty = true; }
+    if (editor.tool?.cat === "erase" && agents.eraseAt(tx, tz)) saveDirty = true;
+    if (editor.tool?.cat === "baton" && agents.giveBatonAt(tx, tz)) saveDirty = true;
   }
 
   function applyFloorRect(to: { x: number; z: number }) {
@@ -365,17 +392,24 @@ async function main() {
     }
   }
 
-  function previewTiles(): { x: number; z: number }[] {
-    if (!editor.tool || !hoverTile) return [];
+  const previewScratch: PreviewTile[] = [];
+  function previewTiles(): number {
+    let count = 0;
+    if (!editor.tool || !hoverTile) return count;
     const cat = editor.tool.cat;
     const start = painting && dragStart ? dragStart : hoverTile;
-    const out: { x: number; z: number }[] = [];
-    const add = (x: number, z: number) => { if (world.inBounds(x, z)) out.push({ x, z }); };
+    const add = (x: number, z: number) => {
+      if (!world.inBounds(x, z)) return;
+      let tile = previewScratch[count];
+      if (!tile) { tile = { x, z }; previewScratch.push(tile); }
+      else { tile.x = x; tile.z = z; }
+      count++;
+    };
     if (cat === "floor" || cat === "room") {
       const x0 = Math.min(start.x, hoverTile.x), x1 = Math.max(start.x, hoverTile.x);
       const z0 = Math.min(start.z, hoverTile.z), z1 = Math.max(start.z, hoverTile.z);
       for (let z = z0; z <= z1; z++) for (let x = x0; x <= x1; x++) add(x, z);
-      return out;
+      return count;
     }
     if (cat === "wall" || cat === "fence") {
       const dx = hoverTile.x - start.x, dz = hoverTile.z - start.z;
@@ -387,7 +421,7 @@ async function main() {
         const z0 = Math.min(start.z, hoverTile.z), z1 = Math.max(start.z, hoverTile.z);
         for (let z = z0; z <= z1; z++) add(start.x, z);
       }
-      return out;
+      return count;
     }
     if (cat === "piece") {
       // Ghost the object's real footprint, rotated the way it will be placed.
@@ -402,10 +436,10 @@ async function main() {
           }
         }
       }
-      return out;
+      return count;
     }
     add(hoverTile.x, hoverTile.z);
-    return out;
+    return count;
   }
 
   function paintAt(e: PointerEvent) {
@@ -448,16 +482,33 @@ async function main() {
   const inspectName = document.getElementById("inspectName")!;
   const inspectState = document.getElementById("inspectState")!;
   const inspectStats = document.getElementById("inspectStats")!;
+  const inspectValues = new Map<string, HTMLElement>();
+  for (const label of ["Food", "Rest", "Comfort", "Outdoors"]) {
+    const stat = document.createElement("div");
+    stat.className = "inspect-stat";
+    const small = document.createElement("small");
+    small.textContent = label;
+    const value = document.createElement("strong");
+    stat.append(small, value);
+    inspectStats.appendChild(stat);
+    inspectValues.set(label, value);
+  }
   function updateInspector() {
     if (!selected) { inspector.classList.remove("show"); return; }
     const kind = selected.kind === 8 ? "Prisoner" : selected.kind === 9 ? "Guard" : selected.kind === 20 ? "Cook" : "Workman";
     const pct = (v: number) => `${Math.round(v * 100)}%`;
-    inspectName.textContent = `${kind} #${selected.id}`;
-    inspectState.textContent = STATE_TEXT[selected.state] ?? selected.state;
-    inspectStats.innerHTML = [
-      ["Food", pct(selected.needs.food)], ["Rest", pct(selected.needs.sleep)],
-      ["Comfort", pct(selected.needs.comfort)], ["Outdoors", pct(selected.needs.outdoors)],
-    ].map(([label, value]) => `<div class="inspect-stat"><small>${label}</small><strong>${value}</strong></div>`).join("");
+    const name = `${kind} #${selected.id}`;
+    const state = STATE_TEXT[selected.state] ?? selected.state;
+    if (inspectName.textContent !== name) inspectName.textContent = name;
+    if (inspectState.textContent !== state) inspectState.textContent = state;
+    const setValue = (label: string, value: string) => {
+      const el = inspectValues.get(label)!;
+      if (el.textContent !== value) el.textContent = value;
+    };
+    setValue("Food", pct(selected.needs.food));
+    setValue("Rest", pct(selected.needs.sleep));
+    setValue("Comfort", pct(selected.needs.comfort));
+    setValue("Outdoors", pct(selected.needs.outdoors));
     inspector.classList.add("show");
   }
 
@@ -594,63 +645,13 @@ async function main() {
   });
   canvas.addEventListener("mouseleave", () => { tip.style.display = "none"; hoverTile = null; });
 
-  // --- Room labels + warning markers -------------------------------------
-  const roomOverlay = document.getElementById("roomOverlay")!;
-  const capEl = document.getElementById("cap")!;
-  function projectToScreen(viewProj: Float32Array, x: number, y: number, z: number): [number, number] | null {
-    const cx = viewProj[0] * x + viewProj[4] * y + viewProj[8] * z + viewProj[12];
-    const cy = viewProj[1] * x + viewProj[5] * y + viewProj[9] * z + viewProj[13];
-    const cw = viewProj[3] * x + viewProj[7] * y + viewProj[11] * z + viewProj[15];
-    if (cw <= 0.0001) return null;
-    const nx = cx / cw, ny = cy / cw;
-    if (nx < -1.1 || nx > 1.1 || ny < -1.1 || ny > 1.1) return null;
-    return [((nx + 1) * 0.5) * innerWidth, ((1 - ny) * 0.5) * innerHeight];
-  }
-
-  function attachWarningTip(el: HTMLElement, issue: string) {
-    el.addEventListener("mousemove", (e) => {
-      tip.textContent = issue;
-      tip.style.display = "block";
-      tip.style.left = `${Math.min(e.clientX + 16, innerWidth - 360)}px`;
-      tip.style.top = `${Math.min(e.clientY + 12, innerHeight - 120)}px`;
-    });
-    el.addEventListener("mouseleave", () => { tip.style.display = "none"; });
-  }
-
-  function addWarning(viewProj: Float32Array, x: number, z: number, issue: string) {
-    const p = projectToScreen(viewProj, x, 1.0, z);
-    if (!p) return;
-    const el = document.createElement("div");
-    el.className = "warn-mark";
-    el.textContent = "!";
-    el.style.left = `${p[0]}px`;
-    el.style.top = `${p[1]}px`;
-    attachWarningTip(el, issue);
-    roomOverlay.appendChild(el);
-  }
-
-  function addPreviewTile(viewProj: Float32Array, x: number, z: number) {
-    const corners = [
-      projectToScreen(viewProj, x, 0.08, z),
-      projectToScreen(viewProj, x + 1, 0.08, z),
-      projectToScreen(viewProj, x + 1, 0.08, z + 1),
-      projectToScreen(viewProj, x, 0.08, z + 1),
-    ];
-    if (corners.some((p) => !p)) return;
-    const pts = corners as [number, number][];
-    const minX = Math.min(...pts.map((p) => p[0]));
-    const minY = Math.min(...pts.map((p) => p[1]));
-    const maxX = Math.max(...pts.map((p) => p[0]));
-    const maxY = Math.max(...pts.map((p) => p[1]));
-    const el = document.createElement("div");
-    el.className = "build-preview";
-    el.style.left = `${minX}px`;
-    el.style.top = `${minY}px`;
-    el.style.width = `${Math.max(1, maxX - minX)}px`;
-    el.style.height = `${Math.max(1, maxY - minY)}px`;
-    el.style.clipPath = `polygon(${pts.map((p) => `${p[0] - minX}px ${p[1] - minY}px`).join(",")})`;
-    roomOverlay.appendChild(el);
-  }
+  // --- Retained room labels + warning markers ----------------------------
+  const worldOverlay = new WorldOverlay(
+    document.getElementById("roomOverlay")!,
+    document.getElementById("cap")!,
+    tip,
+  );
+  let worldOverlayDataT = 0;
 
   function previewShowsFacing(): boolean {
     const cat = editor.tool?.cat;
@@ -658,45 +659,18 @@ async function main() {
       cat === "prisoner" || cat === "guard" || cat === "cook" || cat === "workman";
   }
 
-  function addPreviewArrow(viewProj: Float32Array) {
-    if (!hoverTile || !previewShowsFacing()) return;
-    const dirs = [[0.42, 0], [0, 0.42], [-0.42, 0], [0, -0.42]];
-    const [dx, dz] = dirs[editor.orient & 3];
-    const c = projectToScreen(viewProj, hoverTile.x + 0.5, 0.18, hoverTile.z + 0.5);
-    const f = projectToScreen(viewProj, hoverTile.x + 0.5 + dx, 0.18, hoverTile.z + 0.5 + dz);
-    if (!c || !f) return;
-    const len = Math.hypot(f[0] - c[0], f[1] - c[1]);
-    if (len < 4) return;
-    const el = document.createElement("div");
-    el.className = "build-preview-arrow";
-    el.style.left = `${c[0]}px`;
-    el.style.top = `${c[1]}px`;
-    el.style.width = `${len}px`;
-    el.style.transform = `rotate(${Math.atan2(f[1] - c[1], f[0] - c[0])}rad)`;
-    roomOverlay.appendChild(el);
-  }
-
-  function renderWorldOverlay(viewProj: Float32Array) {
-    roomOverlay.innerHTML = "";
-    for (const t of previewTiles()) addPreviewTile(viewProj, t.x, t.z);
-    addPreviewArrow(viewProj);
-    capEl.innerHTML = `<span class="status-label">Population</span><span class="status-value">${agents.prisonerCount()} / ${world.prisonerCapacity()}</span>`;
-    for (const r of world.roomLabels()) {
-      const p = projectToScreen(viewProj, r.x, 0.12, r.z);
-      if (!p) continue;
-      const label = document.createElement("div");
-      label.className = "room-label";
-      // Show the furnishing score once there's anything in the room worth
-      // scoring — this is how the player sees decor doing something.
-      label.textContent = r.ambience > 0
-        ? `${r.name}  ${Math.round(r.ambience * 100)}%`
-        : r.name;
-      label.style.left = `${p[0]}px`;
-      label.style.top = `${p[1]}px`;
-      roomOverlay.appendChild(label);
-      if (!r.valid) addWarning(viewProj, r.x, r.z, `${r.name} is invalid: ${r.issue}`);
+  function refreshWorldOverlayData() {
+    const rooms = world.roomLabels();
+    const issues: IssueLabel[] = agents.issueLabels(world);
+    for (const room of rooms) {
+      if (!room.valid) issues.push({
+        id: `room-${room.id}`,
+        x: room.x,
+        z: room.z,
+        issue: `${room.name} is invalid: ${room.issue}`,
+      });
     }
-    for (const i of agents.issueLabels(world)) addWarning(viewProj, i.x, i.z, i.issue);
+    worldOverlay.updateData(rooms, issues, agents.prisonerCount(), world.prisonerCapacity());
   }
 
   let saveInFlight = false;
@@ -826,8 +800,11 @@ async function main() {
 
   // --- Loop --------------------------------------------------------------
   const hud = document.getElementById("hud")!;
+  const escapedEl = document.getElementById("escaped");
+  const caughtEl = document.getElementById("caught");
   let last = performance.now();
   let fpsAccum = 0, fpsFrames = 0, fps = 0;
+  let clockUiKey = "";
 
   function frame(now: number) {
     const dt = Math.min((now - last) / 1000, 0.05);
@@ -850,16 +827,21 @@ async function main() {
     // Clock + regime UI.
     const clockHour = hourOf(worldTime);
     const clockMinutes = Math.floor((clockHour - Math.floor(clockHour)) * 60);
-    clockEl.innerHTML = `<span class="clock-day">DAY ${dayOf(worldTime)}</span>` +
-      `<span class="clock-time">${String(Math.floor(clockHour)).padStart(2, "0")}:${String(clockMinutes).padStart(2, "0")}</span>` +
-      `<span class="clock-sun">${isNightAt(worldTime) ? "☾" : "☀"}</span>`;
-    regimeBtn.textContent = `Regime: ${REG_NAMES[agents.regime[Math.floor(hourOf(worldTime))]]}`;
-    const escapedEl = document.getElementById("escaped");
-    const caughtEl = document.getElementById("caught");
-    if (escapedEl) escapedEl.textContent = String(agents.escapedCount);
-    if (caughtEl) caughtEl.textContent = String(agents.caughtCount);
+    const day = dayOf(worldTime), hour = Math.floor(clockHour), night = isNightAt(worldTime);
+    const nextClockUiKey = `${day}:${hour}:${clockMinutes}:${night ? 1 : 0}`;
+    if (nextClockUiKey !== clockUiKey) {
+      clockUiKey = nextClockUiKey;
+      clockEl.innerHTML = `<span class="clock-day">DAY ${day}</span>` +
+        `<span class="clock-time">${String(hour).padStart(2, "0")}:${String(clockMinutes).padStart(2, "0")}</span>` +
+        `<span class="clock-sun">${night ? "☾" : "☀"}</span>`;
+    }
+    const regimeText = `Regime: ${REG_NAMES[agents.regime[hour]]}`;
+    if (regimeBtn.textContent !== regimeText) regimeBtn.textContent = regimeText;
+    const escapedText = String(agents.escapedCount), caughtText = String(agents.caughtCount);
+    if (escapedEl && escapedEl.textContent !== escapedText) escapedEl.textContent = escapedText;
+    if (caughtEl && caughtEl.textContent !== caughtText) caughtEl.textContent = caughtText;
 
-    people.update(device, agents.personInstances());
+    people.update(device, personStager.stage(agents.agents));
     if (agents.takeWorldDirty()) { dirty = true; saveDirty = true; } // fences cut / repaired
     else if (agents.takeMealsDirty()) { refreshFurniture(); saveDirty = true; }
     if (selected && !agents.agents.includes(selected)) { selected = null; overlay.clear(); updateInspector(); }
@@ -880,7 +862,7 @@ async function main() {
       }
     } else if (selected && overlayT <= 0) {
       overlayT = 0.5;
-      overlay.set(device, agents.knownOverlay(selected, world));
+      overlay.set(device, knownOverlay(selected, world));
     } else if (!selected && staffLayerWasUp) {
       overlay.clear();
     }
@@ -888,7 +870,19 @@ async function main() {
 
     const aspect = canvas.width / canvas.height;
     const viewProj = camera.viewProj(aspect);
-    renderWorldOverlay(viewProj);
+    worldOverlayDataT -= dt;
+    if (worldOverlayDataT <= 0) {
+      worldOverlayDataT = 0.25;
+      refreshWorldOverlayData();
+    }
+    const previewCount = previewTiles();
+    worldOverlay.render(
+      viewProj,
+      previewScratch,
+      previewCount,
+      previewShowsFacing() ? editor.orient : null,
+      hoverTile,
+    );
     saveTimer += dt;
     if (saveTimer >= 5) {
       saveTimer = 0;

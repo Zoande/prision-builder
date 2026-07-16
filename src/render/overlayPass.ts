@@ -1,5 +1,5 @@
 // Debug overlay pass: translucent tile quads showing the selected agent's
-// known map (see overlay.wgsl). Fed by Agents.knownOverlay(); empty = hidden.
+// known map (see overlay.wgsl). Fed by sim/renderData; empty = hidden.
 
 import overlayShader from "../overlay.wgsl?raw";
 import { PRELUDE } from "./shaderCommon";

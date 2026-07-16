@@ -10,6 +10,7 @@ export type Quality = "4k" | "1k";
 
 let quality: Quality = "4k";
 let bcSupported = false;
+const textureCache = new Map<string, Promise<GPUTexture>>();
 
 export function configureAssets(opts: { quality: Quality; bcSupported: boolean }) {
   quality = opts.quality;
@@ -30,22 +31,37 @@ const RAW: Record<string, string> = {
   wall_col: "wall_col.png", wall_nrm: "wall_nrm.png",
   wood_col: "wood_col.jpg", wood_nrm: "wood_nrm.png",
   black_col: "black_col.jpg",
-  // raw-only (added later, not yet GPU-compressed)
-  galv_col: "galv_col.jpg", galv_nrm: "galv_nrm.jpg",
-  corroded_col: "corroded_col.jpg", corroded_nrm: "corroded_nrm.jpg",
-  fabric_col: "fabric_col.jpg",
+  galv_col: "galv_col.png", galv_nrm: "galv_nrm.png",
+  corroded_col: "corroded_col.png", corroded_nrm: "corroded_nrm.png",
+  fabric_col: "fabric_col.png",
 };
 
 // Names that have a compressed KTX twin (others go straight to raw).
 const COMPRESSED = new Set([
   "grass_col", "grass_nrm", "dirt_col", "dirt_nrm", "floor2_col", "floor2_nrm",
   "concrete_col", "concrete_nrm", "wall_col", "wood_col", "black_col",
+  "galv_col", "galv_nrm", "corroded_col", "corroded_nrm", "fabric_col",
 ]);
 
 const RAW_MAX = 2048; // cap raw textures so 4K sources don't blow up VRAM
 
 /** Load a material texture by logical name; `srgb` for color, false for normals. */
 export async function loadTex(device: GPUDevice, name: string, srgb: boolean): Promise<GPUTexture> {
+  const cacheKey = `${name}:${srgb ? "srgb" : "linear"}:${quality}:${bcSupported ? "bc" : "raw"}`;
+  const cached = textureCache.get(cacheKey);
+  if (cached) return cached;
+
+  const load = loadTexUncached(device, name, srgb);
+  textureCache.set(cacheKey, load);
+  try {
+    return await load;
+  } catch (error) {
+    textureCache.delete(cacheKey);
+    throw error;
+  }
+}
+
+async function loadTexUncached(device: GPUDevice, name: string, srgb: boolean): Promise<GPUTexture> {
   if (bcSupported && COMPRESSED.has(name)) {
     try {
       return await loadKtxTexture(device, `/textures/compressed/${name}.${quality}.ktx`, srgb);

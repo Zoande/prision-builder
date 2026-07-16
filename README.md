@@ -26,6 +26,7 @@ npm run dev      # vite dev server
 | `npm run dev` | Dev server, including the save / sim-log endpoints below. |
 | `npm run build` | Typecheck (`tsc`) then bundle to `dist/`. |
 | `npm run preview` | Serve the built `dist/`. |
+| `npm run runtime-textures` | Rebuild committed 1K derivatives from licensed 4K sources. |
 | `npm run textures` | Re-encode the compressed textures (see below). |
 | `npm run check` | Sanity-check `World.recomputeRoofs()` on a 6x6 room. |
 
@@ -75,12 +76,15 @@ Two tiers, resolved at load time by [`src/render/assets.ts`](src/render/assets.t
 1. **Compressed** — `public/textures/compressed/<name>.{1k,4k}.ktx`, raw BC7
    blocks in a KTX container, uploaded straight to the GPU. Used when the device
    reports BC support. The in-app **Quality** button picks the 1k or 4k tier.
-2. **Raw** — the JPG/PNGs in `public/textures/`, capped at 2048px. Used as the
-   fallback when BC is unsupported or a KTX fails to load, and it's the only tier
-   for the galvanized / corroded / fabric materials.
+2. **Raw** — the JPG/PNGs in `public/textures/`, capped at 1K. Used as the
+   fallback when BC is unsupported or a KTX fails to load.
 
 The raw textures are committed, so **the app runs from a fresh clone** — you just
 get the uncompressed tier.
+
+The browser-facing raw files are all at most 1K. Licensed 4K galvanized,
+corroded-metal and fabric sources stay under `assets/textures-src/`; rebuild their
+committed runtime derivatives with `npm run runtime-textures`.
 
 ### Regenerating the compressed tier
 

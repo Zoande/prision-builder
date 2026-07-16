@@ -17,7 +17,7 @@ import { Access, RoomType, World, type Room } from "./world.ts";
 import { rnd } from "./rng.ts";
 import {
   Item, POCKET_SLOTS, type Stack,
-  countItem, hasItem, heldSlots, newInventory, removeItem, takeInHands,
+  countItem, hasItem, newInventory, removeItem, takeInHands,
 } from "./items.ts";
 import {
   NEEDS, Obj, POSE_STAND, POSE_LIE_FLOOR, POSE_CLIMB,
@@ -115,13 +115,16 @@ export class Agents {
     }
   }
 
-  eraseAt(x: number, z: number) {
+  eraseAt(x: number, z: number): boolean {
+    let changed = false;
     for (let n = this.agents.length - 1; n >= 0; n--) {
       const ag = this.agents[n];
       if (!ag.underground && Math.floor(ag.x) === x && Math.floor(ag.z) === z) {
         this.removeAgent(ag);
+        changed = true;
       }
     }
+    return changed;
   }
 
   removeAgent(ag: Agent) {
@@ -135,10 +138,15 @@ export class Agents {
     if (n >= 0) this.agents.splice(n, 1);
   }
 
-  giveBatonAt(x: number, z: number) {
+  giveBatonAt(x: number, z: number): boolean {
+    let changed = false;
     for (const ag of this.agents) {
-      if (Math.floor(ag.x) === x && Math.floor(ag.z) === z) ag.baton = true;
+      if (Math.floor(ag.x) === x && Math.floor(ag.z) === z && !ag.baton) {
+        ag.baton = true;
+        changed = true;
+      }
     }
+    return changed;
   }
 
   agentNear(x: number, z: number, r: number): Agent | null {
@@ -1840,86 +1848,7 @@ export class Agents {
     }
   }
 
-  // --- Render data ---------------------------------------------------------------
-
-  personInstances(): {
-    prisoners: Float32Array; guards: Float32Array; cooks: Float32Array;
-    workmen: Float32Array; snipers: Float32Array;
-  } {
-    const out: Record<number, number[]> = {
-      [Obj.Prisoner]: [], [Obj.Guard]: [], [Obj.Cook]: [], [Obj.Workman]: [],
-      [Obj.Sniper]: [],
-    };
-    for (const ag of this.agents) {
-      if (ag.underground) continue;
-      const [h0, h1] = heldSlots(ag.inv);
-      out[ag.kind].push(
-        ag.x, ag.z, ag.heading, ag.baton || ag.kind === Obj.Sniper ? 1 : 0,
-        ag.pose, ag.phase, ag.amp,
-        (ag.cuffed ? 1 : 0) + (h0 === Item.Tray || h1 === Item.Tray ? 2 : 0), // flags
-        h0, h1,
-        ag.elev,
-      );
-    }
-    return {
-      prisoners: new Float32Array(out[Obj.Prisoner]),
-      guards: new Float32Array(out[Obj.Guard]),
-      cooks: new Float32Array(out[Obj.Cook]),
-      workmen: new Float32Array(out[Obj.Workman]),
-      snipers: new Float32Array(out[Obj.Sniper]),
-    };
-  }
-
-  foodInstances(world: World): Float32Array {
-    const out: number[] = [];
-    for (const i of this.mealTables) {
-      if (world.objKind[i] !== Obj.Table) { this.mealTables.delete(i); this.mealsDirty = true; continue; }
-      out.push(i % world.size, (i / world.size) | 0, world.objOrient[i]);
-    }
-    return new Float32Array(out);
-  }
-
-  /** Tray stacks on stocked serving tables. */
-  trayStackInstances(world: World): Float32Array {
-    const out: number[] = [];
-    for (const [i, stock] of this.servingStock) {
-      if (world.objKind[i] !== Obj.ServingTable) { this.servingStock.delete(i); continue; }
-      if (stock <= 0) continue;
-      out.push(i % world.size, (i / world.size) | 0, world.objOrient[i]);
-    }
-    return new Float32Array(out);
-  }
-
-  /** Tunnel entry holes (beside displaced toilets) and surfacing holes. */
-  holeInstances(world: World): { entries: Float32Array; surfs: Float32Array } {
-    const entries: number[] = [], surfs: number[] = [];
-    for (const t of this.tunnels) {
-      entries.push(t.entry % world.size, (t.entry / world.size) | 0, world.objOrient[t.entry]);
-      if (t.surfHole >= 0) surfs.push(t.surfHole % world.size, (t.surfHole / world.size) | 0, 0);
-    }
-    return { entries: new Float32Array(entries), surfs: new Float32Array(surfs) };
-  }
-
-  knownOverlay(ag: Agent, world: World): Float32Array {
-    if (!ag.known) return new Float32Array(0);
-    const out: number[] = [];
-    for (const [i, v] of ag.known) {
-      out.push(i % world.size, (i / world.size) | 0, v === K_OPEN || v === K_CUT ? 0 : 1);
-    }
-    for (const s of ag.objMem!.values()) {
-      for (const i of s) out.push(i % world.size, (i / world.size) | 0, 2);
-    }
-    // Active tunnel: believed line vs actual head.
-    if (ag.tunnel) {
-      const t = ag.tunnel;
-      const sx = (t.entry % world.size) + 0.5, sz = ((t.entry / world.size) | 0) + 0.5;
-      for (let d = 1; d <= t.believed; d++) {
-        out.push(Math.floor(sx + Math.cos(t.heading) * d), Math.floor(sz + Math.sin(t.heading) * d), 2);
-      }
-      out.push(Math.floor(t.actualX), Math.floor(t.actualZ), 1);
-    }
-    return new Float32Array(out);
-  }
+  // --- UI diagnostics ------------------------------------------------------------
 
   issueLabels(world: World): IssueLabel[] {
     const out: IssueLabel[] = [];

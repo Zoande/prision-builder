@@ -9,6 +9,7 @@
 
 import personShader from "../person.wgsl?raw";
 import { PRELUDE, sceneLightEntries, type SceneLight } from "./shaderCommon";
+import { PERSON_INSTANCE_FLOATS, type PersonInstances } from "../sim/renderData";
 
 // Box tagged with `part` on every vertex (pos3 + part1), no bottom face.
 function box(
@@ -92,8 +93,8 @@ function doll(o: number, hat: "hair" | "cap" | "chef"): Float32Array {
 }
 
 // x, z, heading, baton, pose, phase, amp, flags, handA, handB, elev.
-// Keep in step with the instance layout below and with personInstances().
-const INSTANCE_FLOATS = 11;
+// Keep in step with the reusable staging layout in sim/renderData.ts.
+const INSTANCE_FLOATS = PERSON_INSTANCE_FLOATS;
 
 interface Slot { buf: GPUBuffer; verts: number; inst: GPUBuffer | null; count: number; }
 
@@ -160,24 +161,26 @@ export class PeoplePass {
   /** Per-frame agent upload; buffers grow but are reused between frames. */
   update(
     device: GPUDevice,
-    data: {
-      prisoners: Float32Array; guards: Float32Array; cooks: Float32Array;
-      workmen: Float32Array; snipers: Float32Array;
-    },
+    data: PersonInstances,
   ) {
     const arrays = [data.prisoners, data.guards, data.cooks, data.workmen, data.snipers];
     for (let i = 0; i < arrays.length; i++) {
       const slot = this.slots[i];
-      slot.count = arrays[i].length / INSTANCE_FLOATS;
+      slot.count = arrays[i].count;
       if (slot.count === 0) continue;
-      if (!slot.inst || slot.inst.size < arrays[i].byteLength) {
+      const byteLength = slot.count * INSTANCE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+      if (!slot.inst || slot.inst.size < byteLength) {
         slot.inst?.destroy();
         slot.inst = device.createBuffer({
-          size: Math.max(1024, arrays[i].byteLength * 2),
+          size: Math.max(1024, byteLength * 2),
           usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         });
       }
-      device.queue.writeBuffer(slot.inst, 0, arrays[i] as BufferSource);
+      device.queue.writeBuffer(
+        slot.inst, 0,
+        arrays[i].data as unknown as GPUAllowSharedBufferSource,
+        0, slot.count * INSTANCE_FLOATS,
+      );
     }
   }
 

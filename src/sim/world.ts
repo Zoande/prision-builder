@@ -260,6 +260,7 @@ export class World {
       this.objKind[i] = kind;
       this.objOrient[i] = piece.orient;
       this.objMat[i] = 0;
+      this.jailClosed[i] = 0;
       this.pieceAt[i] = piece.id;
       this.touch(i % this.size, (i / this.size) | 0);
     }
@@ -270,6 +271,8 @@ export class World {
     for (const i of this.pieceTiles(p)) {
       this.objKind[i] = Obj.None;
       this.objMat[i] = 0;
+      this.objOrient[i] = 0;
+      this.jailClosed[i] = 0;
       this.pieceAt[i] = 0;
       this.touch(i % this.size, (i / this.size) | 0);
     }
@@ -297,10 +300,13 @@ export class World {
   }
 
   // --- Edits -------------------------------------------------------------
-  setFloor(x: number, z: number, mat: number) {
-    if (!this.inBounds(x, z)) return;
-    this.floorMat[this.idx(x, z)] = mat;
+  setFloor(x: number, z: number, mat: number): boolean {
+    if (!this.inBounds(x, z)) return false;
+    const i = this.idx(x, z);
+    if (this.floorMat[i] === mat) return false;
+    this.floorMat[i] = mat;
     this.touch(x, z);
+    return true;
   }
 
   /** Structural placement never bulldozes furniture — erase the piece first. */
@@ -309,83 +315,95 @@ export class World {
     return this.pieceAt[this.idx(x, z)] === 0;
   }
 
-  setWall(x: number, z: number, mat: number) {
-    if (!this.canObj(x, z)) return;
+  setWall(x: number, z: number, mat: number): boolean {
+    if (!this.canObj(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.objKind[i] === Obj.Wall && this.objMat[i] === mat &&
+        this.objOrient[i] === 0 && this.jailClosed[i] === 0) return false;
     this.objKind[i] = Obj.Wall;
     this.objMat[i] = mat;
+    this.objOrient[i] = 0;
+    this.jailClosed[i] = 0;
     this.touch(x, z);
+    return true;
   }
 
-  setFence(x: number, z: number, mat: number) {
-    if (!this.canObj(x, z)) return;
+  setFence(x: number, z: number, mat: number): boolean {
+    if (!this.canObj(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.objKind[i] === Obj.Fence && this.objMat[i] === mat &&
+        this.objOrient[i] === 0 && this.jailClosed[i] === 0) return false;
     this.objKind[i] = Obj.Fence;
     this.objMat[i] = mat;
+    this.objOrient[i] = 0;
+    this.jailClosed[i] = 0;
     this.touch(x, z);
+    return true;
   }
 
-  setLamp(x: number, z: number) {
-    if (!this.canObj(x, z)) return;
+  setLamp(x: number, z: number): boolean {
+    if (!this.canObj(x, z)) return false;
     const i = this.idx(x, z);
+    if (this.objKind[i] === Obj.Lamp && this.objMat[i] === 0 &&
+        this.objOrient[i] === 0 && this.jailClosed[i] === 0) return false;
     this.objKind[i] = Obj.Lamp;
+    this.objMat[i] = 0;
+    this.objOrient[i] = 0;
+    this.jailClosed[i] = 0;
     this.touch(x, z);
+    return true;
   }
 
   /** Place a person (Prisoner/Guard/Cook) facing orient (0..3 quarter turns).
    *  Guards carry a baton by default (objMat doubles as the baton flag). */
-  setPerson(x: number, z: number, kind: number, orient: number) {
-    if (!this.canObj(x, z) || !PERSON_KINDS.includes(kind)) return;
+  setPerson(x: number, z: number, kind: number, orient: number): boolean {
+    if (!this.canObj(x, z) || !PERSON_KINDS.includes(kind)) return false;
     const i = this.idx(x, z);
+    const facing = orient & 3;
+    const baton = kind === Obj.Guard ? 1 : 0;
+    if (this.objKind[i] === kind && this.objOrient[i] === facing &&
+        this.objMat[i] === baton && this.jailClosed[i] === 0) return false;
     this.objKind[i] = kind;
-    this.objOrient[i] = orient & 3;
-    this.objMat[i] = kind === Obj.Guard ? 1 : 0;
+    this.objOrient[i] = facing;
+    this.objMat[i] = baton;
+    this.jailClosed[i] = 0;
     this.touch(x, z);
+    return true;
   }
 
   /** Give the person on a tile a baton (guards already have one). */
-  setBaton(x: number, z: number) {
-    if (!this.inBounds(x, z)) return;
+  setBaton(x: number, z: number): boolean {
+    if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
-    if (!PERSON_KINDS.includes(this.objKind[i])) return;
+    if (!PERSON_KINDS.includes(this.objKind[i]) || this.objMat[i] === 1) return false;
     this.objMat[i] = 1;
     this.touch(x, z);
-  }
-
-  /** Person instances (x, z, orient, baton) per kind. */
-  personInstances(): { prisoners: Float32Array; guards: Float32Array; cooks: Float32Array } {
-    const out: Record<number, number[]> = { [Obj.Prisoner]: [], [Obj.Guard]: [], [Obj.Cook]: [] };
-    for (const i of this.active) {
-      const k = this.objKind[i];
-      const a = out[k];
-      if (!a) continue;
-      a.push(i % this.size, (i / this.size) | 0, this.objOrient[i], this.objMat[i] ? 1 : 0);
-    }
-    return {
-      prisoners: new Float32Array(out[Obj.Prisoner]),
-      guards: new Float32Array(out[Obj.Guard]),
-      cooks: new Float32Array(out[Obj.Cook]),
-    };
+    return true;
   }
 
   /** Turn a fence tile into a gate (open FenceDoor / guard-only FenceJailDoor);
    *  orientation follows the fence run, like doors follow walls. */
-  setFenceGate(x: number, z: number, locked: boolean) {
-    if (!this.inBounds(x, z)) return;
+  setFenceGate(x: number, z: number, locked: boolean): boolean {
+    if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
     const k = this.objKind[i];
-    if (k !== Obj.Fence && k !== Obj.FenceDoor && k !== Obj.FenceJailDoor) return;
+    if (k !== Obj.Fence && k !== Obj.FenceDoor && k !== Obj.FenceJailDoor) return false;
     const horiz = this.isFence(x - 1, z) && this.isFence(x + 1, z);
-    this.objKind[i] = locked ? Obj.FenceJailDoor : Obj.FenceDoor;
-    this.objOrient[i] = horiz ? 0 : 1;
+    const kind = locked ? Obj.FenceJailDoor : Obj.FenceDoor;
+    const orient = horiz ? 0 : 1;
+    if (k === kind && this.objOrient[i] === orient && this.jailClosed[i] === 0) return false;
+    this.objKind[i] = kind;
+    this.objOrient[i] = orient;
+    this.jailClosed[i] = 0;
     this.touch(x, z);
+    return true;
   }
 
   /** Mount a light on an existing wall, facing its most useful open side. */
-  setWallLight(x: number, z: number) {
-    if (!this.inBounds(x, z)) return;
+  setWallLight(x: number, z: number): boolean {
+    if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
-    if (this.objKind[i] !== Obj.Wall && this.objKind[i] !== Obj.WallLight) return;
+    if (this.objKind[i] !== Obj.Wall && this.objKind[i] !== Obj.WallLight) return false;
     // Facing order: +X, +Z, -X, -Z. Prefer an open neighbour with a built
     // floor (a room interior), else any open neighbour.
     const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
@@ -398,48 +416,68 @@ export class World {
         facing = o; break;
       }
     }
-    if (facing < 0) return;
+    if (facing < 0) return false;
+    if (this.objKind[i] === Obj.WallLight && this.objOrient[i] === facing &&
+        this.jailClosed[i] === 0) return false;
     this.objKind[i] = Obj.WallLight;
     this.objOrient[i] = facing;
+    this.jailClosed[i] = 0;
     this.touch(x, z);
+    return true;
   }
 
   /** Hang a ceiling light; only makes sense under a roof. */
-  setRoofLight(x: number, z: number) {
-    if (!this.inBounds(x, z)) return;
+  setRoofLight(x: number, z: number): boolean {
+    if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
-    if (this.roofed[i] !== 1 || this.objKind[i] !== Obj.None) return;
+    if (this.roofed[i] !== 1 || this.objKind[i] !== Obj.None) return false;
     this.objKind[i] = Obj.RoofLight;
+    this.objMat[i] = 0;
+    this.objOrient[i] = 0;
+    this.jailClosed[i] = 0;
     this.touch(x, z);
+    return true;
   }
 
   /** Turn a wall tile into a door; orientation follows the surrounding wall run. */
-  setDoor(x: number, z: number, jail = false) {
-    if (!this.inBounds(x, z)) return;
+  setDoor(x: number, z: number, jail = false): boolean {
+    if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
     const k = this.objKind[i];
-    if (k !== Obj.Wall && k !== Obj.Door && k !== Obj.JailDoor) return;
+    if (k !== Obj.Wall && k !== Obj.Door && k !== Obj.JailDoor) return false;
     const horiz = this.wallLike(x - 1, z) && this.wallLike(x + 1, z);
-    this.objKind[i] = jail ? Obj.JailDoor : Obj.Door;
-    this.objOrient[i] = horiz ? 0 : 1;
+    const kind = jail ? Obj.JailDoor : Obj.Door;
+    const orient = horiz ? 0 : 1;
+    if (k === kind && this.objOrient[i] === orient && this.jailClosed[i] === 0) return false;
+    this.objKind[i] = kind;
+    this.objOrient[i] = orient;
     this.jailClosed[i] = 0; // doors start open
     this.touch(x, z);
+    return true;
   }
 
   /** Erase the object on a tile (a whole piece if it is one), or the floor. */
-  erase(x: number, z: number) {
-    if (!this.inBounds(x, z)) return;
+  erase(x: number, z: number): boolean {
+    if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
     const piece = this.pieceAtTile(i);
-    if (piece) { this.removePiece(piece); return; }
+    if (piece) { this.removePiece(piece); return true; }
     if (this.objKind[i] !== Obj.None) {
       this.objKind[i] = Obj.None;
       this.objMat[i] = 0;
+      this.objOrient[i] = 0;
+      this.jailClosed[i] = 0;
       this.touch(x, z);
-      return;
+      return true;
     }
+    if (this.floorMat[i] === 0 && this.objMat[i] === 0 &&
+        this.objOrient[i] === 0 && this.jailClosed[i] === 0) return false;
     this.floorMat[i] = 0;
+    this.objMat[i] = 0;
+    this.objOrient[i] = 0;
+    this.jailClosed[i] = 0;
     this.touch(x, z);
+    return true;
   }
 
   /** Roof/sight barrier: walls and doors, but not fences. */

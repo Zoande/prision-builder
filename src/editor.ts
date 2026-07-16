@@ -319,22 +319,22 @@ export class Editor {
   apply(world: World, x: number, z: number): boolean {
     if (!this.tool) return false;
     switch (this.tool.cat) {
-      case "floor": world.setFloor(x, z, this.tool.mat); return true;
-      case "wall": world.setWall(x, z, this.tool.mat); return true;
-      case "fence": world.setFence(x, z, this.tool.mat); return true;
-      case "door": world.setDoor(x, z); return true;
-      case "jaildoor": world.setDoor(x, z, true); return true;
-      case "fencedoor": world.setFenceGate(x, z, false); return true;
-      case "fencejaildoor": world.setFenceGate(x, z, true); return true;
+      case "floor": return world.setFloor(x, z, this.tool.mat);
+      case "wall": return world.setWall(x, z, this.tool.mat);
+      case "fence": return world.setFence(x, z, this.tool.mat);
+      case "door": return world.setDoor(x, z);
+      case "jaildoor": return world.setDoor(x, z, true);
+      case "fencedoor": return world.setFenceGate(x, z, false);
+      case "fencejaildoor": return world.setFenceGate(x, z, true);
       case "piece": return world.placePiece(x, z, this.tool.mat, this.orient);
-      case "lamp": world.setLamp(x, z); return true;
-      case "walllight": world.setWallLight(x, z); return true;
-      case "rooflight": world.setRoofLight(x, z); return true;
-      case "prisoner": world.setPerson(x, z, Obj.Prisoner, this.orient); return true;
-      case "guard": world.setPerson(x, z, Obj.Guard, this.orient); return true;
-      case "cook": world.setPerson(x, z, Obj.Cook, this.orient); return true;
-      case "workman": world.setPerson(x, z, Obj.Workman, this.orient); return true;
-      case "baton": world.setBaton(x, z); return true;
+      case "lamp": return world.setLamp(x, z);
+      case "walllight": return world.setWallLight(x, z);
+      case "rooflight": return world.setRoofLight(x, z);
+      case "prisoner": return world.setPerson(x, z, Obj.Prisoner, this.orient);
+      case "guard": return world.setPerson(x, z, Obj.Guard, this.orient);
+      case "cook": return world.setPerson(x, z, Obj.Cook, this.orient);
+      case "workman": return world.setPerson(x, z, Obj.Workman, this.orient);
+      case "baton": return world.setBaton(x, z);
       // Rooms are dragged out like floors; main claims the room on pointerdown.
       case "room":
         return this.roomDrag > 0
@@ -354,7 +354,7 @@ export class Editor {
       case "deploy":
       case "undeploy":
         return false; // handled in main: it owns the guard roster
-      case "erase": world.erase(x, z); return true;
+      case "erase": return world.erase(x, z);
     }
   }
 }
