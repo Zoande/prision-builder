@@ -29,10 +29,14 @@ fn vs(
 @fragment
 fn fs(in : VSOut) -> @location(0) vec4<f32> {
   var col = vec4<f32>(0.0, 0.55, 0.9, 0.22);
-  if (in.c > 1.5) { col = vec4<f32>(0.95, 0.8, 0.1, 0.5); }
-  if (in.c > 2.5) { col = vec4<f32>(0.20, 0.45, 0.95, 0.62); } // blue beat
-  if (in.c > 3.5) { col = vec4<f32>(0.62, 0.28, 0.92, 0.62); } // purple beat
-  if (in.c > 4.5) { col = vec4<f32>(0.95, 0.75, 0.15, 0.30); } // posted room
-  else if (in.c > 0.5) { col = vec4<f32>(0.9, 0.15, 0.1, 0.3); }
+  if      (in.c > 8.5) { col = vec4<f32>(0.10, 0.86, 0.82, 0.68); } // tunnel entry
+  else if (in.c > 7.5) { col = vec4<f32>(0.72, 0.24, 0.95, 0.70); } // conspiracy member
+  else if (in.c > 6.5) { col = vec4<f32>(0.95, 0.16, 0.12, 0.68); } // rival/grievance
+  else if (in.c > 5.5) { col = vec4<f32>(0.34, 0.88, 0.38, 0.62); } // positive social tie
+  else if (in.c > 4.5) { col = vec4<f32>(0.95, 0.75, 0.15, 0.30); } // posted room
+  else if (in.c > 3.5) { col = vec4<f32>(0.62, 0.28, 0.92, 0.62); } // purple beat
+  else if (in.c > 2.5) { col = vec4<f32>(0.20, 0.45, 0.95, 0.62); } // blue beat
+  else if (in.c > 1.5) { col = vec4<f32>(0.95, 0.8, 0.1, 0.5); }   // remembered object
+  else if (in.c > 0.5) { col = vec4<f32>(0.9, 0.15, 0.1, 0.3); }  // blocked
   return vec4<f32>(toSRGB(col.rgb) * col.a, col.a); // premultiplied
 }

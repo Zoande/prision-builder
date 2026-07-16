@@ -262,19 +262,27 @@ export function trySneak(A: Agents, ag: Agent, world: World, need: "outdoors" | 
 export function tryTunnelTrip(A: Agents, ag: Agent, world: World): boolean {
   if (ag.needs.outdoors > 0.35) return false;
   if (rnd() < ag.risk) return false; // still spooked from last time
-  const t = A.tunnels.find((tn) => tn.owner === ag.id && tn.surfHole >= 0 && !tn.occupied);
+  const op = A.escapeOperations.operationFor(ag);
+  const t = A.tunnels.find((tn) =>
+    (tn.owner === ag.id || (op && tn.networkId === op.tunnelNetworkId)) && tn.surfHole >= 0 &&
+    (tn.networkId >= 0 || !tn.occupied));
   if (!t || world.objKind[t.entry] !== Obj.Toilet) return false;
-  if (isNextTo(ag, world, t.entry)) {
+  const net = t.networkId >= 0 ? A.escapeOperations.tunnels.get(t.networkId) : null;
+  const entry = net?.entries.find((e) => e.ownerId === ag.id && e.connected)?.tile ?? t.entry;
+  if (isNextTo(ag, world, entry)) {
     ag.tunnel = t;
+    ag.tunnelEntry = entry;
     t.occupied = true;
+    if (t.networkId >= 0) A.escapeOperations.enterTunnel(t.networkId, ag);
     ag.underground = true;
     ag.state = "crawlingOut";
     ag.timer = t.believed / CRAWL_SPEED;
     ag.sneaking = true;
     return true;
   }
-  if (!pathAdjacent(ag, world, t.entry, knownOpen(ag))) return false;
+  if (!pathAdjacent(ag, world, entry, knownOpen(ag))) return false;
   ag.tunnel = t;
+  ag.tunnelEntry = entry;
   ag.state = "toTrip";
   ag.sneaking = true;
   return true;

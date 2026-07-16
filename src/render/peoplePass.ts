@@ -92,7 +92,8 @@ function doll(o: number, hat: "hair" | "cap" | "chef"): Float32Array {
   return new Float32Array(out);
 }
 
-// x, z, heading, baton, pose, phase, amp, flags, handA, handB, elev.
+// x, z, heading, baton, pose, phase, amp, flags, handA, handB, elev,
+// body(height/build/skin/hair), style(uniform rgb + packed manner).
 // Keep in step with the reusable staging layout in sim/renderData.ts.
 const INSTANCE_FLOATS = PERSON_INSTANCE_FLOATS;
 
@@ -121,7 +122,7 @@ export class PeoplePass {
             ],
           },
           {
-            arrayStride: 44, stepMode: "instance",
+            arrayStride: 76, stepMode: "instance",
             attributes: [
               { shaderLocation: 2, offset: 0, format: "float32x2" },  // pos
               { shaderLocation: 3, offset: 8, format: "float32" },    // heading
@@ -133,6 +134,8 @@ export class PeoplePass {
               { shaderLocation: 9, offset: 32, format: "float32" },   // item in hand A
               { shaderLocation: 10, offset: 36, format: "float32" },  // item in hand B
               { shaderLocation: 11, offset: 40, format: "float32" },  // elevation (a sniper is up his tower)
+              { shaderLocation: 12, offset: 44, format: "float32x4" }, // body variation
+              { shaderLocation: 13, offset: 60, format: "float32x4" }, // custody uniform + manner
             ],
           },
         ],

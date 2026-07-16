@@ -99,10 +99,33 @@
       .log-kpi small { display:block; color:var(--muted); font-size:8px; text-transform:uppercase; } .log-kpi strong { display:block; margin-top:2px; }
       .log-table { width:100%; border-collapse:collapse; font-size:10px; } .log-table th,.log-table td { padding:5px 4px; border-bottom:1px solid var(--line); text-align:right; } .log-table th:first-child,.log-table td:first-child { text-align:left; }
       .log-ledger { margin-top:10px; color:#aebcbd; font:10px/1.55 ui-monospace,monospace; }
+      #intelligenceDashboard { position:fixed; z-index:15; right:16px; top:94px; bottom:18px; display:none; width:min(760px,calc(100vw - 110px)); overflow:hidden; border:1px solid var(--line-bright); border-radius:8px; background:rgba(8,19,25,.98); box-shadow:var(--shadow); }
+      #intelligenceDashboard.show { display:grid; grid-template-columns:250px 1fr; }
+      .intel-roster { min-width:0; padding:13px; overflow:auto; border-right:1px solid var(--line); }
+      .intel-roster-head { position:sticky; top:-13px; z-index:2; margin:-13px -13px 9px; padding:13px; background:#0a1a22; }
+      .intel-roster-head input { width:100%; margin-top:8px; padding:7px 9px; border:1px solid var(--line); border-radius:4px; color:#e7eeea; background:#10242d; }
+      .intel-person { width:100%; margin-bottom:4px; padding:8px; border:1px solid transparent; border-radius:4px; color:#dbe5e1; background:#10222b; cursor:pointer; text-align:left; }
+      .intel-person:hover,.intel-person.on { border-color:#aabd71; background:#18303a; }
+      .intel-person strong,.intel-person small { display:block; } .intel-person small { margin-top:2px; color:var(--muted); }
+      .custody-dot { display:inline-block; width:8px; height:8px; margin-right:6px; border-radius:50%; }
+      .intel-profile { min-width:0; padding:18px 20px 28px; overflow:auto; }
+      .profile-title { margin:3px 0 2px; color:#f0f4ee; font-size:23px; font-weight:900; }
+      .profile-sub { color:#95a8aa; font-size:11px; }
+      .profile-labels { display:flex; flex-wrap:wrap; gap:5px; margin:10px 0 15px; }
+      .profile-label { padding:4px 7px; border:1px solid rgba(184,203,115,.35); border-radius:10px; color:#dce8b2; background:rgba(130,151,69,.13); font-size:9px; font-weight:800; text-transform:uppercase; }
+      .profile-section { margin-top:17px; padding-top:12px; border-top:1px solid var(--line); }
+      .profile-section h3 { margin:0 0 9px; color:#b9ca78; font-size:10px; letter-spacing:.09em; text-transform:uppercase; }
+      .profile-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px 12px; }
+      .profile-row { display:grid; grid-template-columns:minmax(0,1fr) 76px 24px; align-items:center; gap:6px; min-width:0; color:#b8c5c5; font-size:10px; }
+      .profile-bar { height:5px; overflow:hidden; border-radius:5px; background:#23363e; } .profile-bar i { display:block; height:100%; background:#9eb662; }
+      .profile-list { margin:0; padding:0; list-style:none; color:#bdc9c8; font-size:10px; line-height:1.65; }
+      .profile-kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:12px; }
+      .profile-kpi { padding:8px; border:1px solid var(--line); border-radius:4px; background:#10222b; } .profile-kpi small { display:block; color:var(--muted); font-size:8px; text-transform:uppercase; } .profile-kpi strong { display:block; margin-top:3px; }
 
       /* Contextual world overlays ------------------------------------------- */
-      #inspector { position:fixed; z-index:13; left:230px; top:112px; width:260px; display:none; padding:16px; border:1px solid var(--line-bright); border-radius:7px; background:rgba(9,21,27,.94); box-shadow:var(--shadow); pointer-events:none; } #inspector.show { display:block; }
+      #inspector { position:fixed; z-index:13; left:230px; top:112px; width:290px; display:none; padding:16px; border:1px solid var(--line-bright); border-radius:7px; background:rgba(9,21,27,.94); box-shadow:var(--shadow); pointer-events:none; } #inspector.show { display:block; }
       .inspector-kicker { color:#b2c879; font-size:10px; font-weight:900; letter-spacing:.12em; text-transform:uppercase; } #inspectName { margin:4px 0 3px; font-size:18px; font-weight:900; } #inspectState { color:var(--muted); } #inspectStats { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:13px; } .inspect-stat { padding:8px; border:1px solid var(--line); border-radius:4px; background:rgba(255,255,255,.035); } .inspect-stat small { display:block; color:var(--muted); font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; } .inspect-stat strong { display:block; margin-top:2px; font-size:12px; }
+      #inspectProfile { margin-top:10px; color:#aebcbd; font:10px/1.55 ui-monospace,monospace; white-space:pre-wrap; }
       .room-label { position:absolute; transform:translate(-50%,-50%); padding:5px 9px; border:1px solid rgba(211,225,209,.26); border-radius:3px; color:#e5ebdf; background:rgba(10,22,27,.78); box-shadow:0 2px 9px rgba(0,0,0,.35); font-size:10px; font-weight:900; letter-spacing:.08em; text-shadow:0 1px 2px #000; text-transform:uppercase; white-space:nowrap; }
       .warn-mark { position:absolute; transform:translate(-50%,-50%); display:grid; place-items:center; width:24px; height:24px; border:2px solid #ffe7ac; border-radius:50%; color:#302202; background:#e0b94b; box-shadow:0 3px 12px rgba(0,0,0,.45); font-weight:900; pointer-events:auto; cursor:help; }
       .build-preview { position:absolute; border:1px solid rgba(105,190,255,.92); background:rgba(55,137,225,.28); box-shadow:0 0 13px rgba(70,156,255,.42); pointer-events:none; } .build-preview.invalid { border-color:rgba(255,112,105,.95); background:rgba(210,48,48,.30); box-shadow:0 0 13px rgba(255,70,70,.42); } .build-preview.persistent { background:rgba(55,137,225,.20); border-style:dashed; } .build-preview-arrow { position:absolute; height:3px; transform-origin:0 50%; background:#b9ddff; box-shadow:0 0 8px rgba(75,166,255,.7); pointer-events:none; } .build-preview-arrow::after { content:""; position:absolute; right:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:9px solid #b9ddff; }
@@ -131,7 +154,7 @@
     <section id="status"><div id="cap"><span><span class="status-label">Population</span><span class="status-value">0 / 0</span></span></div><div class="status-card"><span><span class="status-label">Cash</span><span id="cash" class="status-value">$20,000</span></span></div><div class="status-card"><span><span class="status-label">Net / hour</span><span id="netHourly" class="status-value">$0</span></span></div><div class="status-card"><span><span class="status-label">Escaped</span><span id="escaped" class="status-value">0</span></span></div><div class="status-card"><span><span class="status-label">Recaptured</span><span id="caught" class="status-value">0</span></span></div></section>
     <aside id="clockbox"><div id="clock">08:00</div><div id="speeds"></div><button id="regimeBtn">Regime: Free time</button></aside>
     <div id="regimePanel"></div>
-    <aside id="inspector"><div class="inspector-kicker">Selected resident</div><div id="inspectName">No selection</div><div id="inspectState">Click a person to inspect</div><div id="inspectStats"></div></aside>
+    <aside id="inspector"><div class="inspector-kicker">Selected resident</div><div id="inspectName">No selection</div><div id="inspectState">Click a person to inspect</div><div id="inspectStats"></div><div id="inspectProfile"></div></aside>
     <div id="tip"></div>
 
     <section id="build" aria-label="Construction catalog">
@@ -140,6 +163,7 @@
     </section>
     <div id="utility" aria-hidden="true"><button id="qualBtn"></button><button id="roofBtn"></button></div>
     <aside id="logisticsDashboard" aria-label="Logistics dashboard"></aside>
+    <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="log-title">Prisoner intelligence</div><input id="intelSearch" aria-label="Search inmates" placeholder="Search name, crime, trait…"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Profiles, social ties, intelligence, and escape operations are fully visible.</div></section></aside>
     <div id="hud"></div><div id="err"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

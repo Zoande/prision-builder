@@ -8,6 +8,7 @@ import { NEEDS, type NeedName } from "./objects.ts";
 import { newInventory, type Inventory } from "./items.ts";
 import { rnd } from "./rng.ts";
 import { Obj } from "./objects.ts";
+import type { PrisonerMind, PrisonerProfile } from "./profiles.ts";
 
 // Pseudo-kinds for the furniture pass: things the sim draws that aren't
 // placeable objects.
@@ -101,6 +102,7 @@ export const NEED_TUNING: Record<NeedName, { decay: number; weight: number }> = 
   // Fast and insistent: a full bladder outranks nearly everything.
   bladder: { decay: 1 / 260, weight: 1.5 },
   spirituality: { decay: 1 / 1400, weight: 0.4 },
+  social: { decay: 1 / 720, weight: 0.58 },
 };
 
 export function freshNeeds(): Record<NeedName, number> {
@@ -141,6 +143,8 @@ export interface Tunnel {
   surfHole: number; // surface hole tile idx, -1 while unsurfaced
   occupied: boolean;
   flagged: boolean; // a guard has seen it
+  /** Shared-operation tunnel network, -1 for a legacy/solo tunnel. */
+  networkId: number;
 }
 
 export interface RepairJob {
@@ -177,6 +181,10 @@ export interface Agent {
   interact: number;
   aux: number;
   needs: Record<NeedName, number>;
+  /** Deterministic identity/traits. Null for staff. */
+  profile: PrisonerProfile | null;
+  /** Dynamic psychology. Null for staff. */
+  mind: PrisonerMind | null;
   known: Map<number, number> | null;
   /** Remembered objects, by kind. A new object type is remembered for free. */
   objMem: Map<number, Set<number>> | null;
@@ -202,7 +210,14 @@ export interface Agent {
   speedMul: number;
   plan: EscapePlan | null;
   tunnel: Tunnel | null;
+  tunnelEntry: number;
+  tunnelFace: "" | "branch" | "main";
   underground: boolean;
+  /** Authoritative shared operation; solo plans are one-member operations. */
+  escapeOperationId: number;
+  escapeRole: string;
+  socialAction: "none" | "talking" | "arguing";
+  socialGroup: number;
   planBias: Method | null; // debug/testing hook
   escortedBy: number; // guard id while being marched home
   /** How high above the ground he stands (a sniper is up his tower). */
@@ -239,6 +254,8 @@ export function blankAgent(kind: number): Agent {
     path: null, pathI: 0,
     state: "idle", timer: 0, interact: -1, aux: 0,
     needs: freshNeeds(),
+    profile: null,
+    mind: null,
     known: prisoner ? new Map() : null,
     objMem: prisoner ? new Map() : null,
     useIdx: -1,
@@ -255,7 +272,8 @@ export function blankAgent(kind: number): Agent {
     cuffed: prisoner,
     cellRoom: -1,
     speedMul: 1,
-    plan: null, tunnel: null, underground: false,
+    plan: null, tunnel: null, tunnelEntry: -1, tunnelFace: "", underground: false,
+    escapeOperationId: -1, escapeRole: "", socialAction: "none", socialGroup: -1,
     planBias: null,
     escortedBy: -1,
     elev: 0,

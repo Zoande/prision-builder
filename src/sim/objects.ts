@@ -50,12 +50,12 @@ export const POSE_STAND = 0, POSE_SIT = 2, POSE_LIE_BED = 3, POSE_LIE_FLOOR = 4,
 
 export type NeedName =
   | "food" | "sleep" | "outdoors" | "comfort" | "hygiene"
-  | "recreation" | "exercise" | "bladder" | "spirituality";
+  | "recreation" | "exercise" | "bladder" | "spirituality" | "social";
 
 /** Every need, in HUD order. Adding one here and to NeedName is the whole job. */
 export const NEEDS: NeedName[] = [
   "food", "sleep", "outdoors", "comfort", "hygiene",
-  "recreation", "exercise", "bladder", "spirituality",
+  "recreation", "exercise", "bladder", "spirituality", "social",
 ];
 
 /** How a kind gets onto the map, which decides which world setter owns it. */

@@ -179,6 +179,10 @@ function dump(w: World, a: Agents): string {
       ag.cuffed ? 1 : 0, ag.underground ? 1 : 0, ag.timesCaught,
       n(ag.escapeDesire), n(ag.risk), ag.cutterMeals,
       ag.plan ? `${ag.plan.method}/${ag.plan.stage}/${ag.plan.needed}` : "-",
+      ag.profile ? `profile=${ag.profile.custody}/${ag.profile.aptitudes.intelligence}/${ag.profile.aptitudes.strength}/${ag.profile.aptitudes.charisma}/${ag.profile.labels.join("+")}` : "profile=-",
+      ag.mind ? `mind=${n(ag.mind.stress)}/${n(ag.mind.anger)}/${n(ag.mind.confidence)}/${n(ag.mind.reputation)}` : "mind=-",
+      `social=${n(ag.needs.social)}/${ag.socialAction}/${ag.socialGroup}`,
+      `operation=${ag.escapeOperationId}/${ag.escapeRole}`,
       ag.inv.hands.map((h) => `${h.kind}x${h.count}`).join("+") || "-",
       ag.inv.pockets.map((h) => (h ? `${h.kind}x${h.count}` : "-")).join("+"),
       Object.entries(ag.needs).map(([k, v]) => `${k}=${n(v as number)}`).join(","),
@@ -196,6 +200,14 @@ function dump(w: World, a: Agents): string {
   parts.push(`stock=${[...a.servingStock].sort((x, y) => x[0] - y[0]).map(([k, v]) => `${k}=${v}`).join(",")}`);
   parts.push(`stashes=${[...a.stashes].sort((x, y) => x[0] - y[0])
     .map(([bed, items]) => `${bed}:${items.map((i) => `${i.kind}x${i.count}`).join("+")}`).join(",")}`);
+  parts.push(`bonds=${[...a.social.bonds.values()].sort((x, y) => x.from - y.from || x.to - y.to)
+    .map((b) => `${b.from}>${b.to}:${n(b.familiarity)}/${n(b.affinity)}/${n(b.trust)}/${n(b.respect)}/${n(b.fear)}`).join(",")}`);
+  parts.push(`intel=${[...a.social.intel].sort((x, y) => x[0] - y[0])
+    .map(([id, facts]) => `${id}:${[...facts.values()].sort((x, y) => x.key.localeCompare(y.key)).map((f) => `${f.key}/${n(f.confidence)}/${f.firsthand ? 1 : 0}`).join("+")}`).join(",")}`);
+  parts.push(`operations=${[...a.escapeOperations.operations.values()].sort((x, y) => x.id - y.id)
+    .map((o) => `${o.id}:${o.method}/${o.state}/${o.architectId}/${o.leaderId}/${n(o.cohesion)}/${n(o.exposure)}:${o.members.map((m) => `${m.agentId}-${m.role}-${m.parentId}-${m.ready ? 1 : 0}`).join("+")}`).join(",")}`);
+  parts.push(`tunnelNetworks=${[...a.escapeOperations.tunnels.values()].sort((x, y) => x.id - y.id)
+    .map((t) => `${t.id}:${t.entries.map((e) => `${e.tile}/${n(e.progress)}/${e.connected ? 1 : 0}`).join("+")}:${t.surfaceTile}`).join(",")}`);
 
   // World tiles that the sim can mutate.
   const cut: number[] = [];

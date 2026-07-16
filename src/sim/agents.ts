@@ -33,7 +33,7 @@ import { actingInRegime, cellHasShower, doorServesShowerCell, insideOwnCell, loc
 import { doRetrieve, doStash, toolCount, tryRetrieveTools } from "./contraband.ts";
 import { capture, guardInSight, isEscaping, knockOut, raiseAlarm } from "./enforcement.ts";
 import {
-  blankAgent, defaultRegime,
+  blankAgent, defaultRegime, freshNeeds,
   AWARE_R, BOOK_READ_RATE, CLIMB_TIME, COOK_TIME, CRAWL_SPEED, CUT_TIME,
   DIG_TILE_TIME, ESCAPE_MARGIN, K_BLOCKED, K_CUT, K_DOOR, K_FENCE,
   K_OPEN, NEED_TUNING, RATES, REG, REPAIR_TIME,
@@ -46,6 +46,9 @@ import { releaseUse, startUse, updateUsing, useable } from "./useSlots.ts";
 import { decide, finishOutside, tryTunnelTrip } from "./needs.ts";
 import type { ConstructionSystem } from "./construction.ts";
 import type { KitchenSystem } from "./kitchen.ts";
+import { aptitude, freshPrisonerMind, gainSkill, generatePrisonerProfile, personality, skill } from "./profiles.ts";
+import { PrisonerSocialSystem } from "./social.ts";
+import { EscapeOperationsSystem } from "./escapeOperations.ts";
 
 // The public face of the sim: everything main.ts and the render passes import.
 export {
@@ -100,6 +103,9 @@ export class Agents {
   kitchen: KitchenSystem | null = null;
   staffPerformance = 1;
   roadVehicleZ: number[] = [];
+  readonly social = new PrisonerSocialSystem();
+  readonly escapeOperations = new EscapeOperationsSystem();
+  simTime = 0;
 
   takeMealsDirty(): boolean { const d = this.mealsDirty; this.mealsDirty = false; return d; }
   takeWorldDirty(): boolean { const d = this.worldDirty; this.worldDirty = false; return d; }
@@ -112,8 +118,14 @@ export class Agents {
         const baton = world.objMat[i] === 1;
         world.objKind[i] = Obj.None;
         world.objMat[i] = 0;
+        const fresh = blankAgent(kind);
+        if (kind === Obj.Prisoner) {
+          fresh.profile = generatePrisonerProfile(this.nextId);
+          fresh.mind = freshPrisonerMind(fresh.profile);
+          fresh.speedMul = .9 + (fresh.profile.aptitudes.agility + fresh.profile.aptitudes.endurance) / 100;
+        }
         this.agents.push({
-          ...blankAgent(kind),
+          ...fresh,
           id: this.nextId++,
           x: x + 0.5, z: z + 0.5,
           heading: [0, Math.PI / 2, Math.PI, -Math.PI / 2][orient & 3],
@@ -142,6 +154,8 @@ export class Agents {
     if (ag.tunnel) ag.tunnel.occupied = false;
     if (ag.job) ag.job.claimedBy = -1;
     if (ag.kind === Obj.Cook && (ag.state === "toCooker" || ag.state === "cooking")) this.kitchen?.releaseMealSet();
+    this.social.removeAgent(ag.id);
+    this.escapeOperations.removeAgent(ag.id);
     for (const [s, id] of this.servers) if (id === ag.id) this.servers.delete(s);
     const n = this.agents.indexOf(ag);
     if (n >= 0) this.agents.splice(n, 1);
@@ -174,7 +188,10 @@ export class Agents {
     return this.agents.filter((a) => a.kind === Obj.Prisoner).length;
   }
 
-  update(dt: number, world: World, isNight: boolean, hour: number) {
+  update(dt: number, world: World, isNight: boolean, hour: number, worldTime?: number) {
+    this.simTime = worldTime ?? (this.simTime + dt);
+    this.social.tick(dt, this.simTime, world, this.agents);
+    this.escapeOperations.tick(dt, this.simTime, this.agents, this.social);
     // Top of the hour: compliance rolls + door choreography.
     const h = Math.floor(hour) % 24;
     if (h !== this.curHour) {
@@ -183,7 +200,9 @@ export class Agents {
       for (const ag of this.agents) {
         if (ag.kind !== Obj.Prisoner) continue;
         // Misery breeds defiance.
-        ag.compliant = rnd() < Math.max(0.25, 1 - 0.6 * ag.escapeDesire);
+        const defiance = personality(ag.profile, "defiance");
+        const will = aptitude(ag.profile, "willpower");
+        ag.compliant = rnd() < Math.max(0.12, 1 - 0.6 * ag.escapeDesire - Math.max(0, defiance) * .18 - Math.max(0, will - 6) * .015);
       }
       const act = this.curActivity;
       if (act === REG.Free || act === REG.Eating || act === REG.Yard || act === REG.Shower) {
@@ -253,7 +272,8 @@ export class Agents {
     if (ag.seatIdx >= 0 && ag.state !== "toUse") ag.seatIdx = -1;
     for (const need of NEEDS) {
       if (need === "outdoors") continue; // refills by being outside, below
-      n[need] = Math.max(0, n[need] - NEED_TUNING[need].decay * dt);
+      const personal = ag.mind?.needWeights[need] ?? 1;
+      n[need] = Math.max(0, n[need] - NEED_TUNING[need].decay * personal * dt);
     }
     if (!ag.underground) {
       const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
@@ -273,14 +293,27 @@ export class Agents {
     let sum = 0, total = 0;
     for (const need of NEEDS) {
       if (need === "bladder") continue;
-      const w = NEED_TUNING[need].weight;
+      const w = NEED_TUNING[need].weight * (ag.mind?.needWeights[need] ?? 1);
       sum += n[need] * w; total += w;
     }
     const misery = 1 - sum / total;
+    if (ag.mind && ag.profile) {
+      const p = ag.profile.personality;
+      const socialPain = (1 - n.social) * Math.max(.2, 1 + p.sociability * .6);
+      ag.mind.stress = Math.max(0, Math.min(1,
+        ag.mind.stress + dt * ((misery * .018 + socialPain * .006) - (.004 + ag.profile.aptitudes.resilience * .0007))));
+      ag.mind.anger = Math.max(0, Math.min(1,
+        ag.mind.anger + dt * (ag.mind.stress * Math.max(0, p.volatility + p.aggression) * .006 - (.004 + ag.profile.aptitudes.resilience * .00035))));
+      ag.mind.confidence = Math.max(0, Math.min(1,
+        ag.mind.confidence + dt * ((.45 + p.courage * .18 + ag.mind.reputation * .12) - ag.mind.confidence) / 80));
+      ag.mind.fatigue = Math.max(0, Math.min(1, ag.mind.fatigue + dt * ((1 - n.sleep) * .004 - ag.profile.aptitudes.endurance * .00022)));
+    }
     ag.desire += (Math.min(1, misery * 1.6) - ag.desire) * Math.min(1, dt / 45);
     ag.fear = Math.max(0, ag.fear - dt / 150);
     ag.risk = Math.max(0, ag.risk - dt / 900); // wariness fades slowly
-    ag.escapeDesire = ag.desire * (1 - ag.fear);
+    const defiance = Math.max(0, personality(ag.profile, "defiance"));
+    const confidence = ag.mind?.confidence ?? .5;
+    ag.escapeDesire = Math.min(1, ag.desire * (1 - ag.fear) * (1 + defiance * .16 + confidence * .08));
 
     if (ag.lastTX < 0) { ag.lastTX = Math.floor(ag.x); ag.lastTZ = Math.floor(ag.z); look(ag, world); }
 
@@ -359,7 +392,7 @@ export class Agents {
         if (ag.sneaking) {
           ag.decideT -= dt;
           if (ag.decideT <= 0) {
-            ag.decideT = 0.5;
+            ag.decideT = Math.max(.18, .62 - aptitude(ag.profile, "reflexes") * .045);
             if (guardInSight(this, ag, world)) {
               ag.risk = Math.min(1, ag.risk + 0.15); // close call — remembered
               finishOutside(this, ag, world);
@@ -446,7 +479,8 @@ export class Agents {
 
     ag.decideT -= dt;
     if (ag.decideT > 0) return;
-    ag.decideT = 0.6 + rnd() * 0.6;
+    const impulse = personality(ag.profile, "impulsivity");
+    ag.decideT = Math.max(.28, 0.68 + rnd() * 0.6 - impulse * .16 - aptitude(ag.profile, "reflexes") * .012);
 
     // A standing prisoner still has eyes: keep the world model fresh (this
     // is how they notice a jail door opening without walking anywhere).
@@ -514,14 +548,16 @@ export class Agents {
       case "toTrip": {
         // Down the toilet hole for an unauthorized breather.
         const t = ag.tunnel;
-        if (!t || !this.tunnels.includes(t) || t.occupied || t.surfHole < 0 ||
-            world.objKind[t.entry] !== Obj.Toilet || !isNextTo(ag, world, t.entry)) {
+        const entry = ag.tunnelEntry >= 0 ? ag.tunnelEntry : t?.entry ?? -1;
+        if (!t || !this.tunnels.includes(t) || (t.networkId < 0 && t.occupied) || t.surfHole < 0 ||
+            world.objKind[entry] !== Obj.Toilet || !isNextTo(ag, world, entry)) {
           if (t && !this.tunnels.includes(t)) ag.tunnel = null;
           ag.sneaking = false;
           ag.state = "idle";
           return;
         }
         t.occupied = true;
+        if (t.networkId >= 0) this.escapeOperations.enterTunnel(t.networkId, ag);
         ag.underground = true;
         ag.state = "crawlingOut";
         ag.timer = t.believed / CRAWL_SPEED;
@@ -680,6 +716,8 @@ export class Agents {
   }
 
   makePlan(ag: Agent, world: World) {
+    const intellect = aptitude(ag.profile, "intelligence");
+    if (!ag.planBias && intellect < 3) return; // may join and work another inmate's operation
     const route = this.findRoute(ag, world);
     if (!route) { ag.escapeFeasibility = 0; return; }
     ag.escapeFeasibility = 1 / (1 + route.cost / 120);
@@ -691,9 +729,11 @@ export class Agents {
       // Biased to dig but no toilet known yet: hold out for one.
       if (method === "dig" && mem(ag, Obj.Toilet).size === 0) return;
     } else {
-      const wClimb = 1 / (1 + ag.timesCaught);
-      const wCut = 0.8;
-      const wDig = mem(ag, Obj.Toilet).size > 0 ? 0.7 : 0;
+      const creative = aptitude(ag.profile, "creativity") / 10;
+      const technical = aptitude(ag.profile, "technical");
+      const wClimb = intellect >= 3 ? (1 + creative * .2) / (1 + ag.timesCaught) : 0;
+      const wCut = intellect >= 4 ? 0.55 + technical * .045 : 0;
+      const wDig = intellect >= 5 && technical >= 4 && mem(ag, Obj.Toilet).size > 0 ? 0.45 + creative * .35 : 0;
       const r = rnd() * (wClimb + wCut + wDig);
       method = r < wClimb ? "climb" : r < wClimb + wCut ? "cut" : "dig";
     }
@@ -720,6 +760,7 @@ export class Agents {
       toiletIdx,
       watchdog: 90,
     };
+    this.escapeOperations.adoptSoloPlan(ag, ag.plan, this.simTime);
   }
 
   /** Returns true when plan work consumed this decision slot. */
@@ -734,14 +775,23 @@ export class Agents {
     }
     const plan = ag.plan;
 
+    // Shared operations gather and coordinate first. Low-intelligence members
+    // can execute every assignment once their leader launches the operation.
+    if (!this.escapeOperations.mayExecute(ag)) return false;
+
     if (plan.stage === "prepare") {
+      const op = this.escapeOperations.operationFor(ag);
       const ready =
         plan.method === "climb" ||
-        (plan.method === "cut" && toolCount(this, ag, Item.Cutter) >= plan.needed) ||
-        (plan.method === "dig" && toolCount(this, ag, Item.Spoon) >= SPOONS_TO_DIG);
+        (plan.method === "cut" && (toolCount(this, ag, Item.Cutter) >= plan.needed || !!op?.cache.cutters)) ||
+        (plan.method === "dig" && (toolCount(this, ag, Item.Spoon) >= (op && op.members.length > 1 ? 1 : SPOONS_TO_DIG) || !!op?.cache.spoons));
       if (!ready || ag.escapeDesire < threshold * 0.7) return false; // keep living (and eating)
       // The kit is his, but half of it may be under the bunk. Go and get it.
       const tool = plan.method === "cut" ? Item.Cutter : Item.Spoon;
+      if (plan.method !== "climb" && countItem(ag.inv, tool) <= 0 && op &&
+          this.escapeOperations.takeCached(op, tool) && takeInHands(ag.inv, tool)) {
+        plan.stage = "execute";
+      }
       if (plan.method !== "climb" && countItem(ag.inv, tool) <= 0 &&
           tryRetrieveTools(this, ag, world, tool)) {
         return true;
@@ -752,6 +802,16 @@ export class Agents {
 
     if (plan.stage === "execute") {
       if (plan.method === "dig") {
+        const op = this.escapeOperations.operationFor(ag);
+        if (op && op.members.length > 1 && ag.cellRoom >= 0) {
+          let best = -1, bd = Infinity;
+          for (const candidate of mem(ag, Obj.Toilet)) {
+            if (world.objKind[candidate] !== Obj.Toilet || world.roomId[candidate] !== ag.cellRoom) continue;
+            const d = Math.abs((candidate % world.size) - ag.x) + Math.abs(((candidate / world.size) | 0) - ag.z);
+            if (d < bd) { bd = d; best = candidate; }
+          }
+          if (best >= 0) plan.toiletIdx = best;
+        }
         if (world.objKind[plan.toiletIdx] !== Obj.Toilet) { ag.plan = null; return false; }
         if (pathAdjacent(ag, world, plan.toiletIdx, knownOpen(ag))) {
           ag.state = "toTunnel";
@@ -806,9 +866,16 @@ export class Agents {
       ag.aux = Math.floor(ag.z) * size + Math.floor(ag.x); // approach tile (to compute the far side)
       ag.x = (b % size) + 0.5; ag.z = ((b / size) | 0) + 0.5;
       ag.state = "climbing";
-      ag.timer = CLIMB_TIME;
+      ag.timer = CLIMB_TIME / Math.max(.62, .72 + aptitude(ag.profile, "strength") * .025 + aptitude(ag.profile, "agility") * .025 + skill(ag.profile, "athletics") * .025);
     } else {
       if (countItem(ag.inv, Item.Cutter) <= 0) {
+        const op = this.escapeOperations.operationFor(ag);
+        if (op && this.escapeOperations.takeCached(op, Item.Cutter) && takeInHands(ag.inv, Item.Cutter)) {
+          ag.state = "cutting";
+          ag.timer = CUT_TIME / Math.max(.62, .72 + aptitude(ag.profile, "dexterity") * .025 + aptitude(ag.profile, "technical") * .025 + skill(ag.profile, "toolcraft") * .035);
+          ag.interact = b;
+          return;
+        }
         // He left them under the bunk. Go back for them.
         if (!tryRetrieveTools(this, ag, world, Item.Cutter)) {
           plan.stage = "prepare";
@@ -817,7 +884,7 @@ export class Agents {
         return;
       }
       ag.state = "cutting";
-      ag.timer = CUT_TIME;
+      ag.timer = CUT_TIME / Math.max(.62, .72 + aptitude(ag.profile, "dexterity") * .025 + aptitude(ag.profile, "technical") * .025 + skill(ag.profile, "toolcraft") * .035);
       ag.interact = b;
     }
   }
@@ -837,6 +904,7 @@ export class Agents {
     look(ag, world);
     if (!plan) { ag.state = "idle"; return; }
     plan.legI++;
+    gainSkill(ag.profile, "athletics", 5);
     plan.watchdog = 120;
     ag.state = "idle";
     ag.decideT = 0; // continue the plan next tick
@@ -851,6 +919,7 @@ export class Agents {
       this.worldDirty = true;
       removeItem(ag.inv, Item.Cutter); // a set of cutters is spent on a fence
       if (ag.known) record(ag, world, b);
+      gainSkill(ag.profile, "toolcraft", 7);
     }
     ag.state = "idle";
     if (plan) { plan.legI++; plan.watchdog = 120; ag.decideT = 0; }
@@ -939,13 +1008,27 @@ export class Agents {
   enterTunnel(ag: Agent, world: World) {
     const plan = ag.plan!;
     const size = world.size;
-    let t = this.tunnels.find((tn) => tn.entry === plan.toiletIdx && tn.owner === ag.id);
+    const op = this.escapeOperations.operationFor(ag);
+    let entryTile = plan.toiletIdx;
+    if (op && op.members.length > 1 && ag.cellRoom >= 0) {
+      let best = entryTile, bd = Infinity;
+      for (const candidate of mem(ag, Obj.Toilet)) {
+        if (world.objKind[candidate] !== Obj.Toilet || world.roomId[candidate] !== ag.cellRoom) continue;
+        const d = Math.abs((candidate % size) - ag.x) + Math.abs(((candidate / size) | 0) - ag.z);
+        if (d < bd) { bd = d; best = candidate; }
+      }
+      entryTile = best;
+    }
+    const net = op ? this.escapeOperations.ensureTunnelNetwork(op, entryTile, ag.id, world.size) : null;
+    let t = net ? this.tunnels.find((tn) => tn.networkId === net.id)
+      : this.tunnels.find((tn) => tn.entry === plan.toiletIdx && tn.owner === ag.id);
     if (!t) {
       const ex = (plan.exitTile % size) + 0.5, ez = ((plan.exitTile / size) | 0) + 0.5;
-      const sx = (plan.toiletIdx % size) + 0.5, sz = ((plan.toiletIdx / size) | 0) + 0.5;
+      const primary = net?.primaryEntry ?? plan.toiletIdx;
+      const sx = (primary % size) + 0.5, sz = ((primary / size) | 0) + 0.5;
       t = {
-        owner: ag.id,
-        entry: plan.toiletIdx,
+        owner: op?.architectId ?? ag.id,
+        entry: primary,
         heading: Math.atan2(ez - sz, ex - sx),
         believed: 0,
         goal: Math.hypot(ex - sx, ez - sz) + 3,
@@ -954,11 +1037,15 @@ export class Agents {
         surfHole: -1,
         occupied: true,
         flagged: false,
+        networkId: net?.id ?? -1,
       };
       this.tunnels.push(t);
       this.mealsDirty = true; // entry hole appears
     } else t.occupied = true;
     ag.tunnel = t;
+    ag.tunnelEntry = entryTile;
+    ag.tunnelFace = "";
+    if (net) this.escapeOperations.enterTunnel(net.id, ag);
     ag.underground = true;
     ag.state = "crawling";
     ag.timer = t.believed / CRAWL_SPEED; // crawl to the tunnel head
@@ -975,12 +1062,19 @@ export class Agents {
         if (ag.timer <= 0) ag.state = "digging";
         return;
       }
+      case "tunnelQueue": {
+        ag.timer -= dt;
+        if (ag.timer <= 0) { ag.state = "digging"; ag.timer = 0; }
+        return;
+      }
       case "crawlingBack": {
         ag.timer -= dt;
         if (ag.timer > 0) return;
         // Emerge at the entry hole — right into a stakeout, if one is set.
         ag.underground = false;
         t.occupied = false;
+        if (t.networkId >= 0) this.escapeOperations.leaveTunnel(t.networkId, ag.id);
+        ag.tunnelFace = "";
         ag.sneaking = false;
         ag.x = (t.entry % size) + 0.5; ag.z = ((t.entry / size) | 0) + 0.5;
         stepOff(ag, world);
@@ -999,6 +1093,8 @@ export class Agents {
         ag.timer -= dt;
         if (ag.timer > 0) return;
         t.occupied = false;
+        if (t.networkId >= 0) this.escapeOperations.leaveTunnel(t.networkId, ag.id);
+        ag.tunnelFace = "";
         ag.underground = false;
         const hole = t.surfHole >= 0 ? t.surfHole : t.entry;
         ag.x = (hole % size) + 0.5; ag.z = ((hole / size) | 0) + 0.5;
@@ -1009,18 +1105,38 @@ export class Agents {
         return;
       }
       case "digging": {
+        const op = this.escapeOperations.operationFor(ag);
+        if (t.networkId >= 0 && !ag.tunnelFace) {
+          const face = this.escapeOperations.claimDigFace(t.networkId, ag, ag.tunnelEntry);
+          if (!face) { ag.state = "tunnelQueue"; ag.timer = 1.2; return; }
+          ag.tunnelFace = face;
+        }
         if (countItem(ag.inv, Item.Spoon) <= 0) {
-          ag.state = "crawlingBack";
-          ag.timer = t.believed / CRAWL_SPEED;
-          return;
+          if (op && this.escapeOperations.takeCached(op, Item.Spoon) && takeInHands(ag.inv, Item.Spoon)) {
+            // A supplier left a physical spoon in the shared entry cache.
+          } else {
+            if (t.networkId >= 0) this.escapeOperations.releaseDigFace(t.networkId, ag.id);
+            ag.tunnelFace = "";
+            ag.state = "crawlingBack";
+            ag.timer = t.believed / CRAWL_SPEED;
+            return;
+          }
         }
         ag.timer -= dt;
         if (ag.timer > 0) return;
-        ag.timer = DIG_TILE_TIME;
+        const workRate = Math.max(.55, .68 + aptitude(ag.profile, "strength") * .018 + aptitude(ag.profile, "endurance") * .018 + aptitude(ag.profile, "technical") * .014 + skill(ag.profile, "digging") * .035);
+        ag.timer = DIG_TILE_TIME / workRate;
         removeItem(ag.inv, Item.Spoon); // a spoon wears out per tile of tunnel
+        gainSkill(ag.profile, "digging", 6);
+        if (t.networkId >= 0 && ag.tunnelFace === "branch") {
+          const connected = this.escapeOperations.digBranch(t.networkId, ag.tunnelEntry, ag, 1);
+          if (connected) ag.tunnelFace = "";
+          return;
+        }
         t.believed += 1;
         // Actual digging drifts: heading error accumulates as a random walk.
-        t.drift += (rnd() - 0.5) * 2 * TUNNEL_DRIFT;
+        const accuracy = Math.max(.32, 1.22 - (aptitude(ag.profile, "intelligence") + aptitude(ag.profile, "technical") + aptitude(ag.profile, "perception") + skill(ag.profile, "digging")) / 35);
+        t.drift += (rnd() - 0.5) * 2 * TUNNEL_DRIFT * accuracy;
         const a = t.heading + t.drift;
         t.actualX += Math.cos(a);
         t.actualZ += Math.sin(a);
@@ -1048,6 +1164,12 @@ export class Agents {
       }
     }
     t.surfHole = hz * size + hx;
+    if (t.networkId >= 0) {
+      const net = this.escapeOperations.tunnels.get(t.networkId);
+      if (net) net.surfaceTile = t.surfHole;
+      this.escapeOperations.leaveTunnel(t.networkId, ag.id);
+    }
+    ag.tunnelFace = "";
     t.occupied = false;
     this.mealsDirty = true;
     ag.underground = false;
@@ -1248,7 +1370,8 @@ export class Agents {
         if (p.kind !== Obj.Prisoner || p.underground) continue;
         const noisy = p.state === "climbing" || p.state === "cutting";
         if (!noisy && p.state !== "fleeing") continue;
-        if (!canSee(ag, world, p.x, p.z, noisy ? 10 : AWARE_R)) continue;
+        const stealth = skill(p.profile, "stealth") + aptitude(p.profile, "agility") * .15;
+        if (!canSee(ag, world, p.x, p.z, Math.max(2, (noisy ? 10 : AWARE_R) - stealth * .32))) continue;
         ag.chaseId = p.id;
         ag.state = "chasing";
         ag.path = null;
@@ -2181,6 +2304,9 @@ export class Agents {
       cutFences: [...this.cutFences],
       repairJobs: this.repairJobs.map((j) => ({ ...j })),
       doorTasks: this.doorTasks.map((t) => ({ ...t, claimedBy: -1 })),
+      social: this.social.saveData(),
+      escapeOperations: this.escapeOperations.saveData(),
+      simTime: this.simTime,
       agents: this.agents.map((a) => ({
         ...a,
         path: a.path ? [...a.path] : null,
@@ -2224,7 +2350,7 @@ export class Agents {
     }
     for (const i of data.mealTables ?? []) this.mealTables.add(i);
     for (const [i, n] of data.servingStock ?? []) this.servingStock.set(i, n);
-    for (const t of data.tunnels ?? []) this.tunnels.push({ ...t });
+    for (const t of data.tunnels ?? []) this.tunnels.push({ ...t, networkId: t.networkId ?? -1 });
     for (const i of data.cutFences ?? []) this.cutFences.add(i);
     for (const j of data.repairJobs ?? []) this.repairJobs.push({ ...j, claimedBy: -1 });
     for (const t of data.doorTasks ?? []) this.doorTasks.push({ ...t, claimedBy: -1 });
@@ -2254,10 +2380,14 @@ export class Agents {
     };
 
     for (const raw of data.agents ?? []) {
+      const profile = raw.kind === Obj.Prisoner ? (raw.profile ?? generatePrisonerProfile(raw.id)) : null;
+      const completeNeeds = { ...freshNeeds(), ...raw.needs, recreation: raw.needs.recreation ?? 0.8, social: raw.needs.social ?? .75 };
       const ag = {
         ...raw,
         path: raw.path ? [...raw.path] : null,
-        needs: { ...raw.needs, recreation: raw.needs.recreation ?? 0.8 },
+        needs: completeNeeds,
+        profile,
+        mind: raw.kind === Obj.Prisoner ? (raw.mind ?? freshPrisonerMind(profile!)) : null,
         known: deMap(raw.known),
         objMem: deMem(raw as LegacyAgentMem),
         // Pre-inventory saves have no `inv`; those prisoners start empty-handed.
@@ -2283,6 +2413,12 @@ export class Agents {
         escortedBy: -1,
         risk: raw.risk ?? 0, // older saves predate risk memory
         sneaking: raw.sneaking ?? false,
+        escapeOperationId: raw.escapeOperationId ?? -1,
+        escapeRole: raw.escapeRole ?? "",
+        socialAction: "none",
+        socialGroup: -1,
+        tunnelEntry: raw.tunnelEntry ?? -1,
+        tunnelFace: "",
       } as Agent;
       if (ag.state === "using" || ag.state === "toUse") ag.state = "idle";
       if (["toBuild", "constructing", "demolishing", "toCargo", "deliverCargo",
@@ -2294,6 +2430,9 @@ export class Agents {
     }
     this.mealsDirty = true;
     this.worldDirty = true;
+    this.simTime = data.simTime ?? 0;
+    this.social.loadData(data.social ?? {});
+    this.escapeOperations.loadData(data.escapeOperations ?? {});
   }
 }
 

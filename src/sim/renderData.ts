@@ -7,8 +7,9 @@ import type { Agents } from "./agents.ts";
 import type { World } from "./world.ts";
 import type { LogisticsSystem } from "./logistics.ts";
 import type { IntakeSystem } from "./intake.ts";
+import { CUSTODY_COLORS } from "./profiles.ts";
 
-export const PERSON_INSTANCE_FLOATS = 11;
+export const PERSON_INSTANCE_FLOATS = 19;
 
 export interface InstanceBatch {
   data: Float32Array;
@@ -65,6 +66,15 @@ export class PersonInstanceStager {
       batch.data[o++] = h0;
       batch.data[o++] = h1;
       batch.data[o++] = ag.elev;
+      const profile = ag.profile;
+      batch.data[o++] = profile?.body.height ?? 1;
+      batch.data[o++] = profile?.body.build ?? 1;
+      batch.data[o++] = profile?.body.skin ?? .52;
+      batch.data[o++] = profile ? profile.body.hairStyle + profile.body.hairColor * .99 : .25;
+      const uniform = profile ? CUSTODY_COLORS[profile.custody] : [0, 0, 0];
+      batch.data[o++] = uniform[0]; batch.data[o++] = uniform[1]; batch.data[o++] = uniform[2];
+      const social = ag.socialAction === "talking" ? 1 : ag.socialAction === "arguing" ? 2 : 0;
+      batch.data[o++] = profile ? (profile.body.posture + 1) * .5 + profile.body.gesture * 2 + social * 8 + profile.body.scars * 24 + profile.body.tattoos * 96 : 0;
       offsets[key] = o;
     }
     return this.instances;
@@ -138,7 +148,7 @@ export function logisticsInstances(logistics: LogisticsSystem, intake: IntakeSys
   return { trucks: new Float32Array(trucks), intakeTrucks: new Float32Array(intakeTrucks), cargo: new Float32Array(cargo), drivers: new Float32Array(drivers) };
 }
 
-export function knownOverlay(ag: Agent, world: World): Float32Array {
+export function knownOverlay(ag: Agent, world: World, A?: Agents): Float32Array {
   if (!ag.known) return new Float32Array(0);
   const out: number[] = [];
   for (const [i, v] of ag.known) {
@@ -154,6 +164,23 @@ export function knownOverlay(ag: Agent, world: World): Float32Array {
       out.push(Math.floor(sx + Math.cos(t.heading) * d), Math.floor(sz + Math.sin(t.heading) * d), 2);
     }
     out.push(Math.floor(t.actualX), Math.floor(t.actualZ), 1);
+  }
+  if (A) {
+    for (const bond of A.social.bondsFrom(ag.id)) {
+      if (bond.familiarity < .08) continue;
+      const other = A.agents.find((a) => a.id === bond.to);
+      if (!other || other.underground) continue;
+      out.push(Math.floor(other.x), Math.floor(other.z), bond.affinity < -.12 || bond.grievances > 0 ? 7 : 6);
+    }
+    const op = A.escapeOperations.operationFor(ag);
+    if (op) for (const member of op.members) {
+      const other = A.agents.find((a) => a.id === member.agentId);
+      if (other && !other.underground) out.push(Math.floor(other.x), Math.floor(other.z), 8);
+    }
+    if (op && op.tunnelNetworkId >= 0) {
+      const net = A.escapeOperations.tunnels.get(op.tunnelNetworkId);
+      if (net) for (const entry of net.entries) out.push(entry.tile % world.size, (entry.tile / world.size) | 0, 9);
+    }
   }
   return new Float32Array(out);
 }

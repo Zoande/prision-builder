@@ -2,7 +2,8 @@
 
 A prison-management sandbox rendered in the browser with **WebGPU**. You paint
 construction orders onto a tile grid, receive physical supplies by truck, and
-watch workmen build the prison while staff and prisoners follow a daily regime.
+watch workmen build the prison while staff and distinct, socially connected
+prisoners follow a daily regime.
 
 Everything is hand-rolled — no game or 3D engine. The renderer is a set of small
 WGSL passes; the simulation is a plain TypeScript tile world.
@@ -45,7 +46,10 @@ Camera is an orbit rig over the ground plane:
 Tools live in the build palette (bottom of screen): floors, walls, fences, doors
 and jail doors, furniture, logistics fixtures, staff, room painting, and access
 zones. Prisoners arrive through scheduled intake rather than a normal placement
-tool. Logistics mode opens stock, vehicle, export, and ledger data.
+tool. Logistics mode opens stock, vehicle, export, and ledger data. Intelligence
+mode opens the complete inmate roster: identity, custody, aptitudes, personality,
+skills, criminal record, emotions, relationships, sourced intelligence, cliques,
+and shared escape operations.
 
 ## Layout
 
@@ -71,6 +75,9 @@ src/
     kitchen.ts     frozen meals, trays, spoons, washing and books
     infrastructure.ts immutable road and starter delivery yard
     intake.ts      seeded daily transports and Reception processing
+    profiles.ts    deterministic identity, aptitude, personality, crime and skill generation
+    social.ts      sparse relationships, conversations, cliques and sourced rumors
+    escapeOperations.ts shared conspiracies, roles, supply caches and tunnel graphs
 scripts/
   compress-textures.mjs   offline texture encoder
   check-roofs.ts          roof recompute check
@@ -115,9 +122,9 @@ the 1k entries re-encode from `public/textures/` alone. Encoding is slow
 ## Dev-server endpoints
 
 `vite.config.mjs` adds a small middleware so the prototype can persist to disk.
-Both files are gitignored local state. Saves are version 2; an incompatible
-version-1 save is copied to `prototype-save.v1-backup.json` before the first v2
-write and is never mutated in place.
+Both files are gitignored local state. Saves are version 3. Earlier versions are
+intentionally incompatible with the prisoner-social simulation and are not
+migrated by this milestone.
 
 | Route | Methods | File |
 | --- | --- | --- |

@@ -14,6 +14,7 @@ import { canSee } from "./vision.ts";
 import { KO_TIME, POSE_LIE_FLOOR, POSE_STAND, type Agent } from "./agent.ts";
 import type { Agents } from "./agents.ts";
 import { releaseUse } from "./useSlots.ts";
+import { aptitude } from "./profiles.ts";
 
 /** Any guard this agent can currently see nearby (his own eyes)? */
 export function guardInSight(A: Agents, ag: Agent, world: World, r = 14): boolean {
@@ -41,6 +42,9 @@ export function capture(A: Agents, guard: Agent, prisoner: Agent, world: World) 
   clearInventory(prisoner.inv); // the tray and the book go too
   prisoner.cutterMeals = 0;
   prisoner.plan = null;
+  A.escapeOperations.removeAgent(prisoner.id);
+  prisoner.escapeOperationId = -1;
+  prisoner.escapeRole = "";
   prisoner.fear = 1;
   prisoner.risk = Math.min(1, prisoner.risk + 0.5); // caught red-handed
   prisoner.sneaking = false;
@@ -74,7 +78,13 @@ export function knockOut(A: Agents, p: Agent, world: World) {
   seizeContraband(p.inv);
   clearInventory(p.inv);
   releaseUse(A, p);
-  if (p.tunnel) p.tunnel.occupied = false;
+  if (p.tunnel) {
+    p.tunnel.occupied = false;
+    if (p.tunnel.networkId >= 0) A.escapeOperations.leaveTunnel(p.tunnel.networkId, p.id);
+  }
+  A.escapeOperations.removeAgent(p.id);
+  p.escapeOperationId = -1;
+  p.escapeRole = "";
   p.plan = null;
   p.path = null;
   p.underground = false;
@@ -85,7 +95,7 @@ export function knockOut(A: Agents, p: Agent, world: World) {
   p.pose = POSE_LIE_FLOOR;
   p.amp = 0;
   p.state = "knockedOut";
-  p.timer = KO_TIME;
+  p.timer = KO_TIME * Math.max(.55, 1.2 - aptitude(p.profile, "painTolerance") * .055);
   p.escortedBy = -1;
   A.caughtCount++;
   A.worldDirty = true;
@@ -114,4 +124,3 @@ export function raiseAlarm(A: Agents, runner: Agent, world: World) {
     sent++;
   }
 }
-

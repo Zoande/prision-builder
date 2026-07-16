@@ -38,6 +38,10 @@ import { InfrastructureSystem } from "./sim/infrastructure";
 import { KitchenSystem } from "./sim/kitchen";
 import { IntakeSystem } from "./sim/intake";
 import { commodityDef, recipeCost } from "./sim/commodities";
+import {
+  APTITUDE_IDS, APTITUDE_NAMES, CUSTODY_COLORS, CUSTODY_NAMES,
+  PERSONALITY_IDS, PERSONALITY_NAMES, SKILL_IDS, SKILL_NAMES, crimeName,
+} from "./sim/profiles";
 
 const WORLD_SIZE = 500; // playable/buildable area (tiles)
 const BORDER_TILES = 50; // extra hazed ground around it: no building, camera stays out
@@ -243,12 +247,12 @@ async function main() {
 
   // World clock driving the day/night cycle; start at 08:00 on day 1.
   let worldTime = 8 * HOUR_SECONDS;
-  let loadedV2 = false;
+  let loadedV3 = false;
   let incompatibleSave = false;
   try {
     const res = await fetch("/api/save");
     const data = await res.json();
-    if (data?.version === 2 && data?.world && data?.agents) {
+    if (data?.version === 3 && data?.world && data?.agents) {
       world.loadData(data.world);
       infrastructure.loadData(data.infrastructure);
       agents.loadData(data.agents);
@@ -258,14 +262,14 @@ async function main() {
       kitchen.loadData(data.kitchen ?? {});
       intake.loadData(data.intake ?? {});
       if (typeof data.worldTime === "number") worldTime = data.worldTime;
-      loadedV2 = true;
-    } else if (data?.world || data?.version === 1) {
+      loadedV3 = true;
+    } else if (data?.world || data?.version === 1 || data?.version === 2) {
       incompatibleSave = true;
     }
   } catch {
     // File-backed saves only exist in the Vite dev server.
   }
-  if (!loadedV2) {
+  if (!loadedV3) {
     infrastructure.installNewGame();
     camera.target = [368, 0, 375];
     camera.distance = 72;
@@ -330,6 +334,7 @@ async function main() {
 
   const buildPanel = document.getElementById("build")!;
   const logisticsDashboard = document.getElementById("logisticsDashboard")!;
+  const intelligenceDashboard = document.getElementById("intelligenceDashboard")!;
   let activeMode = "";
   document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -340,14 +345,16 @@ async function main() {
         buildPanel.classList.remove("open");
         editor.clear();
         logisticsDashboard.classList.remove("show");
+        intelligenceDashboard.classList.remove("show");
         return;
       }
       document.querySelectorAll(".mode-btn").forEach((x) => x.classList.remove("on"));
       btn.classList.add("on");
       activeMode = mode;
-      buildPanel.classList.add("open");
+      buildPanel.classList.toggle("open", !["logistics", "intelligence", "admin"].includes(mode));
       editor.setMode(mode);
       logisticsDashboard.classList.toggle("show", mode === "logistics");
+      intelligenceDashboard.classList.toggle("show", mode === "intelligence");
     });
   });
 
@@ -588,8 +595,9 @@ async function main() {
   const inspectName = document.getElementById("inspectName")!;
   const inspectState = document.getElementById("inspectState")!;
   const inspectStats = document.getElementById("inspectStats")!;
+  const inspectProfile = document.getElementById("inspectProfile")!;
   const inspectValues = new Map<string, HTMLElement>();
-  for (const label of ["Food", "Rest", "Comfort", "Outdoors"]) {
+  for (const label of ["Food", "Rest", "Comfort", "Outdoors", "Social", "Stress"]) {
     const stat = document.createElement("div");
     stat.className = "inspect-stat";
     const small = document.createElement("small");
@@ -603,8 +611,10 @@ async function main() {
     if (!selected) { inspector.classList.remove("show"); return; }
     const kind = selected.kind === 8 ? "Prisoner" : selected.kind === 9 ? "Guard" : selected.kind === 20 ? "Cook" : "Workman";
     const pct = (v: number) => `${Math.round(v * 100)}%`;
-    const name = `${kind} #${selected.id}`;
-    const state = STATE_TEXT[selected.state] ?? selected.state;
+    const profile = selected.profile;
+    const name = profile ? `${profile.firstName} ${profile.lastName}` : `${kind} #${selected.id}`;
+    const socialAction = selected.socialAction === "arguing" ? " · arguing" : selected.socialAction === "talking" ? " · socializing" : "";
+    const state = (STATE_TEXT[selected.state] ?? selected.state) + socialAction;
     if (inspectName.textContent !== name) inspectName.textContent = name;
     if (inspectState.textContent !== state) inspectState.textContent = state;
     const setValue = (label: string, value: string) => {
@@ -615,8 +625,79 @@ async function main() {
     setValue("Rest", pct(selected.needs.sleep));
     setValue("Comfort", pct(selected.needs.comfort));
     setValue("Outdoors", pct(selected.needs.outdoors));
+    setValue("Social", pct(selected.needs.social));
+    setValue("Stress", selected.mind ? pct(selected.mind.stress) : "—");
+    if (profile) {
+      const op = agents.escapeOperations.operationFor(selected);
+      const clique = agents.social.cliqueFor(selected.id);
+      inspectProfile.textContent = `${CUSTODY_NAMES[profile.custody]} · ${crimeName(profile.conviction.crimeId)}\n` +
+        `${profile.labels.slice(0, 3).join(" · ")}\n` +
+        `INT ${profile.aptitudes.intelligence}  STR ${profile.aptitudes.strength}  CHA ${profile.aptitudes.charisma}` +
+        (clique ? `\nclique ${clique.id} · ${clique.members.length} inmates` : "") +
+        (op ? `\nplot ${agents.escapeOperations.operationSummary(op.id)}` : "");
+    } else inspectProfile.textContent = "";
     inspector.classList.add("show");
   }
+
+  const intelRoster = document.getElementById("intelRoster")!;
+  const intelProfile = document.getElementById("intelProfile")!;
+  const intelSearch = document.getElementById("intelSearch") as HTMLInputElement;
+  const html = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
+  function selectIntelligenceAgent(id: number): void {
+    selected = agents.agents.find((a) => a.id === id) ?? null;
+    overlayT = 0;
+    updateInspector();
+    updateIntelligenceUi();
+  }
+  function profileBar(label: string, value: number, max = 10): string {
+    return `<div class="profile-row"><span>${html(label)}</span><span class="profile-bar"><i style="width:${Math.round(value / max * 100)}%"></i></span><b>${Math.round(value)}</b></div>`;
+  }
+  function updateIntelligenceUi(): void {
+    const query = intelSearch.value.trim().toLowerCase();
+    const prisoners = agents.agents.filter((a) => a.kind === Obj.Prisoner && a.profile).sort((a, b) => a.id - b.id);
+    intelRoster.innerHTML = prisoners.filter((a) => {
+      const p = a.profile!;
+      return !query || `${p.firstName} ${p.lastName} ${crimeName(p.conviction.crimeId)} ${p.labels.join(" ")}`.toLowerCase().includes(query);
+    }).map((a) => {
+      const p = a.profile!, color = CUSTODY_COLORS[p.custody].map((v) => Math.round(v * 255));
+      return `<button class="intel-person${selected?.id === a.id ? " on" : ""}" data-agent="${a.id}"><strong><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</strong><small>${CUSTODY_NAMES[p.custody]} · ${html(crimeName(p.conviction.crimeId))} · INT ${p.aptitudes.intelligence}</small></button>`;
+    }).join("") || `<div class="profile-sub">No matching inmates.</div>`;
+    intelRoster.querySelectorAll<HTMLButtonElement>("[data-agent]").forEach((el) => el.onclick = () => selectIntelligenceAgent(Number(el.dataset.agent)));
+    if (!selected?.profile) {
+      intelProfile.innerHTML = `<div class="profile-title">Select an inmate</div><div class="profile-sub">Profiles, social ties, intelligence, and escape operations are fully visible.</div>`;
+      return;
+    }
+    const p = selected.profile, mind = selected.mind!;
+    const color = CUSTODY_COLORS[p.custody].map((v) => Math.round(v * 255));
+    const bonds = agents.social.bondsFrom(selected.id).slice(0, 10);
+    const facts = agents.social.intelFor(selected.id).slice(0, 12);
+    const clique = agents.social.cliqueFor(selected.id);
+    const op = agents.escapeOperations.operationFor(selected);
+    const aptitudes = APTITUDE_IDS.map((id) => profileBar(APTITUDE_NAMES[id], p.aptitudes[id])).join("");
+    const personalities = PERSONALITY_IDS.map((id) => profileBar(`${PERSONALITY_NAMES[id][0]} / ${PERSONALITY_NAMES[id][1]}`, (p.personality[id] + 1) * 5)).join("");
+    const skills = SKILL_IDS.filter((id) => p.skills[id].level > 0).map((id) => profileBar(SKILL_NAMES[id], p.skills[id].level)).join("") || `<div class="profile-sub">No developed skills.</div>`;
+    const relationRows = bonds.map((b) => {
+      const other = agents.agents.find((a) => a.id === b.to)?.profile;
+      return `<li>${other ? html(`${other.firstName} ${other.lastName}`) : `Inmate #${b.to}`} — affinity ${Math.round(b.affinity * 100)}, trust ${Math.round(b.trust * 100)}, respect ${Math.round(b.respect * 100)}, fear ${Math.round(b.fear * 100)}${b.grievances ? `, ${b.grievances} grievance${b.grievances === 1 ? "" : "s"}` : ""}</li>`;
+    }).join("") || `<li>No meaningful relationships yet.</li>`;
+    const factRows = facts.map((f) => `<li>${f.firsthand ? "Confirmed" : "Rumor"} ${html(f.type)}: ${html(f.subject)} — ${Math.round(f.confidence * 100)}% confidence${f.sourceId !== selected!.id ? `, source #${f.sourceId}` : ""}</li>`).join("") || `<li>No recorded intelligence yet.</li>`;
+    const operationRows = op ? op.members.map((m) => {
+      const member = agents.agents.find((a) => a.id === m.agentId)?.profile;
+      return `<li>${member ? html(`${member.firstName} ${member.lastName}`) : `#${m.agentId}`} — ${m.role}${m.parentId >= 0 ? `, reports to #${m.parentId}` : ""}${m.ready ? " · ready" : " · waiting"}</li>`;
+    }).join("") : "";
+    intelProfile.innerHTML = `<div class="profile-title"><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</div>` +
+      `<div class="profile-sub">Inmate #${selected.id} · ${CUSTODY_NAMES[p.custody]} custody · age ${p.age} · ${html(crimeName(p.conviction.crimeId))} · ${p.sentenceMonths} month sentence (${p.servedMonths} served)</div>` +
+      `<div class="profile-labels">${p.labels.map((l) => `<span class="profile-label">${html(l)}</span>`).join("")}</div>` +
+      `<div class="profile-kpis"><div class="profile-kpi"><small>Stress</small><strong>${Math.round(mind.stress * 100)}%</strong></div><div class="profile-kpi"><small>Anger</small><strong>${Math.round(mind.anger * 100)}%</strong></div><div class="profile-kpi"><small>Confidence</small><strong>${Math.round(mind.confidence * 100)}%</strong></div><div class="profile-kpi"><small>Reputation</small><strong>${Math.round(mind.reputation * 100)}%</strong></div></div>` +
+      `<div class="profile-section"><h3>Aptitudes</h3><div class="profile-grid">${aptitudes}</div></div>` +
+      `<div class="profile-section"><h3>Personality</h3><div class="profile-grid">${personalities}</div></div>` +
+      `<div class="profile-section"><h3>Skills</h3><div class="profile-grid">${skills}</div></div>` +
+      `<div class="profile-section"><h3>Record</h3><ul class="profile-list"><li>Current: ${html(crimeName(p.conviction.crimeId))}, ${p.conviction.sentenceMonths} months</li>${p.priors.map((r) => `<li>Prior at age ${r.ageAtConviction}: ${html(crimeName(r.crimeId))}, ${r.sentenceMonths} months</li>`).join("") || "<li>No prior convictions.</li>"}</ul></div>` +
+      `<div class="profile-section"><h3>Social${clique ? ` · Clique ${clique.id} (${clique.members.length})` : ""}</h3><ul class="profile-list">${relationRows}</ul></div>` +
+      `<div class="profile-section"><h3>Intelligence</h3><ul class="profile-list">${factRows}</ul></div>` +
+      `<div class="profile-section"><h3>Escape operation</h3>${op ? `<div class="profile-sub">${html(agents.escapeOperations.operationSummary(op.id))}<br>${html(op.blocker || "No current blocker")} · cache ${op.cache.spoons} spoons / ${op.cache.cutters} cutters</div><ul class="profile-list">${operationRows}</ul>` : `<div class="profile-sub">No active operation.</div>`}</div>`;
+  }
+  intelSearch.addEventListener("input", updateIntelligenceUi);
 
   canvas.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
@@ -729,7 +810,8 @@ async function main() {
     const kind = ag.kind === 8 ? "Prisoner" : ag.kind === 9 ? "Guard" :
       ag.kind === 20 ? "Cook" : "Workman";
     const doing = STATE_TEXT[ag.state] ?? ag.state;
-    let s = `${kind} #${ag.id}\n${doing}${ag.underground ? " (underground)" : ""}`;
+    const identity = ag.profile ? `${ag.profile.firstName} ${ag.profile.lastName}\n${CUSTODY_NAMES[ag.profile.custody]} · ${crimeName(ag.profile.conviction.crimeId)}` : `${kind} #${ag.id}`;
+    let s = `${identity}\n${doing}${ag.socialAction !== "none" ? ` · ${ag.socialAction}` : ""}${ag.underground ? " (underground)" : ""}`;
     if (ag.known) {
       const pc = (v: number) => `${Math.round(v * 100)}%`.padStart(4);
       const n = ag.needs;
@@ -742,6 +824,7 @@ async function main() {
       }
       s += `\n${rows.join("\n")}\n` +
         `escape desire ${pc(ag.escapeDesire)}  feasibility ${pc(ag.escapeFeasibility)}`;
+      if (ag.profile && ag.mind) s += `\n${ag.profile.labels.join(" · ")}\nstress ${pc(ag.mind.stress)}  anger ${pc(ag.mind.anger)}  confidence ${pc(ag.mind.confidence)}`;
       const hands = ag.inv.hands
         .map((x) => `${itemDef(x.kind)?.name ?? "?"}${x.count > 1 ? ` x${x.count}` : ""}`);
       const pockets = ag.inv.pockets
@@ -760,6 +843,7 @@ async function main() {
           (ag.plan.method === "cut" ? `  cutters ${countItem(ag.inv, Item.Cutter)}/${ag.plan.needed}` : "") +
           (ag.plan.method === "dig" ? `  spoons ${countItem(ag.inv, Item.Spoon)}` : "");
       }
+      if (ag.escapeOperationId >= 0) s += `\nOPERATION: ${agents.escapeOperations.operationSummary(ag.escapeOperationId)} · ${ag.escapeRole}`;
       s += `\n${ag.cellRoom >= 0 ? "has a cell" : "no cell"}` +
         (ag.cuffed ? " · handcuffed" : "") +
         (ag.compliant ? " · following regime" : " · DEFYING REGIME") +
@@ -820,7 +904,7 @@ async function main() {
     }
     if (incompatibleSave) issues.push({
       id: "save-v1", x: 366, z: 375,
-      issue: "The version 1 save was preserved as a backup. This is a new version 2 logistics world.",
+      issue: "The older save is incompatible. This is a fresh version 3 prisoner-social world.",
     });
     let warningI = 0;
     const activeOrders = [...construction.groups.values()].some((group) => group.state !== "complete" && group.state !== "cancelled");
@@ -865,7 +949,7 @@ async function main() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          version: 2,
+          version: 3,
           savedAt: new Date().toISOString(),
           worldTime,
           world: world.saveData(),
@@ -996,6 +1080,7 @@ async function main() {
   let fpsAccum = 0, fpsFrames = 0, fps = 0;
   let clockUiKey = "";
   let logisticsUiT = 0;
+  let intelligenceUiT = 0;
   let logisticsRenderT = 0;
   let ghostRenderT = 0;
 
@@ -1071,7 +1156,7 @@ async function main() {
         ...logistics.trucks.filter((truck) => truck.state === "arriving" || truck.state === "departing").map((truck) => truck.z),
         ...intake.vehicles.filter((vehicle) => vehicle.state === "arriving" || vehicle.state === "departing").map((vehicle) => vehicle.z),
       ];
-      agents.update(step, world, isNightAt(worldTime), hourOf(worldTime));
+      agents.update(step, world, isNightAt(worldTime), hourOf(worldTime), worldTime);
       simDt -= step;
     }
     const atmo = evalAtmosphere(worldTime);
@@ -1102,6 +1187,8 @@ async function main() {
     if (netHourlyEl && netHourlyEl.textContent !== netText) netHourlyEl.textContent = netText;
     logisticsUiT -= dt;
     if (logisticsUiT <= 0) { logisticsUiT = 0.5; updateLogisticsUi(); }
+    intelligenceUiT -= dt;
+    if (intelligenceUiT <= 0) { intelligenceUiT = 0.5; if (activeMode === "intelligence") updateIntelligenceUi(); }
     logisticsRenderT -= dt;
     if (logisticsRenderT <= 0) { logisticsRenderT = 0.2; refreshFurniture(); }
     ghostRenderT -= dt;
@@ -1135,7 +1222,7 @@ async function main() {
       }
     } else if (selected && overlayT <= 0) {
       overlayT = 0.5;
-      overlay.set(device, knownOverlay(selected, world));
+      overlay.set(device, knownOverlay(selected, world, agents));
     } else if (!selected && staffLayerWasUp) {
       overlay.clear();
     }

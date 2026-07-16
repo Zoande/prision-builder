@@ -15,6 +15,8 @@ struct VSOut {
   @builtin(position) clip : vec4<f32>,
   @location(0) world : vec3<f32>,
   @location(1) part : f32,
+  @location(2) @interpolate(flat) body : vec4<f32>,
+  @location(3) @interpolate(flat) style : vec4<f32>,
 };
 
 fn rotZ(p : vec3<f32>, pivotX : f32, pivotY : f32, a : f32) -> vec3<f32> {
@@ -39,6 +41,8 @@ fn vs(
   @location(9) handA : f32,        // item kind in each hand (0 = empty)
   @location(10) handB : f32,
   @location(11) elev : f32,      // height off the ground (a sniper is on a tower)
+  @location(12) body : vec4<f32>, // height, build, skin tone, hair style+tone
+  @location(13) style : vec4<f32>, // custody uniform rgb, packed manner
 ) -> VSOut {
   let pid = part - floor(part / 16.0) * 16.0;
   let cuffed = (flags - floor(flags / 2.0) * 2.0) > 0.5;
@@ -69,6 +73,20 @@ fn vs(
     else if (pid < 14.5) { hand = handA; want = 3.0; }
     else                 { hand = handB; want = 3.0; }
     if (abs(hand - want) > 0.5) { p = HIDE; }
+  }
+
+  // Prisoners have stable body proportions and hair silhouettes. Staff pass
+  // neutral values, so the same mesh/pipeline remains shared by everybody.
+  let prisoner = part < 15.5;
+  if (prisoner) {
+    p.y *= body.x;
+    p.z = 0.5 + (p.z - 0.5) * body.y;
+    p.x = 0.5 + (p.x - 0.5) * (0.96 + (body.y - 1.0) * 0.2);
+    if (pid > 0.5 && pid < 1.5) {
+      let hairStyle = floor(body.w);
+      p.y += select(-0.025, 0.025 + hairStyle * 0.009, hairStyle > 0.5);
+      p.z = 0.5 + (p.z - 0.5) * (0.82 + hairStyle * 0.045);
+    }
   }
 
   let isLeg = pid > 3.5 && pid < 5.5; // legs + shoes
@@ -114,6 +132,17 @@ fn vs(
     if (pid < 3.5) {
       p.y += sin(U.time * 2.0 + phase) * 0.012 * (1.0 - amp); // breathing
     }
+    if (prisoner) {
+      let packed = style.w - floor(style.w / 24.0) * 24.0;
+      let social = floor(packed / 8.0);
+      let gesture = floor((packed - social * 8.0) / 2.0);
+      let posture = fract(style.w) * 2.0 - 1.0;
+      if (pid < 4.0) { p = rotZ(p, 0.5, HIP_Y * body.x, posture * 0.055); }
+      if (isArm && social > 0.5) {
+        let talk = sin(U.time * (2.6 + gesture * 0.35) + phase) * 0.38 * side;
+        p = rotZ(p, 0.5, SHOULDER_Y * body.x, talk + select(0.18, 0.72, social > 1.5));
+      }
+    }
     p.y += abs(sin(phase)) * 0.035 * amp; // walk bob
   }
 
@@ -128,6 +157,8 @@ fn vs(
   out.world = vec3<f32>(posxz.x + q.x, q.y + elev, posxz.y + q.z);
   out.clip = U.viewProj * vec4<f32>(out.world, 1.0);
   out.part = part;
+  out.body = body;
+  out.style = style;
   return out;
 }
 
@@ -223,7 +254,22 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
     vec3<f32>(0.88, 0.86, 0.78), // book pages (hand A)
     vec3<f32>(0.88, 0.86, 0.78), // book pages (hand B)
   );
-  let albedo = palette[u32(in.part + 0.5)];
+  var albedo = palette[u32(in.part + 0.5)];
+  let pid = in.part - floor(in.part / 16.0) * 16.0;
+  if (in.part < 15.5) {
+    let skinDark = vec3<f32>(0.30, 0.17, 0.10);
+    let skinLight = vec3<f32>(0.94, 0.72, 0.58);
+    if (pid < 0.5) { albedo = mix(skinLight, skinDark, clamp(in.body.z, 0.0, 1.0)); }
+    if (pid > 0.5 && pid < 1.5) {
+      let hairTone = fract(in.body.w);
+      albedo = mix(vec3<f32>(0.08, 0.055, 0.035), vec3<f32>(0.52, 0.34, 0.16), hairTone);
+    }
+    if (pid > 1.5 && pid < 5.5) { albedo = in.style.xyz; }
+    let tattoos = floor(in.style.w / 96.0);
+    let scars = floor((in.style.w - tattoos * 96.0) / 24.0);
+    if (tattoos > 0.5 && pid > 2.5 && pid < 3.5) { albedo *= vec3<f32>(0.62, 0.67, 0.70); }
+    if (scars > 0.5 && pid < 0.5) { albedo = mix(albedo, vec3<f32>(0.55, 0.22, 0.19), 0.08 * min(scars, 3.0)); }
+  }
 
   let color = atmosphere(shadeLit(albedo, N, in.world), in.world);
   return vec4<f32>(toSRGB(color), 1.0);

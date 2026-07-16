@@ -106,6 +106,11 @@ export function doStash(A: Agents, ag: Agent) {
       } else break;
     }
   }
+  if (items.length > 0) A.social.addFact(ag.id, {
+    key: `stash:${ag.bedIdx}`, type: "stash", subject: "hidden bunk cache", tile: ag.bedIdx,
+    value: items.map((s) => `${s.kind}:${s.count}`).join(","), sourceId: ag.id,
+    observedAt: A.simTime, confidence: 1, precision: 1, firsthand: true, expiresAt: Infinity,
+  });
 }
 
 
