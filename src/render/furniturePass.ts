@@ -4,7 +4,7 @@
 // furniture kind.
 
 import furnitureShader from "../furniture.wgsl?raw";
-import { CARGO_KIND, DRIVER_KIND, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, INTAKE_TRUCK_KIND, TRAY_STACK_KIND, TRUCK_KIND } from "../sim/agents";
+import { CARGO_KIND, DRIVER_KIND, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, INTAKE_TRUCK_KIND, MEDICAL_VEHICLE_KIND, OUTSIDE_VEHICLE_KIND, TRAY_STACK_KIND, TRUCK_KIND, VISITOR_VEHICLE_KIND } from "../sim/agents";
 import { OBJ_DEFS, Obj } from "../sim/world";
 import { FENCE_H, PRELUDE, sceneLightEntries, type SceneLight } from "./shaderCommon";
 
@@ -154,6 +154,23 @@ const secureBridgeMesh = () => new Float32Array([
   ...box(0.00, 10.00, 2.88, 4.15, 1.92, 1.98, LINK),
   ...box(0.00, 10.00, 4.05, 4.18, 0.00, 0.10, STEEL),
   ...box(0.00, 10.00, 4.05, 4.18, 1.90, 2.00, STEEL),
+]);
+
+// Ten tiles wide: a compact guard booth sits on the west approach while two
+// striped barrier arms and an overhead inspection gantry span the six lanes.
+const gatehouseMesh = () => new Float32Array([
+  ...box(0.10, 1.90, 0.00, 2.35, 0.12, 2.88, DARK),
+  ...box(0.24, 1.76, 0.72, 1.82, 0.04, 0.15, SCREEN),
+  ...box(0.24, 1.76, 0.72, 1.82, 2.85, 2.96, SCREEN),
+  ...box(-0.02, 2.02, 2.35, 2.55, 0.02, 2.98, STEEL),
+  ...box(2.00, 2.16, 0.00, 3.35, 0.14, 0.30, STEEL),
+  ...box(9.35, 9.51, 0.00, 3.35, 0.14, 0.30, STEEL),
+  ...box(2.00, 9.51, 3.18, 3.36, 0.14, 0.30, STEEL),
+  ...box(2.08, 9.42, 1.00, 1.14, 0.20, 0.34, RED),
+  ...box(2.08, 9.42, 1.14, 1.28, 0.20, 0.34, CERAMIC),
+  ...box(2.08, 9.42, 1.00, 1.14, 2.66, 2.80, RED),
+  ...box(2.08, 9.42, 1.14, 1.28, 2.66, 2.80, CERAMIC),
+  ...box(5.58, 5.88, 3.36, 3.70, 0.06, 0.38, ORANGE),
 ]);
 
 // Bench spanning `len` tiles along +X: seat plank + slab legs.
@@ -674,8 +691,12 @@ export class FurniturePass {
       [Obj.SearchTable, woodTableMesh(2, 1)],
       [Obj.UniformRack, uniformRackMesh()],
       [Obj.SecureBridge, secureBridgeMesh()],
+      [Obj.Gatehouse, gatehouseMesh()],
       [TRUCK_KIND, truckMesh(CERAMIC_DK)],
       [INTAKE_TRUCK_KIND, truckMesh(ORANGE)],
+      [VISITOR_VEHICLE_KIND, truckMesh(STEEL)],
+      [MEDICAL_VEHICLE_KIND, truckMesh(CERAMIC)],
+      [OUTSIDE_VEHICLE_KIND, truckMesh(DARKWOOD)],
       [CARGO_KIND, cargoMesh()],
       [DRIVER_KIND, driverMesh()],
       [FOOD_KIND, foodMesh()],
@@ -744,6 +765,7 @@ export function furnitureMeshRegistry(): Map<number, Float32Array> {
     [Obj.Freezer, freezerMesh()], [Obj.Sink, sinkMesh()],
     [Obj.SearchTable, woodTableMesh(2, 1)], [Obj.UniformRack, uniformRackMesh()],
     [Obj.SecureBridge, secureBridgeMesh()],
+    [Obj.Gatehouse, gatehouseMesh()],
   ]);
   for (const def of OBJ_DEFS) if (def.place === "piece" && def.render === "furniture" && !result.has(def.kind)) {
     result.set(def.kind, genericEquipmentMesh(def.w, def.d));

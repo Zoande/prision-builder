@@ -4,7 +4,7 @@ import type { Agent } from "./agent.ts";
 import { Obj } from "./objects.ts";
 
 export type AccessRole = "prisoner" | "worker" | "guard" | "armed-guard" | "investigator" |
-  "dog-handler" | "doctor" | "cook" | "workman" | "staff" | "driver" | "visitor";
+  "dog-handler" | "doctor" | "cook" | "workman" | "chief" | "foreman" | "accountant" | "staff" | "driver" | "visitor";
 export type AccessCustody = "minimum" | "medium" | "maximum" | "supermax" | "protective";
 export type LockTier = "public" | "staff" | "guard";
 
@@ -17,6 +17,9 @@ export function accessRoleForAgent(agent: Agent): AccessRole {
   if (agent.kind === Obj.Doctor) return "doctor";
   if (agent.kind === Obj.Cook) return "cook";
   if (agent.kind === Obj.Workman) return "workman";
+  if (agent.kind === Obj.ChiefOfficer) return "chief";
+  if (agent.kind === Obj.Foreman) return "foreman";
+  if (agent.kind === Obj.Accountant) return "accountant";
   return "staff";
 }
 
@@ -49,6 +52,7 @@ const ROLE_DEFAULTS: Record<AccessRole, boolean> = {
   prisoner: false, worker: false, guard: true, "armed-guard": true,
   investigator: true, "dog-handler": true, doctor: true, cook: true,
   workman: true, staff: true, driver: false, visitor: false,
+  chief: true, foreman: true, accountant: true,
 };
 const CUSTODY_DEFAULTS: Record<AccessCustody, boolean> = {
   minimum: false, medium: false, maximum: false, supermax: false, protective: false,

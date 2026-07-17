@@ -50,8 +50,10 @@ export class GangSystem {
       if (gang.cohesion < .16 && gang.members.length >= 6) this.split(gang, time, agents);
       gang.retaliation = gang.retaliation.filter((r) => r.expiresAt > time);
     }
-    const active = [...this.gangs.values()].filter((g) => g.state === "active").length;
-    if (active > 0) this.warnings.add(`${active} inmate gang${active === 1 ? " has" : "s have"} emerged; membership requires evidence to identify`);
+    const evidencedSubjects = new Set([...this.institution.cases.values()].filter((c) => c.status !== "resolved")
+      .flatMap((c) => c.incidentIds.map((id) => this.institution.incidents.get(id)).filter((incident) => incident?.category === "gang").map((incident) => incident!.aggressorId)));
+    const known = [...this.gangs.values()].filter((gang) => gang.state === "active" && gang.members.some((member) => evidencedSubjects.has(member.agentId))).length;
+    if (known > 0) this.warnings.add(`Staff intelligence indicates ${known} active inmate gang${known === 1 ? "" : "s"}; unidentified members remain uncertain`);
   }
 
   saveData() { return { gangs: [...this.gangs.values()].map((g) => ({ ...g, members: g.members.map((m) => ({ ...m })), retaliation: g.retaliation.map((r) => ({ ...r })) })),

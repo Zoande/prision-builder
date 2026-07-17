@@ -52,6 +52,14 @@ export const Obj = {
   GreenhousePlanter: 88, PottingBench: 89, JanitorCart: 90, RecyclingSorter: 91,
   WoodWorkbench: 92, MetalWorkbench: 93, SewingMachine: 94, MaintenanceBench: 95,
   ShopShelf: 96, ShopCounter: 97, PrintPress: 98, PayrollSafe: 99, LaundryBasket: 100,
+  // --- Task 3 management, credentials, and institutional control ---
+  ChiefOfficer: 101, Foreman: 102, Accountant: 103,
+  Gatehouse: 104, ExecutiveDesk: 105, FilingCabinet: 106, ManagementTerminal: 107,
+  EvidenceLocker: 108, PropertyShelf: 109, EvidenceTerminal: 110,
+  ElectricalPanel: 111, SecurityRack: 112, BackupPower: 113,
+  RecordsDesk: 114, RecordsCabinet: 115,
+  VisitTable: 116, VisitScreen: 117, VisitorSearchDesk: 118,
+  WasteCart: 119, KeyCabinet: 120,
 } as const;
 export type ObjKind = (typeof Obj)[keyof typeof Obj];
 
@@ -560,6 +568,31 @@ export const OBJ_DEFS: ObjDef[] = [
   def(Obj.DogHandler, "Dog Handler", { place: "person", palette: { label: "Dog Handler", swatch: "#536344", group: "People" } }),
   def(Obj.ArmedGuard, "Armed Guard", { place: "person", palette: { label: "Armed Guard", swatch: "#26364d", group: "People" } }),
   def(Obj.SecurityDog, "Security Dog", { place: "person", palette: { label: "Security Dog", swatch: "#6f5b3d", group: "People" } }),
+  def(Obj.ChiefOfficer, "Chief Officer", { place: "person", palette: { label: "Chief Officer", swatch: "#243f61", group: "People" } }),
+  def(Obj.Foreman, "Foreman", { place: "person", palette: { label: "Foreman", swatch: "#b27b35", group: "People" } }),
+  def(Obj.Accountant, "Accountant", { place: "person", palette: { label: "Accountant", swatch: "#5d6f51", group: "People" } }),
+
+  // Gatehouse is a fixed-orientation road structure. Its ten-tile width spans
+  // the six road lanes plus two-tile approaches; construction validation owns
+  // its otherwise exceptional permission to overlap immutable road tiles.
+  def(Obj.Gatehouse, "Gatehouse", { w: 10, d: 3, walkable: true, render: "furniture",
+    palette: { label: "Gatehouse", swatch: "#324957", group: "Security" } }),
+  def(Obj.ExecutiveDesk, "Executive Desk", { w: 2, render: "furniture", palette: { label: "Executive Desk", swatch: "#604931", group: "Office" } }),
+  def(Obj.FilingCabinet, "Filing Cabinet", { render: "furniture", palette: { label: "Filing Cabinet", swatch: "#687279", group: "Office" } }),
+  def(Obj.ManagementTerminal, "Management Terminal", { render: "furniture", palette: { label: "Management Terminal", swatch: "#314855", group: "Office" } }),
+  def(Obj.EvidenceLocker, "Evidence Locker", { w: 2, render: "furniture", palette: { label: "Evidence Locker", swatch: "#49545d", group: "Security" } }),
+  def(Obj.PropertyShelf, "Property Shelf", { w: 2, render: "furniture", palette: { label: "Property Shelf", swatch: "#786b58", group: "Security" } }),
+  def(Obj.EvidenceTerminal, "Evidence Terminal", { render: "furniture", palette: { label: "Evidence Terminal", swatch: "#31434d", group: "Security" } }),
+  def(Obj.ElectricalPanel, "Electrical Panel", { render: "furniture", palette: { label: "Electrical Panel", swatch: "#c49a35", group: "Utilities" } }),
+  def(Obj.SecurityRack, "Security Network Rack", { render: "furniture", palette: { label: "Security Rack", swatch: "#28343b", group: "Utilities" } }),
+  def(Obj.BackupPower, "Backup Power Unit", { w: 2, render: "furniture", palette: { label: "Backup Power", swatch: "#596248", group: "Utilities" } }),
+  def(Obj.RecordsDesk, "Records Desk", { w: 2, render: "furniture", palette: { label: "Records Desk", swatch: "#746149", group: "Office" } }),
+  def(Obj.RecordsCabinet, "Records Cabinet", { w: 2, render: "furniture", palette: { label: "Records Cabinet", swatch: "#6a7479", group: "Office" } }),
+  def(Obj.VisitTable, "Visitation Table", { w: 2, render: "furniture", palette: { label: "Visitation Table", swatch: "#7d6d58", group: "Visitation" } }),
+  def(Obj.VisitScreen, "Screened Visit Booth", { w: 2, render: "furniture", palette: { label: "Visit Screen", swatch: "#657a82", group: "Visitation" } }),
+  def(Obj.VisitorSearchDesk, "Visitor Search Desk", { w: 2, render: "furniture", palette: { label: "Visitor Search", swatch: "#806c52", group: "Visitation" } }),
+  def(Obj.WasteCart, "Waste Cart", { render: "furniture", palette: { label: "Waste Cart", swatch: "#53645b", group: "Work" } }),
+  def(Obj.KeyCabinet, "Key Cabinet", { render: "furniture", palette: { label: "Key Cabinet", swatch: "#4b5961", group: "Security" } }),
 ];
 
 // --- Rooms ------------------------------------------------------------------
@@ -574,6 +607,9 @@ export const RoomType = {
   Kennel: 20, Offices: 21, Interview: 22, Laundry: 23, MailRoom: 24,
   Greenhouse: 25, Janitorial: 26, Recycling: 27, Woodshop: 28, Metalshop: 29,
   Tailoring: 30, Maintenance: 31, Shop: 32, PrintShop: 33,
+  ManagementOffice: 34, EvidenceRoom: 35, Utilities: 36, RecordsOffice: 37,
+  Visitation: 38,
+  ConstructionYard: 39, WasteYard: 40,
 } as const;
 
 /** A requirement is satisfied by any one of `kinds`. */
@@ -740,6 +776,38 @@ export const ROOM_DEFS: RoomDef[] = [
     { kinds: [Obj.ShopShelf], issue: "Needs a shop shelf." }, { kinds: [Obj.ShopCounter], issue: "Needs a shop counter." },
   ] }),
   room(RoomType.PrintShop, "Print Shop", "#667079", { minSquare: 5, prisonerAccess: true, requires: [{ kinds: [Obj.PrintPress], issue: "Needs a print press." }] }),
+  room(RoomType.ManagementOffice, "Management Office", "#594e68", { minSquare: 4, requires: [
+    { kinds: [Obj.ExecutiveDesk], issue: "Needs an executive desk." },
+    { kinds: [Obj.Chair], issue: "Needs a chair." },
+    { kinds: [Obj.FilingCabinet], issue: "Needs a filing cabinet." },
+    { kinds: [Obj.ManagementTerminal], issue: "Needs a management terminal." },
+  ] }),
+  room(RoomType.EvidenceRoom, "Evidence Room", "#3d4d58", { minSquare: 4, requires: [
+    { kinds: [Obj.EvidenceLocker], issue: "Needs an evidence locker." },
+    { kinds: [Obj.PropertyShelf], issue: "Needs a property shelf." },
+    { kinds: [Obj.EvidenceTerminal], issue: "Needs an evidence terminal." },
+  ] }),
+  room(RoomType.Utilities, "Utilities", "#8f7837", { minSquare: 4, requires: [
+    { kinds: [Obj.ElectricalPanel], issue: "Needs an electrical panel." },
+    { kinds: [Obj.SecurityRack], issue: "Needs a security network rack." },
+    { kinds: [Obj.BackupPower], issue: "Needs backup power." },
+  ] }),
+  room(RoomType.RecordsOffice, "Records Office", "#766953", { minSquare: 4, requires: [
+    { kinds: [Obj.RecordsDesk], issue: "Needs a records desk." },
+    { kinds: [Obj.RecordsCabinet], issue: "Needs records storage." },
+  ] }),
+  room(RoomType.Visitation, "Visitation", "#806f8e", { minSquare: 5, prisonerAccess: true, requires: [
+    { kinds: [Obj.VisitTable, Obj.VisitScreen], issue: "Needs a visitation table or screened booth." },
+    { kinds: [Obj.VisitorSearchDesk], issue: "Needs a visitor search desk." },
+  ] }),
+  room(RoomType.ConstructionYard, "Construction Yard", "#9a7846", { minSquare: 6, openSky: true, prisonerAccess: true, requires: [
+    { kinds: [Obj.MaintenanceBench], issue: "Needs a maintenance bench." },
+    { kinds: [Obj.LoadingPallet], issue: "Needs a materials pallet." },
+  ] }),
+  room(RoomType.WasteYard, "Waste Yard", "#5d715f", { minSquare: 5, openSky: true, prisonerAccess: true, requires: [
+    { kinds: [Obj.WasteCart], issue: "Needs a waste cart." },
+    { kinds: [Obj.LoadingPallet], issue: "Needs a loading pallet." },
+  ] }),
 ];
 
 const ROOM_BY_TYPE: (RoomDef | undefined)[] = [];

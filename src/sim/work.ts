@@ -41,6 +41,13 @@ export const JOB_DEFS: JobDef[] = [
   job("shop", "Prison shop", [RoomType.Shop], [Obj.ShopCounter], false, "standard", [], "shop-soap", 36, 8, ["cash-5", "cash-10", "shop-snack"]),
   job("printing", "Printing / Bookbinding", [RoomType.PrintShop], [Obj.PrintPress], false, "skilled", [], "printed-goods", 44, 20, ["paper", "ink", "book"]),
   job("logistics", "Delivery / Exports", [RoomType.Delivery, RoomType.Exports], [Obj.LoadingPallet], true, "standard", [], "recycled-goods", 46, 14, ["mail-letter", "phone", "drugs"]),
+  job("records", "Records clerk", [RoomType.RecordsOffice], [Obj.RecordsDesk, Obj.RecordsCabinet], false, "skilled", [], "records-bundle", 44, 18, ["copied-schedule", "forged-pass", "visitor-pass", "delivery-manifest"]),
+  job("infirmary-orderly", "Infirmary orderly", [RoomType.Infirmary], [Obj.TreatmentTable, Obj.MedicineCabinet], true, "standard", [], "medical-service", 42, 20, ["medicine", "overdose-kit", "bandage"]),
+  job("electrical", "Electrical maintenance", [RoomType.Utilities], [Obj.ElectricalPanel, Obj.SecurityRack], false, "skilled", ["screwdriver"], "electrical-parts", 50, 28, ["wire", "radio-battery", "circuit-map", "staff-key"]),
+  job("construction", "Inmate construction crew", [RoomType.ConstructionYard], [Obj.MaintenanceBench, Obj.LoadingPallet], true, "skilled", ["hammer", "shovel"], "wood-goods", 54, 32, ["hammer", "shovel", "key-blank", "metal-scrap"]),
+  job("evidence", "Evidence / property clerk", [RoomType.EvidenceRoom], [Obj.EvidenceTerminal, Obj.PropertyShelf], false, "skilled", [], "records-bundle", 48, 24, ["evidence-seal", "plan-note", "key-mold", "drugs", "shiv"]),
+  job("waste", "Waste collection", [RoomType.WasteYard], [Obj.WasteCart, Obj.LoadingPallet], true, "standard", [], "waste-bundle", 38, 10, ["waste-bundle", "phone", "cutter"]),
+  job("visitation", "Visitation porter", [RoomType.Visitation], [Obj.VisitTable, Obj.VisitScreen], true, "standard", [], "visitor-package", 40, 12, ["visitor-package", "cash-20", "civilian-clothes", "drugs"]),
 ];
 
 const JOB_INPUTS: Record<string, Record<string, number>> = {
@@ -48,6 +55,8 @@ const JOB_INPUTS: Record<string, Record<string, number>> = {
   grounds: { fertilizer: 1 }, recycling: { "metal-scrap": 1 }, woodshop: { "wood-scrap": 2 },
   metalshop: { "metal-scrap": 2 }, tailoring: { cloth: 2 }, maintenance: { wire: 1 },
   printing: { paper: 2, ink: 1 },
+  records: { paper: 2, ink: 1 }, "infirmary-orderly": { bandage: 1 }, electrical: { "electrical-parts": 1 },
+  construction: { "wood-scrap": 2, "metal-scrap": 1 }, evidence: { "evidence-seal": 1 },
 };
 
 function job(id: string, name: string, roomTypes: number[], stations: number[], areaJob: boolean,

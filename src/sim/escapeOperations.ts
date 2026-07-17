@@ -38,6 +38,9 @@ export interface EscapeOperation {
   tunnelNetworkId: number;
   acquisition: { asset: string; sources: string[]; state: "needed" | "acquired" | "lost"; holderId: number; itemId: number } | null;
   distraction: { planned: boolean; instigatorId: number; state: "none" | "pending" | "active" | "complete"; engagementId: number };
+  /** Task 3 preparation graph. When set, this graph owns launch timing. */
+  advancedSchemeId: number;
+  advancedReady: boolean;
 }
 
 export interface TunnelEntry {
@@ -90,6 +93,9 @@ export class EscapeOperationsSystem {
       this.updateReadiness(op, byId);
       this.updateCohesion(op, social);
       op.exposure = clamp(op.exposure + dt * Math.max(0, op.members.length - 3) * .00008);
+      // Task 3's dependency graph owns preparation and launch. The legacy
+      // executor resumes only after that graph explicitly releases it.
+      if (op.advancedSchemeId >= 0 && !op.advancedReady) continue;
       if (op.state === "forming" && worldTime >= op.launchAt) {
         op.state = op.members.length > 1 ? "scouting" : "executing";
         op.blocker = "";
@@ -139,6 +145,7 @@ export class EscapeOperationsSystem {
       launchAt: worldTime + 30, blocker: "Quietly testing possible recruits", tunnelNetworkId: -1,
       acquisition: this.initialAcquisition(plan.method, id),
       distraction: { planned: false, instigatorId: -1, state: "none", engagementId: -1 },
+      advancedSchemeId: -1, advancedReady: false,
     };
     this.operations.set(id, op); ag.escapeOperationId = id; ag.escapeRole = role;
     return op;
@@ -378,7 +385,8 @@ export class EscapeOperationsSystem {
     this.operations.clear();
     for (const o of data.operations ?? []) this.operations.set(o.id, { ...o, members: o.members.map((m) => ({ ...m })), plan: this.copyPlan(o.plan), sharedIntel: [...o.sharedIntel], cache: { ...o.cache },
       acquisition: o.acquisition ? { ...o.acquisition, sources: [...o.acquisition.sources] } : this.initialAcquisition(o.method, o.id),
-      distraction: o.distraction ? { ...o.distraction } : { planned: false, instigatorId: -1, state: "none", engagementId: -1 } });
+      distraction: o.distraction ? { ...o.distraction } : { planned: false, instigatorId: -1, state: "none", engagementId: -1 },
+      advancedSchemeId: o.advancedSchemeId ?? -1, advancedReady: o.advancedReady ?? false });
     this.tunnels.clear();
     for (const t of data.tunnels ?? []) this.tunnels.set(t.id, { ...t, entries: t.entries.map((e) => ({ ...e, claimedBy: -1 })), edges: t.edges.map((e) => ({ ...e })), activeDiggers: [], occupants: [], mainClaimedBy: -1, cache: { ...t.cache } });
     this.nextOperationId = data.nextOperationId ?? 1; this.nextTunnelId = data.nextTunnelId ?? 1; this.rngState = data.rngState ?? 0x31d8ca71;

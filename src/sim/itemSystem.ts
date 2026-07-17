@@ -154,6 +154,26 @@ export const ITEM_DEFS_V4: ItemDefV4[] = [
   { id: "shop-magazine", name: "Magazine", size: "large", legality: "legal", concealment: .2, baseValue: 5, controlled: false, stackView: true, tags: ["shop", "recreation"] },
   { id: "shop-cards", name: "Playing cards", size: "small", legality: "legal", concealment: .65, baseValue: 6, controlled: false, stackView: true, tags: ["shop", "recreation"] },
   { id: "shop-toiletries", name: "Toiletries", size: "small", legality: "legal", concealment: .5, baseValue: 5, controlled: false, stackView: true, tags: ["shop", "hygiene"] },
+  // Task 3 planning, credentials, records, and institutional control.
+  { id: "key-blank", name: "Key blank", size: "tiny", legality: "controlled", concealment: .9, baseValue: 18, controlled: true, stackView: false, tags: ["component", "key"] },
+  { id: "key-mold", name: "Key mold", size: "tiny", legality: "contraband", concealment: .92, baseValue: 30, controlled: false, stackView: false, tags: ["crafted", "key", "escape-tool"] },
+  { id: "duplicate-staff-key", name: "Duplicate staff key", size: "tiny", legality: "contraband", concealment: .9, baseValue: 110, controlled: false, stackView: false, tags: ["key", "staff-access", "forged"] },
+  { id: "duplicate-guard-key", name: "Duplicate guard key", size: "tiny", legality: "contraband", concealment: .9, baseValue: 220, controlled: false, stackView: false, tags: ["key", "guard-access", "forged"] },
+  { id: "staff-id", name: "Staff identity card", size: "tiny", legality: "contraband", concealment: .92, baseValue: 90, controlled: true, stackView: false, tags: ["credential", "staff-access"] },
+  { id: "forged-pass", name: "Forged movement pass", size: "tiny", legality: "contraband", concealment: .94, baseValue: 85, controlled: false, stackView: false, tags: ["credential", "forged", "escape-tool"] },
+  { id: "visitor-pass", name: "Visitor pass", size: "tiny", legality: "controlled", concealment: .9, baseValue: 25, controlled: true, stackView: false, tags: ["credential", "visitor"] },
+  { id: "delivery-manifest", name: "Delivery manifest", size: "small", legality: "controlled", concealment: .72, baseValue: 20, controlled: true, stackView: false, tags: ["credential", "logistics", "records"] },
+  { id: "copied-schedule", name: "Copied security schedule", size: "small", legality: "contraband", concealment: .82, baseValue: 65, controlled: false, stackView: false, tags: ["intelligence", "records"] },
+  { id: "circuit-map", name: "Security circuit map", size: "small", legality: "contraband", concealment: .78, baseValue: 80, controlled: false, stackView: false, tags: ["intelligence", "utilities"] },
+  { id: "plan-note", name: "Escape planning notes", size: "small", legality: "contraband", concealment: .84, baseValue: 10, controlled: false, stackView: false, tags: ["intelligence", "escape-plan"] },
+  { id: "civilian-clothes", name: "Civilian clothing", size: "large", legality: "contraband", concealment: .18, baseValue: 120, controlled: false, stackView: false, tags: ["uniform", "disguise", "visitor"] },
+  { id: "radio-battery", name: "Radio battery", size: "tiny", legality: "controlled", concealment: .88, baseValue: 22, controlled: true, stackView: true, tags: ["component", "radio", "utilities"] },
+  { id: "evidence-seal", name: "Evidence seal", size: "tiny", legality: "controlled", concealment: .9, baseValue: 4, controlled: true, stackView: true, tags: ["evidence", "records"] },
+  { id: "visitor-package", name: "Visitor package", size: "small", legality: "legal", concealment: .5, baseValue: 8, controlled: false, stackView: false, tags: ["visitor", "container"] },
+  { id: "waste-bundle", name: "Waste bundle", size: "large", legality: "legal", concealment: .25, baseValue: 4, controlled: false, stackView: false, tags: ["service-output", "waste", "hide-body"] },
+  { id: "records-bundle", name: "Processed records", size: "large", legality: "controlled", concealment: .12, baseValue: 45, controlled: true, stackView: false, tags: ["service-output", "records"] },
+  { id: "electrical-parts", name: "Electrical parts", size: "small", legality: "controlled", concealment: .55, baseValue: 24, controlled: true, stackView: true, tags: ["component", "utilities"] },
+  { id: "medical-service", name: "Prepared medical supplies", size: "large", legality: "controlled", concealment: .08, baseValue: 55, controlled: true, stackView: false, tags: ["service-output", "medical"] },
 ];
 
 const DEF_BY_ID = new Map(ITEM_DEFS_V4.map((d) => [d.id, d]));

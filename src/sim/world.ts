@@ -255,6 +255,7 @@ export class World {
   placePiece(x: number, z: number, kind: number, orient: number): boolean {
     const d = defOf(kind);
     if (!d || d.place !== "piece" || !this.inBounds(x, z)) return false;
+    if (kind === Obj.Gatehouse && (x !== 370 || (orient & 3) !== 0 || z < 1 || z + d.d >= this.size - 1)) return false;
     const piece: Piece = {
       id: this.nextPieceId, kind, x, z, orient: orient & 3, w: d.w, d: d.d,
     };
@@ -262,7 +263,7 @@ export class World {
     if (tiles.length === 0) return false; // ran off the map
     for (const i of tiles) {
       if (this.objKind[i] !== Obj.None) return false;
-      if (this.infrastructure[i] && kind !== Obj.SecureBridge) return false;
+      if (this.infrastructure[i] && kind !== Obj.SecureBridge && kind !== Obj.Gatehouse) return false;
     }
 
     this.nextPieceId++;
@@ -538,6 +539,15 @@ export class World {
     this.jailClosed[i] = 0;
     this.touch(x, z);
     return true;
+  }
+
+  /** Remove a footprint object without mutating immutable infrastructure below it.
+   * Used by workman demolition for the two approved road-spanning structures. */
+  removePieceAt(x: number, z: number): boolean {
+    if (!this.inBounds(x, z)) return false;
+    const piece = this.pieceAtTile(this.idx(x, z));
+    if (!piece) return false;
+    this.removePiece(piece); return true;
   }
 
   /** Roof/sight barrier: walls and doors, but not fences. */

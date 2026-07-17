@@ -50,12 +50,13 @@ import { aptitude, freshPrisonerMind, gainSkill, generatePrisonerProfile, person
 import { PrisonerSocialSystem } from "./social.ts";
 import { EscapeOperationsSystem } from "./escapeOperations.ts";
 import type { Task2Systems } from "./task2Systems.ts";
+import type { Task3Systems } from "./task3Systems.ts";
 
 // The public face of the sim: everything main.ts and the render passes import.
 export {
   FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, TRAY_STACK_KIND,
   TRUCK_KIND, INTAKE_TRUCK_KIND, CARGO_KIND,
-  DRIVER_KIND,
+  DRIVER_KIND, VISITOR_VEHICLE_KIND, MEDICAL_VEHICLE_KIND, OUTSIDE_VEHICLE_KIND,
   REG, REG_NAMES, defaultRegime,
   POSE_STAND, POSE_SIT, POSE_LIE_BED, POSE_LIE_FLOOR, POSE_CLIMB,
 } from "./agent.ts";
@@ -103,6 +104,7 @@ export class Agents {
   construction: ConstructionSystem | null = null;
   kitchen: KitchenSystem | null = null;
   task2: Task2Systems | null = null;
+  task3: Task3Systems | null = null;
   staffPerformance = 1;
   roadVehicleZ: number[] = [];
   readonly social = new PrisonerSocialSystem();
@@ -114,7 +116,8 @@ export class Agents {
 
   sync(world: World) {
     for (const kind of [Obj.Prisoner, Obj.Guard, Obj.Cook, Obj.Workman, Obj.Doctor,
-      Obj.Investigator, Obj.DogHandler, Obj.ArmedGuard, Obj.SecurityDog]) {
+      Obj.Investigator, Obj.DogHandler, Obj.ArmedGuard, Obj.SecurityDog,
+      Obj.ChiefOfficer, Obj.Foreman, Obj.Accountant]) {
       for (const i of world.tilesOfKind(kind)) {
         const x = i % world.size, z = (i / world.size) | 0;
         const orient = world.objOrient[i];
@@ -162,6 +165,17 @@ export class Agents {
     for (const [s, id] of this.servers) if (id === ag.id) this.servers.delete(s);
     const n = this.agents.indexOf(ag);
     if (n >= 0) this.agents.splice(n, 1);
+  }
+
+  /** Terminal used by vehicle, visitation, and transfer escapes. The planning
+   * system requests the outcome; this owner performs the authoritative roster
+   * mutation and statistic update. */
+  markEscapedBySystem(agentId: number): boolean {
+    const agent = this.agents.find((row) => row.id === agentId);
+    if (!agent || agent.kind !== Obj.Prisoner) return false;
+    this.escapedCount++;
+    this.removeAgent(agent);
+    return true;
   }
 
   giveBatonAt(x: number, z: number): boolean {
@@ -270,6 +284,9 @@ export class Agents {
       if (ag.kind !== Obj.Prisoner && ag.kind !== Obj.SecurityDog &&
           !(ag.kind === Obj.Doctor && this.task2?.health.treatmentJobs.some((j) => j.state === "waiting")) &&
           this.task2?.security.updateStaff(ag, dt * this.staffPerformance, this.simTime, world, this.agents)) continue;
+      if (ag.kind !== Obj.Prisoner && ag.kind !== Obj.SecurityDog &&
+          this.task3?.updateStaff(ag, dt * this.staffPerformance, this.simTime, world,
+            !!this.task2?.combat.responseFor(ag))) continue;
       if (!ag.underground && world.inBounds(Math.floor(ag.x), Math.floor(ag.z))) {
         const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
         ag.elev = world.objKind[here] === Obj.SecureBridge ? 2.86 : ag.kind === Obj.Sniper ? ag.elev : 0;
@@ -281,10 +298,11 @@ export class Agents {
           continue; // wait safely for the moving vehicle to clear the crossing
         }
       }
-      if (ag.kind === Obj.Prisoner && this.curActivity === REG.Work &&
+      if (ag.kind === Obj.Prisoner && this.task3?.updatePrisoner(ag, dt, this.simTime, world, this.agents)) { /* advanced escape task */ }
+      else if (ag.kind === Obj.Prisoner && this.curActivity === REG.Work &&
           this.task2?.work.updateWorker(ag, dt, this.simTime, world)) { /* assigned prison work */ }
       else if (ag.kind === Obj.Prisoner) this.updatePrisoner(ag, dt, world, isNight);
-      else if (ag.kind === Obj.Cook) this.updateCook(ag, dt * this.staffPerformance, world);
+      else if (ag.kind === Obj.Cook) this.updateCook(ag, dt * this.staffPerformance * (this.task3?.staffEfficiency(ag, this.simTime) ?? 1), world);
       else if (ag.kind === Obj.Doctor) {
         if (!this.task2?.health.updateDoctor(ag, dt * this.staffPerformance, world, this.agents, this.task2.items)) {
           ag.state = "idle"; ag.amp = 0;

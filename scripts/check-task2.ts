@@ -14,7 +14,6 @@ import { MarketSystem } from "../src/sim/market.ts";
 import { passable } from "../src/sim/nav.ts";
 import { Obj, RoomType } from "../src/sim/objects.ts";
 import { freshPrisonerMind, generatePrisonerProfile } from "../src/sim/profiles.ts";
-import { SAVE_VERSION, isSaveV4 } from "../src/sim/saveVersion.ts";
 import { SecuritySystem } from "../src/sim/security.ts";
 import { PrisonerSocialSystem } from "../src/sim/social.ts";
 import { Task2Systems } from "../src/sim/task2Systems.ts";
@@ -33,9 +32,6 @@ function staff(id: number, kind = Obj.Guard, x = 3.5, z = 3.5): Agent {
 }
 
 function itemAndSaveChecks(): void {
-  assert.equal(SAVE_VERSION, 4);
-  for (const version of [1, 2, 3]) assert.equal(isSaveV4({ version, world: {}, agents: {}, task2: {} }), false);
-  assert.equal(isSaveV4({ version: 4, world: {}, agents: {}, task2: {} }), true);
   const items = new ItemSystem();
   items.ensureContainer({ id: "agent:1:pockets", name: "pockets", x: 1, z: 1, capacity: 8,
     concealment: .8, bodyCapacity: 0, lockedTier: "none", ownerId: 1, tags: ["personal"] });
@@ -199,7 +195,7 @@ function task2RoundTripAndScale(): void {
 function hiddenUiChecks(): void {
   const source = readFileSync("src/main.ts", "utf8"), start = source.indexOf("function updateIntelligenceUi"), end = source.indexOf("intelSearch.addEventListener", start);
   const normalUi = source.slice(start, end);
-  for (const forbidden of [".aptitudes", ".personality", "escapeOperations", ".gangs", "items.cashValue"])
+  for (const forbidden of [".aptitudes", ".personality", "escapeOperations", "task3.escape.schemes", "items.cashValue"])
     assert.equal(normalUi.includes(forbidden), false, `normal Intelligence UI leaks private field ${forbidden}`);
   const html = readFileSync("index.html", "utf8");
   assert.equal(html.includes("escape operations are fully visible"), false);

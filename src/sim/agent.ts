@@ -20,6 +20,9 @@ export const TRUCK_KIND = 1004;
 export const INTAKE_TRUCK_KIND = 1005;
 export const CARGO_KIND = 1006;
 export const DRIVER_KIND = 1007;
+export const VISITOR_VEHICLE_KIND = 1008;
+export const MEDICAL_VEHICLE_KIND = 1009;
+export const OUTSIDE_VEHICLE_KIND = 1010;
 
 // --- The regime -------------------------------------------------------------
 

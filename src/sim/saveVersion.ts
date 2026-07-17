@@ -1,6 +1,6 @@
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 5;
 
-export interface SaveEnvelopeV4 {
+export interface SaveEnvelopeV5 {
   version: typeof SAVE_VERSION;
   savedAt: string;
   worldTime: number;
@@ -24,10 +24,12 @@ export interface SaveEnvelopeV4 {
   intake: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   task2: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  task3: any;
 }
 
-export function isSaveV4(value: unknown): value is SaveEnvelopeV4 {
+export function isSaveV5(value: unknown): value is SaveEnvelopeV5 {
   if (!value || typeof value !== "object") return false;
-  const row = value as Partial<SaveEnvelopeV4>;
-  return row.version === SAVE_VERSION && !!row.world && !!row.agents && !!row.task2;
+  const row = value as Partial<SaveEnvelopeV5>;
+  return row.version === SAVE_VERSION && !!row.world && !!row.agents && !!row.task2 && !!row.task3;
 }

@@ -3,7 +3,7 @@ import { invert } from "./math";
 import { DIRS, NEEDS, Obj, RoomType, World, defOf } from "./sim/world";
 import {
   Agents, CARGO_KIND, DRIVER_KIND, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND,
-  INTAKE_TRUCK_KIND, TRAY_STACK_KIND, TRUCK_KIND,
+  INTAKE_TRUCK_KIND, MEDICAL_VEHICLE_KIND, OUTSIDE_VEHICLE_KIND, TRAY_STACK_KIND, TRUCK_KIND, VISITOR_VEHICLE_KIND,
   REG, REG_NAMES, type Agent, type IssueLabel,
 } from "./sim/agents";
 import {
@@ -39,7 +39,8 @@ import { KitchenSystem } from "./sim/kitchen";
 import { IntakeSystem } from "./sim/intake";
 import { commodityDef, recipeCost } from "./sim/commodities";
 import { Task2Systems } from "./sim/task2Systems";
-import { SAVE_VERSION, isSaveV4 } from "./sim/saveVersion";
+import { Task3Systems } from "./sim/task3Systems";
+import { SAVE_VERSION, isSaveV5 } from "./sim/saveVersion";
 import { ITEM_DEFS_V4, itemDefV4 } from "./sim/itemSystem";
 import { incidentCategoryForItem } from "./sim/institution";
 import {
@@ -171,10 +172,12 @@ async function main() {
   const intake = new IntakeSystem(economy);
   const infrastructure = new InfrastructureSystem(world);
   const task2 = new Task2Systems(WORLD_SIZE, economy, logistics);
+  const task3 = new Task3Systems(task2, economy, logistics);
   kitchen.physicalItems = task2.items;
   agents.construction = construction;
   agents.kitchen = kitchen;
   agents.task2 = task2;
+  agents.task3 = task3;
   task2.social = agents.social;
   task2.escapeOperations = agents.escapeOperations;
   const personStager = new PersonInstanceStager();
@@ -192,6 +195,11 @@ async function main() {
     byKind.set(INTAKE_TRUCK_KIND, logisticsRender.intakeTrucks);
     byKind.set(CARGO_KIND, logisticsRender.cargo);
     byKind.set(DRIVER_KIND, logisticsRender.drivers);
+    const external = { visitor: [] as number[], medical: [] as number[], outside: [] as number[] };
+    for (const vehicle of task3.escape.externalVehicles.values()) external[vehicle.kind].push(vehicle.x - 1, vehicle.z - 3, 0);
+    byKind.set(VISITOR_VEHICLE_KIND, new Float32Array(external.visitor));
+    byKind.set(MEDICAL_VEHICLE_KIND, new Float32Array(external.medical));
+    byKind.set(OUTSIDE_VEHICLE_KIND, new Float32Array(external.outside));
     furniture.setInstances(device, byKind);
   }
 
@@ -201,6 +209,7 @@ async function main() {
     world.recomputeRoofs();
     world.recomputeRooms();
     task2.rebuildWorld(world);
+    task3.rebuildWorld(world);
     roomLines.set(device, world.roomOutline());
     floors.setInstances(device, world.floorsByMat());
     walls.setInstances(device, world.wallsByMat());
@@ -257,12 +266,12 @@ async function main() {
 
   // World clock driving the day/night cycle; start at 08:00 on day 1.
   let worldTime = 8 * HOUR_SECONDS;
-  let loadedV4 = false;
+  let loadedV5 = false;
   let incompatibleSave = false;
   try {
     const res = await fetch("/api/save");
     const data = await res.json();
-    if (isSaveV4(data)) {
+    if (isSaveV5(data)) {
       world.loadData(data.world);
       infrastructure.loadData(data.infrastructure);
       agents.loadData(data.agents);
@@ -272,17 +281,19 @@ async function main() {
       kitchen.loadData(data.kitchen ?? {});
       intake.loadData(data.intake ?? {});
       task2.loadData(data.task2 ?? {}, world);
+      task3.loadData(data.task3 ?? {}, world);
       if (typeof data.worldTime === "number") worldTime = data.worldTime;
-      loadedV4 = true;
-    } else if (data?.world || [1, 2, 3].includes(data?.version)) {
+      loadedV5 = true;
+    } else if (data?.world || [1, 2, 3, 4].includes(data?.version)) {
       incompatibleSave = true;
     }
   } catch {
     // File-backed saves only exist in the Vite dev server.
   }
-  if (!loadedV4) {
+  if (!loadedV5) {
     infrastructure.installNewGame();
     task2.installNewGame(world);
+    task3.installNewGame(world, worldTime);
     camera.target = [368, 0, 375];
     camera.distance = 72;
   }
@@ -428,6 +439,7 @@ async function main() {
       const i = world.idx(tx, tz);
       if (world.objKind[i] !== Obj.None || world.pieceAt[i] !== 0 || world.infrastructure[i]) return;
       const kind = cat === "person" ? editor.tool!.mat : cat === "guard" ? Obj.Guard : cat === "cook" ? Obj.Cook : Obj.Workman;
+      if (!task3.canHire(kind, agents.agents)) return;
       if (!economy.hire(kind, worldTime)) return;
     }
     if (!isOrderTool() && editor.apply(world, tx, tz)) { dirty = true; saveDirty = true; }
@@ -492,7 +504,8 @@ async function main() {
     const cat = editor.tool.cat;
     const start = painting && dragStart ? dragStart : hoverTile;
     const transient = orderTargets();
-    const invalid = isOrderTool() && construction.preview(editor.tool, transient, editor.orient, world).some((g) => !g.valid);
+    const transientGhosts = isOrderTool() ? construction.preview(editor.tool, transient, editor.orient, world) : [];
+    const invalid = transientGhosts.some((g) => !g.valid);
     const tone: "blue" | "red" = cat === "erase" || invalid ? "red" : "blue";
     if (cat === "floor" || cat === "room") {
       const x0 = Math.min(start.x, hoverTile.x), x1 = Math.max(start.x, hoverTile.x);
@@ -516,12 +529,13 @@ async function main() {
       // Ghost the object's real footprint, rotated the way it will be placed.
       const d = defOf(editor.tool!.mat);
       if (d) {
-        const o = editor.orient & 3;
+        const ghost = transientGhosts[0], anchorX = ghost?.x ?? hoverTile.x, anchorZ = ghost?.z ?? hoverTile.z;
+        const o = ghost?.orient ?? (editor.orient & 3);
         const [ax, az] = DIRS[o];
         const [bx, bz] = DIRS[(o + 1) & 3];
         for (let a = 0; a < d.w; a++) {
           for (let b = 0; b < d.d; b++) {
-            add(hoverTile.x + ax * a + bx * b, hoverTile.z + az * a + bz * b, tone);
+            add(anchorX + ax * a + bx * b, anchorZ + az * a + bz * b, tone);
           }
         }
       }
@@ -620,7 +634,8 @@ async function main() {
   const inspectProfile = document.getElementById("inspectProfile")!;
   const agentKindName = (kind: number): string => ({ [Obj.Prisoner]: "Prisoner", [Obj.Guard]: "Guard", [Obj.Cook]: "Cook",
     [Obj.Workman]: "Workman", [Obj.Doctor]: "Doctor", [Obj.Investigator]: "Investigator", [Obj.DogHandler]: "Dog Handler",
-    [Obj.ArmedGuard]: "Armed Guard", [Obj.SecurityDog]: "Security Dog", [Obj.Sniper]: "Sniper" }[kind] ?? "Staff");
+    [Obj.ArmedGuard]: "Armed Guard", [Obj.SecurityDog]: "Security Dog", [Obj.Sniper]: "Sniper",
+    [Obj.ChiefOfficer]: "Chief Officer", [Obj.Foreman]: "Foreman", [Obj.Accountant]: "Accountant" }[kind] ?? "Staff");
   const inspectValues = new Map<string, HTMLElement>();
   for (const label of ["Food", "Rest", "Comfort", "Outdoors", "Social", "Stress"]) {
     const stat = document.createElement("div");
@@ -748,10 +763,19 @@ async function main() {
       .map((o) => `<li>${html(task2.institution.incidents.get(o.incidentId)?.category ?? "incident")} · ${o.state}${o.search !== "none" ? ` · ${o.search} search` : ""}${o.interrogate ? " · interview" : ""}</li>`).join("") || `<li>No formal discipline.</li>`;
     const medical = task2.health.state(selected.id);
     const formalInjuries = medical?.injuries.filter((i) => i.treated).map((i) => `${i.region} ${i.type}`).join(", ") || "No treated injuries on record";
+    const managementRows = [...task3.management.reports.values()].filter((report) => report.expiresAt > worldTime &&
+      (report.summary.includes(`inmate ${selected!.id}`) || report.evidenceIds.some((id) => task2.institution.evidence.get(id)?.subjectId === selected!.id)))
+      .sort((a, b) => b.createdAt - a.createdAt).map((report) => `<li>${html(report.title)} · ${Math.round(report.confidence * 100)}%: ${html(report.summary)}</li>`).join("") || `<li>No management report names this inmate.</li>`;
+    const gangKnown = cases.some((c) => c.incidentIds.some((id) => task2.institution.incidents.get(id)?.category === "gang"));
+    const gang = gangKnown ? task2.gangs.gangFor(selected.id) : null;
+    const knownTerritory = gang ? task3.territories.knownTerritories(task2.institution).filter((row) => row.controllerId === gang.id || row.contestedBy === gang.id) : [];
+    const territoryRows = knownTerritory.map((row) => `<li>Area ${row.areaId}: ${html(row.state)} influence${row.state === "contested" ? "; competing affiliation also indicated" : ""}</li>`).join("") || `<li>No evidence-supported territory assessment.</li>`;
     intelProfile.innerHTML = `<div class="profile-title"><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</div>` +
       `<div class="profile-sub">Inmate #${selected.id} · ${CUSTODY_NAMES[p.custody]} custody${selected.protectiveCustody ? " · Protective Custody" : ""} · age ${p.age} · ${p.sentenceMonths} month sentence (${p.servedMonths} served)</div>` +
       `<div class="profile-section"><h3>Official record</h3><ul class="profile-list"><li>Current conviction: ${html(crimeName(p.conviction.crimeId))}, ${p.conviction.sentenceMonths} months</li>${p.priors.map((r) => `<li>Prior at age ${r.ageAtConviction}: ${html(crimeName(r.crimeId))}, ${r.sentenceMonths} months</li>`).join("") || "<li>No prior convictions.</li>"}<li>Medical: ${html(formalInjuries)}</li></ul></div>` +
       `<div class="profile-section"><h3>Case assessments</h3><div class="matrix">${caseRows}</div></div>` +
+      `<div class="profile-section"><h3>Analyst reports</h3><ul class="profile-list">${managementRows}</ul></div>` +
+      `<div class="profile-section"><h3>Known affiliation footprint</h3><ul class="profile-list">${territoryRows}</ul></div>` +
       `<div class="profile-section"><h3>Formal discipline</h3><ul class="profile-list">${discipline}</ul></div>` +
       `<div class="profile-section"><h3>Information limits</h3><div class="profile-sub">Unreported traits, emotions, affiliations, relationships, possessions, contacts, caches, and plans remain unknown. Confidence reflects shared evidence, not ground truth.</div></div>`;
   }
@@ -913,7 +937,8 @@ async function main() {
   function tipText(ag: Agent): string {
     const staffNames: Record<number, string> = { [Obj.Guard]: "Guard", [Obj.Cook]: "Cook", [Obj.Workman]: "Workman",
       [Obj.Doctor]: "Doctor", [Obj.Investigator]: "Investigator", [Obj.DogHandler]: "Dog Handler",
-      [Obj.ArmedGuard]: "Armed Guard", [Obj.SecurityDog]: "Security Dog", [Obj.Sniper]: "Sniper" };
+      [Obj.ArmedGuard]: "Armed Guard", [Obj.SecurityDog]: "Security Dog", [Obj.Sniper]: "Sniper",
+      [Obj.ChiefOfficer]: "Chief Officer", [Obj.Foreman]: "Foreman", [Obj.Accountant]: "Accountant" };
     const kind = ag.kind === Obj.Prisoner ? "Prisoner" : staffNames[ag.kind] ?? "Staff";
     const identity = ag.profile ? `${ag.profile.firstName} ${ag.profile.lastName}\n${CUSTODY_NAMES[ag.profile.custody]} · ${crimeName(ag.profile.conviction.crimeId)}` : `${kind} #${ag.id}`;
     const cases = task2.institution.knownAssessment(ag.id).cases;
@@ -975,7 +1000,7 @@ async function main() {
     }
     if (incompatibleSave) issues.push({
       id: "save-v1", x: 366, z: 375,
-      issue: "The older save is incompatible. This is a fresh version 4 institutional-simulation world.",
+      issue: "The older save is incompatible. This is a fresh version 5 complex-simulation world.",
     });
     let warningI = 0;
     const activeOrders = [...construction.groups.values()].some((group) => group.state !== "complete" && group.state !== "cancelled");
@@ -1010,6 +1035,9 @@ async function main() {
     for (const warning of task2.warnings) issues.push({
       id: `task2-${warningI++}`, x: 369.5, z: 376.5 + warningI, issue: warning,
     });
+    for (const warning of task3.warnings) issues.push({
+      id: `task3-${warningI++}`, x: 371.5, z: 376.5 + warningI, issue: warning,
+    });
     worldOverlay.updateData(rooms, issues, agents.prisonerCount(), world.prisonerCapacity());
   }
 
@@ -1035,6 +1063,7 @@ async function main() {
           kitchen: kitchen.saveData(),
           intake: intake.saveData(),
           task2: task2.saveData(),
+          task3: task3.saveData(),
         }),
       });
       saveDirty = false;
@@ -1206,12 +1235,14 @@ async function main() {
     if (logisticsTab === "shipments") {
       const lines = logistics.stockLines();
       const stockRows = lines.length ? lines.map((line) => `<tr><td>${html(commodityDef(line.commodity).name)}</td><td>${line.available}</td><td>${line.inTransit}</td><td>${line.reserved}</td></tr>`).join("") : `<tr><td colspan="4">No stock ordered</td></tr>`;
-      const blocked = logistics.trucks.filter((truck) => truck.state === "blocked").length + intake.vehicles.filter((vehicle) => vehicle.state === "waiting" && vehicle.warning).length;
-      body = `<div class="log-summary"><div class="log-kpi"><small>Vehicles</small><strong>${logistics.trucks.length + intake.vehicles.length}</strong></div><div class="log-kpi"><small>Blocked</small><strong>${blocked}</strong></div><div class="log-kpi"><small>Unique items</small><strong>${[...task2.items.items.values()].filter((i) => i.locationKind !== "destroyed").length}</strong></div></div>` +
+      const blocked = logistics.trucks.filter((truck) => truck.state === "blocked").length + intake.vehicles.filter((vehicle) => vehicle.state === "waiting" && vehicle.warning).length + [...task3.escape.externalVehicles.values()].filter((vehicle) => vehicle.state === "blocked").length;
+      body = `<div class="log-summary"><div class="log-kpi"><small>Vehicles</small><strong>${logistics.trucks.length + intake.vehicles.length + task3.escape.externalVehicles.size}</strong></div><div class="log-kpi"><small>Blocked</small><strong>${blocked}</strong></div><div class="log-kpi"><small>Unique items</small><strong>${[...task2.items.items.values()].filter((i) => i.locationKind !== "destroyed").length}</strong></div></div>` +
         `<table class="log-table"><thead><tr><th>Commodity</th><th>Here</th><th>Transit</th><th>Reserved</th></tr></thead><tbody>${stockRows}</tbody></table>` +
         `<div class="log-ledger">Controlled discrepancies: ${task2.items.controlledDiscrepancies().length} · Export credit expected: $${Math.round(logistics.expectedExportCredit())}</div>`;
+      const gates = [...task3.facility.gatehouses.values()].map((gate) => `<div class="matrix-row"><header><strong>Gatehouse ${gate.pieceId}</strong><span>${gate.guardId >= 0 ? `Manned by guard ${gate.guardId}` : "Unmanned"}</span></header><label>Outgoing inspection <select class="work-select" data-gate-inspection="${gate.pieceId}">${["none", "spot", "standard", "full"].map((value) => `<option ${gate.inspection === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>${gate.warning ? `<small>${html(gate.warning)}</small>` : ""}</div>`).join("");
+      body += `<div class="profile-section"><h3>Road control</h3><div class="matrix">${gates || `<div class="profile-sub">No Gatehouse is built. Outgoing vehicles cannot be inspected at the road boundary.</div>`}</div></div>`;
     } else if (logisticsTab === "deployment") {
-      const roles = ["guard", "armed-guard", "investigator", "dog-handler", "doctor", "cook", "workman"] as const;
+      const roles = ["guard", "armed-guard", "investigator", "dog-handler", "doctor", "cook", "workman", "chief", "foreman", "accountant"] as const;
       body = `<div class="profile-sub">Set persistent staffing by structural area. Fatigued staff temporarily leave their assignment open for a qualified spare.</div><div class="matrix">` +
         [...task2.areas.areas.values()].sort((a, b) => a.id - b.id).map((area) => {
           const row = task2.security.deploymentTargets.get(area.id) ?? {};
@@ -1220,7 +1251,7 @@ async function main() {
           }).join("")}</div></div>`;
         }).join("") + `</div>`;
     } else if (logisticsTab === "access") {
-      const roles = ["prisoner", "worker", "guard", "armed-guard", "investigator", "dog-handler", "doctor", "cook", "workman", "staff", "driver", "visitor"] as const;
+      const roles = ["prisoner", "worker", "guard", "armed-guard", "investigator", "dog-handler", "doctor", "cook", "workman", "chief", "foreman", "accountant", "staff", "driver", "visitor"] as const;
       const custody = ["minimum", "medium", "maximum", "supermax", "protective"] as const;
       body = `<div class="profile-sub">Access is binary by structural area. With mixing disabled, the first admitted custody class reserves the area until it empties.</div><div class="matrix">` +
         [...task2.areas.areas.values()].sort((a, b) => a.id - b.id).map((area) => {
@@ -1249,6 +1280,7 @@ async function main() {
     logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-role]").forEach((input) => input.onchange = () => { const [area, key] = input.dataset.areaRole!.split(":"); (task2.areas.access.get(Number(area))!.roles as Record<string, boolean>)[key] = input.checked; saveDirty = true; });
     logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-work-agent]").forEach((select) => select.onchange = () => { const id = Number(select.dataset.workAgent); task2.work.unassign(id); if (Number(select.value) >= 0) task2.work.assign(id, Number(select.value)); saveDirty = true; });
     logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-supervision]").forEach((select) => select.onchange = () => { const w = task2.work.workplaces.get(Number(select.dataset.supervision)); if (w) w.supervision = select.value as never; saveDirty = true; });
+    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-gate-inspection]").forEach((select) => select.onchange = () => { task3.facility.setInspection(Number(select.dataset.gateInspection), select.value as never); saveDirty = true; updateLogisticsUi(); });
     const detail = document.querySelector<HTMLElement>("#detailCost strong");
     if (detail && editor.tool && isOrderTool()) { const recipe = construction.estimate(editor.tool, Math.max(1, orderTargets().length)); detail.textContent = `$${recipeCost(recipe).toLocaleString()} · ${Object.entries(recipe).map(([id, n]) => `${commodityDef(id).name} ${Math.max(0, logistics.quantity(id) - logistics.reserved(id))}/${n}`).join(", ")}`; }
   }
@@ -1259,6 +1291,16 @@ async function main() {
     financialsDashboard.innerHTML = `<div class="log-title">Financials</div><div class="log-summary"><div class="log-kpi"><small>Cash</small><strong>${economy.cash < 0 ? "−" : ""}$${Math.abs(Math.round(economy.cash)).toLocaleString()}</strong></div><div class="log-kpi"><small>Net / hour</small><strong>$${economy.netHourly()}</strong></div><div class="log-kpi"><small>Performance</small><strong>${Math.round(economy.performanceMultiplier * 100)}%</strong></div></div>` +
       `<table class="log-table"><thead><tr><th>Last 24 hours</th><th>Net</th></tr></thead><tbody>${[...daily].map(([k, v]) => `<tr><td>${html(k)}</td><td>${v >= 0 ? "+" : "−"}$${Math.abs(Math.round(v))}</td></tr>`).join("")}</tbody></table>` +
       `<div class="profile-section"><h3>Ledger</h3><table class="log-table"><thead><tr><th>Time</th><th>Type</th><th>Memo</th><th>Amount</th></tr></thead><tbody>${recent || `<tr><td colspan="4">No entries</td></tr>`}</tbody></table></div>`;
+    const procedures = ["spoon-count", "tray-count", "key-signout", "tool-count", "shipment-manifest", "till-reconcile", "floor-survey", "dual-evidence"] as const;
+    const reportRows = [...task3.management.reports.values()].filter((report) => report.expiresAt > worldTime).sort((a, b) => b.createdAt - a.createdAt).map((report) => `<div class="matrix-row"><header><strong>${html(report.title)}</strong><span>${html(report.manager)} · ${Math.round(report.confidence * 100)}%</span></header><div>${html(report.summary)}</div><small>${html(report.recommendation)}</small></div>`).join("");
+    financialsDashboard.innerHTML += `<div class="profile-section"><h3>Temporary controls</h3><div class="profile-sub">Controls improve detection but consume staff time. A compromised employee may warn an inmate or quietly bypass the procedure.</div><div class="toggle-grid">${procedures.map((id) => { const active = task3.management.procedure(id, worldTime), manager = task3.management.procedureManager(id), enabled = task3.management.canActivateProcedure(id); return `<button class="tiny-btn${active ? " on" : ""}" data-procedure="${id}" ${!active && !enabled ? "disabled" : ""}>${html(id)} · ${manager}${active ? ` · ${Math.max(1, Math.ceil((active.activeUntil - worldTime) / HOUR_SECONDS))}h` : ""}</button>`; }).join("")}</div></div>` +
+      `<div class="profile-section"><h3>Management reports</h3><div class="matrix">${reportRows || `<div class="profile-sub">No current reports. Each manager needs a separate valid Management Office and time to inspect records or the facility.</div>`}</div></div>`;
+    financialsDashboard.querySelectorAll<HTMLButtonElement>("[data-procedure]").forEach((button) => button.onclick = () => {
+      const id = button.dataset.procedure as typeof procedures[number];
+      if (task3.management.procedure(id, worldTime)) task3.management.deactivateProcedure(id);
+      else task3.management.activateProcedure(id, worldTime, 24);
+      saveDirty = true; updateFinancialsUi();
+    });
   }
 
   function updatePolicyUi(): void {
@@ -1336,9 +1378,12 @@ async function main() {
       agents.roadVehicleZ = [
         ...logistics.trucks.filter((truck) => truck.state === "arriving" || truck.state === "departing").map((truck) => truck.z),
         ...intake.vehicles.filter((vehicle) => vehicle.state === "arriving" || vehicle.state === "departing").map((vehicle) => vehicle.z),
+        ...[...task3.escape.externalVehicles.values()].filter((vehicle) => vehicle.state === "arriving" || vehicle.state === "departing").map((vehicle) => vehicle.z),
       ];
       task2.tick(step, worldTime, world, agents.agents,
         agents.currentActivity() === REG.Work, agents.currentActivity() === REG.RollCall);
+      task3.tick(step, worldTime, world, agents.agents, agents.social, agents.escapeOperations, agents.tunnels);
+      for (const id of task3.consumeEscaped()) agents.markEscapedBySystem(id);
       agents.update(step, world, isNightAt(worldTime), hourOf(worldTime), worldTime);
       simDt -= step;
     }

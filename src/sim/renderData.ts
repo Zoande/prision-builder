@@ -83,10 +83,10 @@ export class PersonInstanceStager {
   private key(kind: number): keyof PersonInstances | null {
     if (kind === Obj.Prisoner) return "prisoners";
     if (kind === Obj.Guard) return "guards";
-    if (kind === Obj.Investigator || kind === Obj.DogHandler || kind === Obj.ArmedGuard) return "guards";
+    if (kind === Obj.Investigator || kind === Obj.DogHandler || kind === Obj.ArmedGuard || kind === Obj.ChiefOfficer) return "guards";
     if (kind === Obj.Cook) return "cooks";
-    if (kind === Obj.Doctor) return "cooks";
-    if (kind === Obj.Workman) return "workmen";
+    if (kind === Obj.Doctor || kind === Obj.Accountant) return "cooks";
+    if (kind === Obj.Workman || kind === Obj.Foreman) return "workmen";
     if (kind === Obj.SecurityDog) return "workmen";
     if (kind === Obj.Sniper) return "snipers";
     return null;

@@ -270,9 +270,10 @@ export function finishUse(A: Agents, ag: Agent, world: World) {
   if (kind === Obj.Table && A.mealTables.delete(ag.useIdx)) A.mealsDirty = true;
   // Eating is also how a man squirrels away a spoon or works a cutter loose.
   if (kind === Obj.Table) {
-    const wantsSpoon = ag.plan?.method === "dig" && toolCount(A, ag, Item.Spoon) < 4;
+    const wantsSpoon = ag.plan?.method === "dig" && toolCount(A, ag, Item.Spoon) < 4 &&
+      (A.task3?.mayTakeSpoon(ag.id, A.simTime) ?? true);
     const spoonStolen = A.kitchen?.finishMeal(wantsSpoon, ag.id) ?? false;
-    if (spoonStolen) acquire(A, ag, Item.Spoon);
+    if (spoonStolen) { acquire(A, ag, Item.Spoon); A.task3?.recordSpoonTaken(ag, A.simTime, A.agents); }
   }
 
   const on = use?.from === "on";

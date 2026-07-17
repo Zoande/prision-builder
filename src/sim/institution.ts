@@ -5,12 +5,15 @@ import { itemDefV4 } from "./itemSystem.ts";
 export type EvidenceThreshold = "suspected" | "probable" | "confirmed";
 export type IncidentCategory = "unauthorized" | "refusal" | "theft" | "extortion" | "missing-stock" |
   "tool" | "radio" | "substance" | "weapon" | "firearm" | "assault-inmate" | "assault-staff" |
-  "homicide" | "body-concealment" | "gang" | "escape" | "tunnel" | "sabotage" | "mail" | "missing-person";
+  "homicide" | "body-concealment" | "gang" | "escape" | "tunnel" | "sabotage" | "mail" | "missing-person" |
+  "corruption" | "credential" | "utility" | "structural";
 export type ForceLevel = "order" | "restraint" | "baton" | "spray" | "taser" | "dog" | "riot" | "less-lethal" | "lethal";
 
 export function incidentCategoryForItem(defId: string): IncidentCategory {
   const def = itemDefV4(defId);
   if (defId === "radio") return "radio";
+  if (["staff-id", "visitor-pass", "forged-pass", "delivery-manifest", "duplicate-staff-key", "duplicate-guard-key", "key-mold", "key-blank"].includes(defId)) return "credential";
+  if (["plan-note", "copied-schedule", "circuit-map", "civilian-clothes"].includes(defId)) return "escape";
   if (def.tags.includes("firearm") || def.tags.includes("ammunition")) return "firearm";
   if (def.tags.includes("substance") || def.tags.includes("drug")) return "substance";
   if (def.tags.some((tag) => ["cut-tool", "dig-tool", "escape-tool", "work-tool", "key"].includes(tag))) return "tool";
@@ -108,6 +111,10 @@ const DEFAULT_RULES: PolicyRule[] = [
   rule("sabotage", "confirmed", "restraint", "workplace", 12, true),
   rule("mail", "confirmed", "restraint", "cell", 4, true),
   rule("missing-person", "suspected", "riot", "full", 0),
+  rule("corruption", "probable", "restraint", "targeted", 24, true, true),
+  rule("credential", "probable", "restraint", "targeted", 16, true, true),
+  rule("utility", "probable", "riot", "workplace", 24, true, true),
+  rule("structural", "probable", "restraint", "targeted", 12, true),
 ];
 
 function rule(category: IncidentCategory, threshold: EvidenceThreshold, force: ForceLevel,

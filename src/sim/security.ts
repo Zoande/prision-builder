@@ -185,6 +185,9 @@ export class SecuritySystem {
     if (role === "doctor") return agent.kind === Obj.Doctor;
     if (role === "cook") return agent.kind === Obj.Cook;
     if (role === "workman") return agent.kind === Obj.Workman;
+    if (role === "chief") return agent.kind === Obj.ChiefOfficer;
+    if (role === "foreman") return agent.kind === Obj.Foreman;
+    if (role === "accountant") return agent.kind === Obj.Accountant;
     return false;
   }
 

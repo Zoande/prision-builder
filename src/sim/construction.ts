@@ -96,7 +96,8 @@ export class ConstructionSystem {
         const snapshot = this.snapshotAt(tile.x, tile.z, world);
         if (!snapshot) continue;
         const target = this.demolitionTarget(tile.x, tile.z, snapshot);
-        result.push({ ...target, operation: "demolish", groupId: 0, valid: !world.isInfrastructure(tile.x, tile.z) });
+        const roadStructure = snapshot.kind === Obj.SecureBridge || snapshot.kind === Obj.Gatehouse;
+        result.push({ ...target, operation: "demolish", groupId: 0, valid: !world.isInfrastructure(tile.x, tile.z) || roadStructure });
         continue;
       }
       const target = this.makeTarget(tool, tile.x, tile.z, orient, false);
@@ -112,7 +113,7 @@ export class ConstructionSystem {
   planDemolition(x: number, z: number, worldTime: number, world: World): BuildOrderGroup | null {
     if (!world.inBounds(x, z)) return null;
     const clickedPiece = world.pieceAtTile(world.idx(x, z));
-    if (world.isInfrastructure(x, z) && clickedPiece?.kind !== Obj.SecureBridge) return null;
+    if (world.isInfrastructure(x, z) && clickedPiece?.kind !== Obj.SecureBridge && clickedPiece?.kind !== Obj.Gatehouse) return null;
     const snapshot = this.snapshotAt(x, z, world);
     if (!snapshot) return null;
     if (snapshot.kind === Obj.Prisoner) return null;
@@ -294,6 +295,12 @@ export class ConstructionSystem {
   private makeTarget(tool: Tool, x: number, z: number, orient: number, allocateId: boolean): BuildTarget | null {
     const recipe = recipeFor(tool);
     if (!recipe) return null;
+    if (tool.cat === "piece" && tool.mat === Obj.Gatehouse) {
+      if (x < 372 || x > 377) return null;
+      x = 370;
+      z -= 1;
+      orient = 0;
+    }
     return {
       id: allocateId ? this.nextTargetId++ : 0, x, z, cat: tool.cat, mat: tool.mat, orient: orient & 3,
       recipe, delivered: {}, workSeconds: workTime(tool), completed: false, claimedBy: -1,
@@ -303,8 +310,8 @@ export class ConstructionSystem {
 
   private validateTarget(target: BuildTarget, world: World, groupId: number): string {
     if (!world.inBounds(target.x, target.z)) return "Outside the buildable map";
-    const bridge = target.cat === "piece" && target.mat === Obj.SecureBridge;
-    if (world.isInfrastructure(target.x, target.z) && !bridge) return "The road is immutable";
+    const roadStructure = target.cat === "piece" && (target.mat === Obj.SecureBridge || target.mat === Obj.Gatehouse);
+    if (world.isInfrastructure(target.x, target.z) && !roadStructure) return "The road is immutable";
     for (const key of this.targetReservationKeys(target, world)) {
       const holder = this.reservations.get(key);
       if (holder !== undefined && holder !== groupId) return "Reserved by another order";
@@ -319,10 +326,13 @@ export class ConstructionSystem {
         const tx = target.x + ax * a + bx * b, tz = target.z + az * a + bz * b;
         if (!world.inBounds(tx, tz)) return "Object footprint leaves the map";
         const ti = world.idx(tx, tz);
-        if (target.mat !== Obj.SecureBridge && (world.objKind[ti] !== Obj.None || world.infrastructure[ti])) return "Object footprint is occupied";
+        if (target.mat !== Obj.SecureBridge && target.mat !== Obj.Gatehouse && (world.objKind[ti] !== Obj.None || world.infrastructure[ti])) return "Object footprint is occupied";
+        if ((target.mat === Obj.SecureBridge || target.mat === Obj.Gatehouse) && world.objKind[ti] !== Obj.None) return "Object footprint is occupied";
       }
       if (target.mat === Obj.SecureBridge && target.orient % 2 !== 0) return "Secure bridge has a fixed east/west orientation";
       if (target.mat === Obj.SecureBridge && target.x !== 370) return "Secure bridge must span the road and both two-tile approaches";
+      if (target.mat === Obj.Gatehouse && (target.orient !== 0 || target.x !== 370)) return "Gatehouse must span the road east/west";
+      if (target.mat === Obj.Gatehouse && (target.z < 1 || target.z + def.d >= world.size - 1)) return "Gatehouse needs road space on both sides";
       return "";
     }
     if (target.cat === "door" || target.cat === "staffdoor" || target.cat === "jaildoor") {
@@ -417,7 +427,8 @@ export class ConstructionSystem {
   }
 
   private recover(target: BuildTarget, snapshot: DemolitionSnapshot): void {
-    if (snapshot.piece || isBoxedObject(snapshot.kind)) {
+    const bulkStructure = snapshot.kind === Obj.SecureBridge || snapshot.kind === Obj.Gatehouse;
+    if ((snapshot.piece || isBoxedObject(snapshot.kind)) && !bulkStructure) {
       const kind = snapshot.piece?.kind ?? snapshot.kind;
       this.logistics.addSalvage(boxCommodity(kind), 1, target.x, target.z);
       return;
@@ -432,6 +443,9 @@ export class ConstructionSystem {
   }
 
   private applyDemolition(target: BuildTarget, snapshot: DemolitionSnapshot, world: World): boolean {
+    if (snapshot.piece && (snapshot.kind === Obj.SecureBridge || snapshot.kind === Obj.Gatehouse)) {
+      return world.removePieceAt(target.x, target.z);
+    }
     if (snapshot.kind === Obj.WallLight || snapshot.kind === Obj.Door || snapshot.kind === Obj.StaffDoor || snapshot.kind === Obj.JailDoor) {
       return world.setWall(target.x, target.z, snapshot.mat || 1);
     }
@@ -529,6 +543,7 @@ function recipeFor(tool: Tool): Recipe | null {
   if (tool.cat === "fence") return { metal: 1 };
   if (tool.cat === "piece") {
     if (tool.mat === Obj.SecureBridge) return { concrete: 20, metal: 10 };
+    if (tool.mat === Obj.Gatehouse) return { concrete: 18, metal: 12 };
     const def = defOf(tool.mat);
     if (!def) return null;
     ensureBoxCommodity(def);
@@ -548,6 +563,7 @@ function workTime(tool: Tool): number {
   if (tool.cat === "wall" || tool.cat === "fence") return 4;
   if (tool.cat === "piece") {
     if (tool.mat === Obj.SecureBridge) return 30;
+    if (tool.mat === Obj.Gatehouse) return 40;
     return 8;
   }
   return 6;

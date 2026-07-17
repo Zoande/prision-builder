@@ -72,9 +72,11 @@ const ROOM_GROUPS: RoomGroup[] = [
   { key: "prisoner", label: "Prisoner", types: [RoomType.Cell, RoomType.Dorm, RoomType.Canteen, RoomType.ShowerRoom, RoomType.Yard] },
   { key: "living", label: "Living", types: [RoomType.CommonRoom, RoomType.Library, RoomType.Gym, RoomType.Chapel] },
   { key: "staff", label: "Staff", types: [RoomType.Kitchen, RoomType.StaffRoom, RoomType.Reception,
-    RoomType.Infirmary, RoomType.Morgue, RoomType.Security, RoomType.Armoury, RoomType.Kennel, RoomType.Offices, RoomType.Interview] },
+    RoomType.Infirmary, RoomType.Morgue, RoomType.Security, RoomType.Armoury, RoomType.Kennel, RoomType.Offices, RoomType.Interview,
+    RoomType.ManagementOffice, RoomType.EvidenceRoom, RoomType.Utilities, RoomType.RecordsOffice, RoomType.Visitation] },
   { key: "work", label: "Work", types: [RoomType.Laundry, RoomType.MailRoom, RoomType.Greenhouse, RoomType.Janitorial,
-    RoomType.Recycling, RoomType.Woodshop, RoomType.Metalshop, RoomType.Tailoring, RoomType.Maintenance, RoomType.Shop, RoomType.PrintShop] },
+    RoomType.Recycling, RoomType.Woodshop, RoomType.Metalshop, RoomType.Tailoring, RoomType.Maintenance, RoomType.Shop, RoomType.PrintShop,
+    RoomType.ConstructionYard, RoomType.WasteYard] },
   { key: "utility", label: "Utility", types: [RoomType.Delivery, RoomType.Exports, RoomType.Solitary, RoomType.Empty] },
 ];
 
@@ -106,6 +108,7 @@ const CATS: Cat[] = [
     items: [
       personItem(Obj.Guard), personItem(Obj.Cook), personItem(Obj.Workman), personItem(Obj.Doctor),
       personItem(Obj.Investigator), personItem(Obj.DogHandler), personItem(Obj.ArmedGuard),
+      personItem(Obj.ChiefOfficer), personItem(Obj.Foreman), personItem(Obj.Accountant),
       personItem(Obj.SecurityDog),
       { label: "Baton", swatch: "#202024", tool: { cat: "baton", mat: 0 } },
     ],
