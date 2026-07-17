@@ -4,10 +4,10 @@ import { DIRS, NEEDS, Obj, RoomType, World, defOf } from "./sim/world";
 import {
   Agents, CARGO_KIND, DRIVER_KIND, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND,
   INTAKE_TRUCK_KIND, TRAY_STACK_KIND, TRUCK_KIND,
-  REG_NAMES, type Agent, type IssueLabel,
+  REG, REG_NAMES, type Agent, type IssueLabel,
 } from "./sim/agents";
 import {
-  PersonInstanceStager, foodInstances, holeInstances, knownOverlay, trayStackInstances,
+  PersonInstanceStager, foodInstances, holeInstances, trayStackInstances,
   logisticsInstances,
 } from "./sim/renderData";
 import { Item, countItem, itemDef } from "./sim/items";
@@ -38,6 +38,10 @@ import { InfrastructureSystem } from "./sim/infrastructure";
 import { KitchenSystem } from "./sim/kitchen";
 import { IntakeSystem } from "./sim/intake";
 import { commodityDef, recipeCost } from "./sim/commodities";
+import { Task2Systems } from "./sim/task2Systems";
+import { SAVE_VERSION, isSaveV4 } from "./sim/saveVersion";
+import { ITEM_DEFS_V4, itemDefV4 } from "./sim/itemSystem";
+import { incidentCategoryForItem } from "./sim/institution";
 import {
   APTITUDE_IDS, APTITUDE_NAMES, CUSTODY_COLORS, CUSTODY_NAMES,
   PERSONALITY_IDS, PERSONALITY_NAMES, SKILL_IDS, SKILL_NAMES, crimeName,
@@ -166,8 +170,13 @@ async function main() {
   const kitchen = new KitchenSystem(logistics);
   const intake = new IntakeSystem(economy);
   const infrastructure = new InfrastructureSystem(world);
+  const task2 = new Task2Systems(WORLD_SIZE, economy, logistics);
+  kitchen.physicalItems = task2.items;
   agents.construction = construction;
   agents.kitchen = kitchen;
+  agents.task2 = task2;
+  task2.social = agents.social;
+  task2.escapeOperations = agents.escapeOperations;
   const personStager = new PersonInstanceStager();
   let saveDirty = false;
 
@@ -191,6 +200,7 @@ async function main() {
     agents.sync(world); // person tiles placed by the editor come alive
     world.recomputeRoofs();
     world.recomputeRooms();
+    task2.rebuildWorld(world);
     roomLines.set(device, world.roomOutline());
     floors.setInstances(device, world.floorsByMat());
     walls.setInstances(device, world.wallsByMat());
@@ -247,12 +257,12 @@ async function main() {
 
   // World clock driving the day/night cycle; start at 08:00 on day 1.
   let worldTime = 8 * HOUR_SECONDS;
-  let loadedV3 = false;
+  let loadedV4 = false;
   let incompatibleSave = false;
   try {
     const res = await fetch("/api/save");
     const data = await res.json();
-    if (data?.version === 3 && data?.world && data?.agents) {
+    if (isSaveV4(data)) {
       world.loadData(data.world);
       infrastructure.loadData(data.infrastructure);
       agents.loadData(data.agents);
@@ -261,16 +271,18 @@ async function main() {
       construction.loadData(data.construction ?? {});
       kitchen.loadData(data.kitchen ?? {});
       intake.loadData(data.intake ?? {});
+      task2.loadData(data.task2 ?? {}, world);
       if (typeof data.worldTime === "number") worldTime = data.worldTime;
-      loadedV3 = true;
-    } else if (data?.world || data?.version === 1 || data?.version === 2) {
+      loadedV4 = true;
+    } else if (data?.world || [1, 2, 3].includes(data?.version)) {
       incompatibleSave = true;
     }
   } catch {
     // File-backed saves only exist in the Vite dev server.
   }
-  if (!loadedV3) {
+  if (!loadedV4) {
     infrastructure.installNewGame();
+    task2.installNewGame(world);
     camera.target = [368, 0, 375];
     camera.distance = 72;
   }
@@ -334,6 +346,8 @@ async function main() {
 
   const buildPanel = document.getElementById("build")!;
   const logisticsDashboard = document.getElementById("logisticsDashboard")!;
+  const financialsDashboard = document.getElementById("financialsDashboard")!;
+  const policyDashboard = document.getElementById("policyDashboard")!;
   const intelligenceDashboard = document.getElementById("intelligenceDashboard")!;
   let activeMode = "";
   document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((btn) => {
@@ -345,17 +359,25 @@ async function main() {
         buildPanel.classList.remove("open");
         editor.clear();
         logisticsDashboard.classList.remove("show");
+        financialsDashboard.classList.remove("show");
+        policyDashboard.classList.remove("show");
         intelligenceDashboard.classList.remove("show");
         return;
       }
       document.querySelectorAll(".mode-btn").forEach((x) => x.classList.remove("on"));
       btn.classList.add("on");
       activeMode = mode;
-      buildPanel.classList.toggle("open", !["logistics", "intelligence", "admin"].includes(mode));
+      buildPanel.classList.toggle("open", !["financials", "logistics", "intelligence", "policy", "admin"].includes(mode));
       editor.setMode(mode);
       logisticsDashboard.classList.toggle("show", mode === "logistics");
+      financialsDashboard.classList.toggle("show", mode === "financials");
+      policyDashboard.classList.toggle("show", mode === "policy");
       intelligenceDashboard.classList.toggle("show", mode === "intelligence");
     });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-emergency]").forEach((button) => button.onclick = () => {
+    task2.security.command((button.dataset.emergency ?? "none") as never, worldTime, agents.agents);
+    saveDirty = true;
   });
 
   // Roof transparency toggle.
@@ -379,8 +401,8 @@ async function main() {
   function isOrderTool(): boolean {
     const cat = editor.tool?.cat;
     return !!cat && [
-      "floor", "wall", "fence", "door", "jaildoor", "fencedoor",
-      "fencejaildoor", "lamp", "walllight", "rooflight", "piece", "erase",
+      "floor", "wall", "fence", "door", "staffdoor", "jaildoor", "fencedoor",
+      "fencestaffdoor", "fencejaildoor", "lamp", "walllight", "rooflight", "piece", "erase",
     ].includes(cat);
   }
 
@@ -402,10 +424,10 @@ async function main() {
     if (dragPlaced.has(key)) return;
     dragPlaced.add(key);
     const cat = editor.tool?.cat;
-    if (cat === "guard" || cat === "cook" || cat === "workman") {
+    if (cat === "guard" || cat === "cook" || cat === "workman" || cat === "person") {
       const i = world.idx(tx, tz);
       if (world.objKind[i] !== Obj.None || world.pieceAt[i] !== 0 || world.infrastructure[i]) return;
-      const kind = cat === "guard" ? Obj.Guard : cat === "cook" ? Obj.Cook : Obj.Workman;
+      const kind = cat === "person" ? editor.tool!.mat : cat === "guard" ? Obj.Guard : cat === "cook" ? Obj.Cook : Obj.Workman;
       if (!economy.hire(kind, worldTime)) return;
     }
     if (!isOrderTool() && editor.apply(world, tx, tz)) { dirty = true; saveDirty = true; }
@@ -596,6 +618,9 @@ async function main() {
   const inspectState = document.getElementById("inspectState")!;
   const inspectStats = document.getElementById("inspectStats")!;
   const inspectProfile = document.getElementById("inspectProfile")!;
+  const agentKindName = (kind: number): string => ({ [Obj.Prisoner]: "Prisoner", [Obj.Guard]: "Guard", [Obj.Cook]: "Cook",
+    [Obj.Workman]: "Workman", [Obj.Doctor]: "Doctor", [Obj.Investigator]: "Investigator", [Obj.DogHandler]: "Dog Handler",
+    [Obj.ArmedGuard]: "Armed Guard", [Obj.SecurityDog]: "Security Dog", [Obj.Sniper]: "Sniper" }[kind] ?? "Staff");
   const inspectValues = new Map<string, HTMLElement>();
   for (const label of ["Food", "Rest", "Comfort", "Outdoors", "Social", "Stress"]) {
     const stat = document.createElement("div");
@@ -609,9 +634,10 @@ async function main() {
   }
   function updateInspector() {
     if (!selected) { inspector.classList.remove("show"); return; }
-    const kind = selected.kind === 8 ? "Prisoner" : selected.kind === 9 ? "Guard" : selected.kind === 20 ? "Cook" : "Workman";
+    const kind = agentKindName(selected.kind);
     const pct = (v: number) => `${Math.round(v * 100)}%`;
     const profile = selected.profile;
+    inspectStats.style.display = "none"; // exact private needs/emotions belong to developer diagnostics, not player intelligence
     const name = profile ? `${profile.firstName} ${profile.lastName}` : `${kind} #${selected.id}`;
     const socialAction = selected.socialAction === "arguing" ? " · arguing" : selected.socialAction === "talking" ? " · socializing" : "";
     const state = (STATE_TEXT[selected.state] ?? selected.state) + socialAction;
@@ -628,13 +654,10 @@ async function main() {
     setValue("Social", pct(selected.needs.social));
     setValue("Stress", selected.mind ? pct(selected.mind.stress) : "—");
     if (profile) {
-      const op = agents.escapeOperations.operationFor(selected);
-      const clique = agents.social.cliqueFor(selected.id);
       inspectProfile.textContent = `${CUSTODY_NAMES[profile.custody]} · ${crimeName(profile.conviction.crimeId)}\n` +
-        `${profile.labels.slice(0, 3).join(" · ")}\n` +
-        `INT ${profile.aptitudes.intelligence}  STR ${profile.aptitudes.strength}  CHA ${profile.aptitudes.charisma}` +
-        (clique ? `\nclique ${clique.id} · ${clique.members.length} inmates` : "") +
-        (op ? `\nplot ${agents.escapeOperations.operationSummary(op.id)}` : "");
+        `Sentence ${profile.sentenceMonths} months · ${profile.servedMonths} served\n` +
+        `${task2.institution.knownAssessment(selected.id).cases} active intelligence case(s)` +
+        (selected.protectiveCustody ? " · Protective Custody" : "");
     } else inspectProfile.textContent = "";
     inspector.classList.add("show");
   }
@@ -652,7 +675,7 @@ async function main() {
   function profileBar(label: string, value: number, max = 10): string {
     return `<div class="profile-row"><span>${html(label)}</span><span class="profile-bar"><i style="width:${Math.round(value / max * 100)}%"></i></span><b>${Math.round(value)}</b></div>`;
   }
-  function updateIntelligenceUi(): void {
+  function updateDebugIntelligenceUi(): void {
     const query = intelSearch.value.trim().toLowerCase();
     const prisoners = agents.agents.filter((a) => a.kind === Obj.Prisoner && a.profile).sort((a, b) => a.id - b.id);
     intelRoster.innerHTML = prisoners.filter((a) => {
@@ -664,7 +687,7 @@ async function main() {
     }).join("") || `<div class="profile-sub">No matching inmates.</div>`;
     intelRoster.querySelectorAll<HTMLButtonElement>("[data-agent]").forEach((el) => el.onclick = () => selectIntelligenceAgent(Number(el.dataset.agent)));
     if (!selected?.profile) {
-      intelProfile.innerHTML = `<div class="profile-title">Select an inmate</div><div class="profile-sub">Profiles, social ties, intelligence, and escape operations are fully visible.</div>`;
+      intelProfile.innerHTML = `<div class="profile-title">Developer diagnostic</div><div class="profile-sub">This renderer is not connected to the normal player interface.</div>`;
       return;
     }
     const p = selected.profile, mind = selected.mind!;
@@ -696,6 +719,41 @@ async function main() {
       `<div class="profile-section"><h3>Social${clique ? ` · Clique ${clique.id} (${clique.members.length})` : ""}</h3><ul class="profile-list">${relationRows}</ul></div>` +
       `<div class="profile-section"><h3>Intelligence</h3><ul class="profile-list">${factRows}</ul></div>` +
       `<div class="profile-section"><h3>Escape operation</h3>${op ? `<div class="profile-sub">${html(agents.escapeOperations.operationSummary(op.id))}<br>${html(op.blocker || "No current blocker")} · cache ${op.cache.spoons} spoons / ${op.cache.cutters} cutters</div><ul class="profile-list">${operationRows}</ul>` : `<div class="profile-sub">No active operation.</div>`}</div>`;
+  }
+  void updateDebugIntelligenceUi; // retained as an unreachable developer diagnostic renderer
+  function updateIntelligenceUi(): void {
+    const query = intelSearch.value.trim().toLowerCase();
+    const prisoners = agents.agents.filter((a) => a.kind === Obj.Prisoner && a.profile).sort((a, b) => a.id - b.id);
+    intelRoster.innerHTML = prisoners.filter((a) => {
+      const p = a.profile!;
+      return !query || `${p.firstName} ${p.lastName} ${crimeName(p.conviction.crimeId)} ${p.custody}`.toLowerCase().includes(query);
+    }).map((a) => {
+      const p = a.profile!, color = CUSTODY_COLORS[p.custody].map((v) => Math.round(v * 255));
+      const known = task2.institution.knownAssessment(a.id);
+      return `<button class="intel-person${selected?.id === a.id ? " on" : ""}" data-agent="${a.id}"><strong><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</strong><small>${CUSTODY_NAMES[p.custody]}${a.protectiveCustody ? " / Protective" : ""} · ${html(crimeName(p.conviction.crimeId))} · ${known.cases} case(s)</small></button>`;
+    }).join("") || `<div class="profile-sub">No matching official records.</div>`;
+    intelRoster.querySelectorAll<HTMLButtonElement>("[data-agent]").forEach((el) => el.onclick = () => selectIntelligenceAgent(Number(el.dataset.agent)));
+    if (!selected?.profile) {
+      intelProfile.innerHTML = `<div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and sourced staff intelligence are shown. Traits, private relationships, money, stashes, gangs, and escape plans are not omnisciently exposed.</div>`;
+      return;
+    }
+    const p = selected.profile, color = CUSTODY_COLORS[p.custody].map((v) => Math.round(v * 255));
+    const cases = [...task2.institution.cases.values()].filter((c) => c.subjectIds.includes(selected!.id) && c.status !== "resolved");
+    const caseRows = cases.map((c) => {
+      const evidence = c.evidenceIds.map((id) => task2.institution.evidence.get(id)).filter((e) => e?.shared)
+        .map((e) => `<li>${html(e!.summary)} · ${Math.round(e!.confidence * 100)}% · ${html(e!.sourceType)}</li>`).join("");
+      return `<div class="matrix-row"><header><strong>${html(c.title)}</strong><span>${Math.round(c.confidence * 100)}% · ${c.status}</span></header><ul class="profile-list">${evidence || "<li>No shared evidence.</li>"}</ul>${c.alternatives.length ? `<small>Alternative: ${html(c.alternatives[0])}</small>` : ""}</div>`;
+    }).join("") || `<div class="profile-sub">No evidence-backed active cases.</div>`;
+    const discipline = task2.institution.punishments.filter((o) => o.prisonerId === selected!.id)
+      .map((o) => `<li>${html(task2.institution.incidents.get(o.incidentId)?.category ?? "incident")} · ${o.state}${o.search !== "none" ? ` · ${o.search} search` : ""}${o.interrogate ? " · interview" : ""}</li>`).join("") || `<li>No formal discipline.</li>`;
+    const medical = task2.health.state(selected.id);
+    const formalInjuries = medical?.injuries.filter((i) => i.treated).map((i) => `${i.region} ${i.type}`).join(", ") || "No treated injuries on record";
+    intelProfile.innerHTML = `<div class="profile-title"><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</div>` +
+      `<div class="profile-sub">Inmate #${selected.id} · ${CUSTODY_NAMES[p.custody]} custody${selected.protectiveCustody ? " · Protective Custody" : ""} · age ${p.age} · ${p.sentenceMonths} month sentence (${p.servedMonths} served)</div>` +
+      `<div class="profile-section"><h3>Official record</h3><ul class="profile-list"><li>Current conviction: ${html(crimeName(p.conviction.crimeId))}, ${p.conviction.sentenceMonths} months</li>${p.priors.map((r) => `<li>Prior at age ${r.ageAtConviction}: ${html(crimeName(r.crimeId))}, ${r.sentenceMonths} months</li>`).join("") || "<li>No prior convictions.</li>"}<li>Medical: ${html(formalInjuries)}</li></ul></div>` +
+      `<div class="profile-section"><h3>Case assessments</h3><div class="matrix">${caseRows}</div></div>` +
+      `<div class="profile-section"><h3>Formal discipline</h3><ul class="profile-list">${discipline}</ul></div>` +
+      `<div class="profile-section"><h3>Information limits</h3><div class="profile-sub">Unreported traits, emotions, affiliations, relationships, possessions, contacts, caches, and plans remain unknown. Confidence reflects shared evidence, not ground truth.</div></div>`;
   }
   intelSearch.addEventListener("input", updateIntelligenceUi);
 
@@ -806,7 +864,7 @@ async function main() {
     delivering: "Stocking the serving table", toServeDuty: "Taking serving duty",
     manning: "Serving meals", toJob: "Heading to a repair job", repairing: "Repairing",
   };
-  function tipText(ag: Agent): string {
+  function debugTipText(ag: Agent): string {
     const kind = ag.kind === 8 ? "Prisoner" : ag.kind === 9 ? "Guard" :
       ag.kind === 20 ? "Cook" : "Workman";
     const doing = STATE_TEXT[ag.state] ?? ag.state;
@@ -850,6 +908,19 @@ async function main() {
         (ag.timesCaught > 0 ? ` · caught ${ag.timesCaught}x` : "");
     }
     return s;
+  }
+  void debugTipText;
+  function tipText(ag: Agent): string {
+    const staffNames: Record<number, string> = { [Obj.Guard]: "Guard", [Obj.Cook]: "Cook", [Obj.Workman]: "Workman",
+      [Obj.Doctor]: "Doctor", [Obj.Investigator]: "Investigator", [Obj.DogHandler]: "Dog Handler",
+      [Obj.ArmedGuard]: "Armed Guard", [Obj.SecurityDog]: "Security Dog", [Obj.Sniper]: "Sniper" };
+    const kind = ag.kind === Obj.Prisoner ? "Prisoner" : staffNames[ag.kind] ?? "Staff";
+    const identity = ag.profile ? `${ag.profile.firstName} ${ag.profile.lastName}\n${CUSTODY_NAMES[ag.profile.custody]} · ${crimeName(ag.profile.conviction.crimeId)}` : `${kind} #${ag.id}`;
+    const cases = task2.institution.knownAssessment(ag.id).cases;
+    const visible = task2.items.itemsIn(`agent:${ag.id}:hands`).map((item) => itemDefV4(item.defId).name);
+    return `${identity}\n${STATE_TEXT[ag.state] ?? ag.state}${ag.socialAction !== "none" ? ` · ${ag.socialAction}` : ""}` +
+      (ag.cuffed ? " · restrained" : "") + (cases ? `\n${cases} evidence-backed case(s)` : "") +
+      (visible.length ? `\nVisible in hands: ${visible.join(", ")}` : "");
   }
   canvas.addEventListener("mousemove", (e) => {
     const rect = canvas.getBoundingClientRect();
@@ -904,7 +975,7 @@ async function main() {
     }
     if (incompatibleSave) issues.push({
       id: "save-v1", x: 366, z: 375,
-      issue: "The older save is incompatible. This is a fresh version 3 prisoner-social world.",
+      issue: "The older save is incompatible. This is a fresh version 4 institutional-simulation world.",
     });
     let warningI = 0;
     const activeOrders = [...construction.groups.values()].some((group) => group.state !== "complete" && group.state !== "cancelled");
@@ -936,6 +1007,9 @@ async function main() {
       id: `intake-${warningI++}`, x: 374.5, z: 370.5 + warningI,
       issue: warning,
     });
+    for (const warning of task2.warnings) issues.push({
+      id: `task2-${warningI++}`, x: 369.5, z: 376.5 + warningI, issue: warning,
+    });
     worldOverlay.updateData(rooms, issues, agents.prisonerCount(), world.prisonerCapacity());
   }
 
@@ -949,7 +1023,7 @@ async function main() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          version: 3,
+          version: SAVE_VERSION,
           savedAt: new Date().toISOString(),
           worldTime,
           world: world.saveData(),
@@ -960,6 +1034,7 @@ async function main() {
           construction: construction.saveData(),
           kitchen: kitchen.saveData(),
           intake: intake.saveData(),
+          task2: task2.saveData(),
         }),
       });
       saveDirty = false;
@@ -1084,7 +1159,7 @@ async function main() {
   let logisticsRenderT = 0;
   let ghostRenderT = 0;
 
-  function updateLogisticsUi(): void {
+  function updateLegacyLogisticsUi(): void {
     const lines = logistics.stockLines();
     const stockRows = lines.length > 0 ? lines.map((line) =>
       `<tr><td>${commodityDef(line.commodity).name}</td><td>${line.available}</td><td>${line.inTransit}</td><td>${line.reserved}</td></tr>`).join("")
@@ -1119,6 +1194,112 @@ async function main() {
       });
       detail.textContent = `$${recipeCost(recipe).toLocaleString()} · ${parts.join(", ")}`;
     }
+  }
+
+  void updateLegacyLogisticsUi;
+  let logisticsTab: "shipments" | "deployment" | "access" | "work" = "shipments";
+  const logisticsTabs = ["shipments", "deployment", "access", "work"] as const;
+  function tabBar(): string { return `<div class="dash-tabs">${logisticsTabs.map((tab) => `<button class="dash-tab${logisticsTab === tab ? " on" : ""}" data-logtab="${tab}">${tab}</button>`).join("")}</div>`; }
+
+  function updateLogisticsUi(): void {
+    let body = "";
+    if (logisticsTab === "shipments") {
+      const lines = logistics.stockLines();
+      const stockRows = lines.length ? lines.map((line) => `<tr><td>${html(commodityDef(line.commodity).name)}</td><td>${line.available}</td><td>${line.inTransit}</td><td>${line.reserved}</td></tr>`).join("") : `<tr><td colspan="4">No stock ordered</td></tr>`;
+      const blocked = logistics.trucks.filter((truck) => truck.state === "blocked").length + intake.vehicles.filter((vehicle) => vehicle.state === "waiting" && vehicle.warning).length;
+      body = `<div class="log-summary"><div class="log-kpi"><small>Vehicles</small><strong>${logistics.trucks.length + intake.vehicles.length}</strong></div><div class="log-kpi"><small>Blocked</small><strong>${blocked}</strong></div><div class="log-kpi"><small>Unique items</small><strong>${[...task2.items.items.values()].filter((i) => i.locationKind !== "destroyed").length}</strong></div></div>` +
+        `<table class="log-table"><thead><tr><th>Commodity</th><th>Here</th><th>Transit</th><th>Reserved</th></tr></thead><tbody>${stockRows}</tbody></table>` +
+        `<div class="log-ledger">Controlled discrepancies: ${task2.items.controlledDiscrepancies().length} · Export credit expected: $${Math.round(logistics.expectedExportCredit())}</div>`;
+    } else if (logisticsTab === "deployment") {
+      const roles = ["guard", "armed-guard", "investigator", "dog-handler", "doctor", "cook", "workman"] as const;
+      body = `<div class="profile-sub">Set persistent staffing by structural area. Fatigued staff temporarily leave their assignment open for a qualified spare.</div><div class="matrix">` +
+        [...task2.areas.areas.values()].sort((a, b) => a.id - b.id).map((area) => {
+          const row = task2.security.deploymentTargets.get(area.id) ?? {};
+          return `<div class="matrix-row"><header><strong>Area ${area.id}${area.exterior ? " · Exterior" : ""}</strong><span>${area.tiles.size.toLocaleString()} tiles</span></header><div class="toggle-grid">${roles.map((role) => {
+            const n = row[role] ?? 0; return `<span>${role} <button class="tiny-btn" data-deploy="${area.id}:${role}:-1">−</button> <b>${n}</b> <button class="tiny-btn" data-deploy="${area.id}:${role}:1">+</button></span>`;
+          }).join("")}</div></div>`;
+        }).join("") + `</div>`;
+    } else if (logisticsTab === "access") {
+      const roles = ["prisoner", "worker", "guard", "armed-guard", "investigator", "dog-handler", "doctor", "cook", "workman", "staff", "driver", "visitor"] as const;
+      const custody = ["minimum", "medium", "maximum", "supermax", "protective"] as const;
+      body = `<div class="profile-sub">Access is binary by structural area. With mixing disabled, the first admitted custody class reserves the area until it empties.</div><div class="matrix">` +
+        [...task2.areas.areas.values()].sort((a, b) => a.id - b.id).map((area) => {
+          const p = task2.areas.access.get(area.id)!;
+          return `<div class="matrix-row"><header><strong>Area ${area.id}${area.exterior ? " · Exterior" : ""}</strong><label>Mixed <input type="checkbox" data-area-mixed="${area.id}" ${p.mixed ? "checked" : ""}></label></header>` +
+            `<div class="toggle-grid">${custody.map((c) => `<label><input type="checkbox" data-area-custody="${area.id}:${c}" ${p.custody[c] ? "checked" : ""}>${c}</label>`).join("")}</div>` +
+            `<div class="toggle-grid">${roles.map((r) => `<label><input type="checkbox" data-area-role="${area.id}:${r}" ${p.roles[r] ? "checked" : ""}>${r}</label>`).join("")}</div>` +
+            (!p.mixed && p.reservedCustody ? `<small>Reserved now: ${p.reservedCustody}</small>` : "") + `</div>`;
+        }).join("") + `</div>`;
+    } else {
+      const workplaces = [...task2.work.workplaces.values()].sort((a, b) => a.roomId - b.roomId);
+      const workerRows = agents.agents.filter((a) => a.kind === Obj.Prisoner && a.profile).sort((a, b) => a.id - b.id).map((agent) => {
+        const current = task2.work.assignments.get(agent.id) ?? -1;
+        return `<div class="matrix-row"><header><strong>${html(`${agent.profile!.firstName} ${agent.profile!.lastName}`)}</strong><span>${CUSTODY_NAMES[agent.profile!.custody]}</span></header><select class="work-select" data-work-agent="${agent.id}"><option value="-1">Unassigned</option>${workplaces.map((w) => `<option value="${w.roomId}" ${current === w.roomId ? "selected" : ""}>${html(w.jobId)} · room ${w.roomId} (${w.assigned.length}/${w.capacity})</option>`).join("")}</select></div>`;
+      }).join("");
+      body = `<div class="matrix">${workplaces.map((w) => `<div class="matrix-row"><header><strong>${html(w.jobId)} · room ${w.roomId}</strong><span>${w.active.length}/${w.assigned.length}/${w.capacity} active/assigned/capacity</span></header><label>Supervision <select class="work-select" data-supervision="${w.roomId}">${["none", "periodic", "constant"].map((s) => `<option ${w.supervision === s ? "selected" : ""}>${s}</option>`).join("")}</select></label>${w.blocked ? `<small>${html(w.blocked)}</small>` : ""}</div>`).join("")}</div><div class="profile-section"><h3>Inmate assignments</h3><div class="matrix">${workerRows || "No inmates available."}</div></div>`;
+    }
+    logisticsDashboard.innerHTML = `<div class="log-title">Institutional logistics</div>${tabBar()}${body}`;
+    logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-logtab]").forEach((button) => button.onclick = () => { logisticsTab = button.dataset.logtab as typeof logisticsTab; updateLogisticsUi(); });
+    logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-deploy]").forEach((button) => button.onclick = () => {
+      const [area, role, delta] = button.dataset.deploy!.split(":"); const row = task2.security.deploymentTargets.get(Number(area)) ?? {};
+      task2.security.setDeployment(Number(area), role as never, (row[role as keyof typeof row] ?? 0) + Number(delta)); saveDirty = true; updateLogisticsUi();
+    });
+    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-mixed]").forEach((input) => input.onchange = () => { task2.areas.access.get(Number(input.dataset.areaMixed))!.mixed = input.checked; saveDirty = true; });
+    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-custody]").forEach((input) => input.onchange = () => { const [area, key] = input.dataset.areaCustody!.split(":"); (task2.areas.access.get(Number(area))!.custody as Record<string, boolean>)[key] = input.checked; saveDirty = true; });
+    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-role]").forEach((input) => input.onchange = () => { const [area, key] = input.dataset.areaRole!.split(":"); (task2.areas.access.get(Number(area))!.roles as Record<string, boolean>)[key] = input.checked; saveDirty = true; });
+    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-work-agent]").forEach((select) => select.onchange = () => { const id = Number(select.dataset.workAgent); task2.work.unassign(id); if (Number(select.value) >= 0) task2.work.assign(id, Number(select.value)); saveDirty = true; });
+    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-supervision]").forEach((select) => select.onchange = () => { const w = task2.work.workplaces.get(Number(select.dataset.supervision)); if (w) w.supervision = select.value as never; saveDirty = true; });
+    const detail = document.querySelector<HTMLElement>("#detailCost strong");
+    if (detail && editor.tool && isOrderTool()) { const recipe = construction.estimate(editor.tool, Math.max(1, orderTargets().length)); detail.textContent = `$${recipeCost(recipe).toLocaleString()} · ${Object.entries(recipe).map(([id, n]) => `${commodityDef(id).name} ${Math.max(0, logistics.quantity(id) - logistics.reserved(id))}/${n}`).join(", ")}`; }
+  }
+
+  function updateFinancialsUi(): void {
+    const daily = new Map<string, number>(); for (const entry of economy.ledger) if (entry.time >= worldTime - HOUR_SECONDS * 24) daily.set(entry.kind, (daily.get(entry.kind) ?? 0) + entry.amount);
+    const recent = economy.ledger.slice(-30).reverse().map((entry) => `<tr><td>${clockLabel(entry.time)}</td><td>${html(entry.kind)}</td><td>${html(entry.memo)}</td><td>${entry.amount >= 0 ? "+" : "−"}$${Math.abs(Math.round(entry.amount))}</td></tr>`).join("");
+    financialsDashboard.innerHTML = `<div class="log-title">Financials</div><div class="log-summary"><div class="log-kpi"><small>Cash</small><strong>${economy.cash < 0 ? "−" : ""}$${Math.abs(Math.round(economy.cash)).toLocaleString()}</strong></div><div class="log-kpi"><small>Net / hour</small><strong>$${economy.netHourly()}</strong></div><div class="log-kpi"><small>Performance</small><strong>${Math.round(economy.performanceMultiplier * 100)}%</strong></div></div>` +
+      `<table class="log-table"><thead><tr><th>Last 24 hours</th><th>Net</th></tr></thead><tbody>${[...daily].map(([k, v]) => `<tr><td>${html(k)}</td><td>${v >= 0 ? "+" : "−"}$${Math.abs(Math.round(v))}</td></tr>`).join("")}</tbody></table>` +
+      `<div class="profile-section"><h3>Ledger</h3><table class="log-table"><thead><tr><th>Time</th><th>Type</th><th>Memo</th><th>Amount</th></tr></thead><tbody>${recent || `<tr><td colspan="4">No entries</td></tr>`}</tbody></table></div>`;
+  }
+
+  function updatePolicyUi(): void {
+    const option = (value: string, current: string) => `<option ${value === current ? "selected" : ""}>${value}</option>`;
+    const baseRules = task2.institution.rules.filter((r) => !r.itemDefId);
+    const itemPolicies = ITEM_DEFS_V4.filter((def) => def.legality !== "legal" || def.controlled).map((def) => {
+      const category = incidentCategoryForItem(def.id);
+      return { def, category, rule: task2.institution.ruleFor(category, def.id),
+        overridden: task2.institution.rules.some((r) => r.category === category && r.itemDefId === def.id) };
+    });
+    policyDashboard.innerHTML = `<div class="log-title">Policy</div><div class="profile-sub">Automatic responses execute only after the configured evidence threshold is met. Item-specific overrides inherit these category defaults.</div>` +
+      `<div class="policy-row"><b>Incident</b><b>Evidence</b><b>Force ceiling</b><b>Search</b><b>Hours</b><b>Interview</b><b>Custody ↑</b><b>Protect</b></div>` +
+      baseRules.map((r, index) => `<div class="policy-row"><strong>${html(r.category)}</strong>` +
+        `<select data-policy="${index}:threshold">${["suspected", "probable", "confirmed"].map((v) => option(v, r.threshold)).join("")}</select>` +
+        `<select data-policy="${index}:force">${["order", "restraint", "baton", "spray", "taser", "dog", "riot", "less-lethal", "lethal"].map((v) => option(v, r.force)).join("")}</select>` +
+        `<select data-policy="${index}:search">${["none", "person", "cell", "workplace", "targeted", "full"].map((v) => option(v, r.search)).join("")}</select>` +
+        `<input type="number" min="0" max="72" value="${r.solitaryHours}" data-policy="${index}:solitaryHours">` +
+        `<input type="checkbox" ${r.interrogate ? "checked" : ""} data-policy="${index}:interrogate"><input type="checkbox" ${r.custodyUp ? "checked" : ""} data-policy="${index}:custodyUp"><input type="checkbox" ${r.protectiveOffer ? "checked" : ""} data-policy="${index}:protectiveOffer">` +
+        `<input type="checkbox" ${r.confiscate ? "checked" : ""} data-policy="${index}:confiscate"><input type="checkbox" ${r.medicalCheck ? "checked" : ""} data-policy="${index}:medicalCheck"></div>`).join("") +
+      `<div class="profile-section"><h3>Item-specific responses</h3><div class="profile-sub">Changing a field creates an override; unchanged rows inherit their listed incident category.</div>` +
+      `<div class="policy-row"><b>Item / category</b><b>Evidence</b><b>Force ceiling</b><b>Search</b><b>Hours</b><b>Interview</b><b>Custody up</b><b>Protect</b><b>Seize</b><b>Medical</b></div>` +
+      itemPolicies.map(({ def, category, rule: r, overridden }, index) => `<div class="policy-row"><strong>${html(def.name)}<small>${html(category)}${overridden ? " · override" : " · inherited"}</small></strong>` +
+        `<select data-item-policy="${index}:threshold">${["suspected", "probable", "confirmed"].map((v) => option(v, r.threshold)).join("")}</select>` +
+        `<select data-item-policy="${index}:force">${["order", "restraint", "baton", "spray", "taser", "dog", "riot", "less-lethal", "lethal"].map((v) => option(v, r.force)).join("")}</select>` +
+        `<select data-item-policy="${index}:search">${["none", "person", "cell", "workplace", "targeted", "full"].map((v) => option(v, r.search)).join("")}</select>` +
+        `<input type="number" min="0" max="72" value="${r.solitaryHours}" data-item-policy="${index}:solitaryHours">` +
+        `<input type="checkbox" ${r.interrogate ? "checked" : ""} data-item-policy="${index}:interrogate"><input type="checkbox" ${r.custodyUp ? "checked" : ""} data-item-policy="${index}:custodyUp"><input type="checkbox" ${r.protectiveOffer ? "checked" : ""} data-item-policy="${index}:protectiveOffer">` +
+        `<input type="checkbox" ${r.confiscate ? "checked" : ""} data-item-policy="${index}:confiscate"><input type="checkbox" ${r.medicalCheck ? "checked" : ""} data-item-policy="${index}:medicalCheck"></div>`).join("") + `</div>` +
+      `<div class="profile-section"><h3>Mail inspection</h3><select class="work-select" id="mailInspection">${["none", "sample", "all"].map((v) => option(v, task2.market.mailInspection)).join("")}</select></div>`;
+    const categoryHeader = policyDashboard.querySelector<HTMLElement>(".policy-row");
+    if (categoryHeader?.children.length === 8) categoryHeader.insertAdjacentHTML("beforeend", "<b>Seize</b><b>Medical</b>");
+    policyDashboard.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-policy]").forEach((input) => input.onchange = () => {
+      const [indexText, field] = input.dataset.policy!.split(":"), rule = baseRules[Number(indexText)] as unknown as Record<string, unknown>;
+      rule[field] = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : field === "solitaryHours" ? Number(input.value) : input.value; saveDirty = true;
+    });
+    policyDashboard.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-item-policy]").forEach((input) => input.onchange = () => {
+      const [indexText, field] = input.dataset.itemPolicy!.split(":"), row = itemPolicies[Number(indexText)];
+      const value = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : field === "solitaryHours" ? Number(input.value) : input.value;
+      task2.institution.setItemOverride(row.category, row.def.id, { [field]: value }); saveDirty = true;
+    });
+    const mail = policyDashboard.querySelector<HTMLSelectElement>("#mailInspection"); if (mail) mail.onchange = () => { task2.market.mailInspection = mail.value as never; saveDirty = true; };
   }
 
   function frame(now: number) {
@@ -1156,6 +1337,8 @@ async function main() {
         ...logistics.trucks.filter((truck) => truck.state === "arriving" || truck.state === "departing").map((truck) => truck.z),
         ...intake.vehicles.filter((vehicle) => vehicle.state === "arriving" || vehicle.state === "departing").map((vehicle) => vehicle.z),
       ];
+      task2.tick(step, worldTime, world, agents.agents,
+        agents.currentActivity() === REG.Work, agents.currentActivity() === REG.RollCall);
       agents.update(step, world, isNightAt(worldTime), hourOf(worldTime), worldTime);
       simDt -= step;
     }
@@ -1186,7 +1369,12 @@ async function main() {
     }
     if (netHourlyEl && netHourlyEl.textContent !== netText) netHourlyEl.textContent = netText;
     logisticsUiT -= dt;
-    if (logisticsUiT <= 0) { logisticsUiT = 0.5; updateLogisticsUi(); }
+    if (logisticsUiT <= 0) {
+      logisticsUiT = 0.5;
+      if (activeMode === "logistics") updateLogisticsUi();
+      else if (activeMode === "financials") updateFinancialsUi();
+      else if (activeMode === "policy") updatePolicyUi();
+    }
     intelligenceUiT -= dt;
     if (intelligenceUiT <= 0) { intelligenceUiT = 0.5; if (activeMode === "intelligence") updateIntelligenceUi(); }
     logisticsRenderT -= dt;
@@ -1222,7 +1410,12 @@ async function main() {
       }
     } else if (selected && overlayT <= 0) {
       overlayT = 0.5;
-      overlay.set(device, knownOverlay(selected, world, agents));
+      const points: number[] = [];
+      for (const c of task2.institution.cases.values()) if (c.subjectIds.includes(selected.id)) for (const incidentId of c.incidentIds) {
+        const incident = task2.institution.incidents.get(incidentId);
+        if (incident) points.push(Math.floor(incident.x), Math.floor(incident.z), 7);
+      }
+      overlay.set(device, new Float32Array(points));
     } else if (!selected && staffLayerWasUp) {
       overlay.clear();
     }

@@ -1,7 +1,8 @@
 import { HOUR_SECONDS, dayOf, hourOf } from "./time.ts";
 import { Obj } from "./objects.ts";
 
-export type LedgerKind = "grant" | "wage" | "purchase" | "loss" | "fee" | "export" | "interest" | "hire";
+export type LedgerKind = "grant" | "wage" | "work-wage" | "work" | "shop" | "medical" | "security" |
+  "purchase" | "loss" | "fee" | "export" | "interest" | "hire";
 
 export interface LedgerEntry {
   id: number;
@@ -14,9 +15,12 @@ export interface LedgerEntry {
 
 const WAGES = new Map<number, number>([
   [Obj.Guard, 8], [Obj.Cook, 6], [Obj.Workman, 6], [Obj.Sniper, 12],
+  [Obj.Doctor, 14], [Obj.Investigator, 10], [Obj.DogHandler, 10], [Obj.ArmedGuard, 16],
 ]);
 const HIRE_FEES = new Map<number, number>([
   [Obj.Guard, 500], [Obj.Cook, 400], [Obj.Workman, 400],
+  [Obj.Doctor, 800], [Obj.Investigator, 700], [Obj.DogHandler, 700], [Obj.ArmedGuard, 1200],
+  [Obj.SecurityDog, 750],
 ]);
 
 export class EconomySystem {
@@ -108,5 +112,10 @@ function staffName(kind: number): string {
   if (kind === Obj.Guard) return "guard";
   if (kind === Obj.Cook) return "cook";
   if (kind === Obj.Workman) return "workman";
+  if (kind === Obj.Doctor) return "doctor";
+  if (kind === Obj.Investigator) return "investigator";
+  if (kind === Obj.DogHandler) return "dog handler";
+  if (kind === Obj.ArmedGuard) return "armed guard";
+  if (kind === Obj.SecurityDog) return "security dog";
   return "staff member";
 }

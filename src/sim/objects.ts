@@ -39,6 +39,19 @@ export const Obj = {
   // --- Logistics / reception ---
   LoadingPallet: 55, Freezer: 56, Sink: 57, SearchTable: 58, UniformRack: 59,
   SecureBridge: 60,
+  // --- Task 2 access + staff ---
+  StaffDoor: 61, StaffFenceDoor: 62,
+  Doctor: 63, Investigator: 64, DogHandler: 65, ArmedGuard: 66, SecurityDog: 67,
+  // --- Task 2 medical + security objects ---
+  MedicalBed: 68, TreatmentTable: 69, MedicineCabinet: 70, MorgueSlab: 71,
+  CCTV: 72, MonitorBank: 73, RemoteDoorDesk: 74, AlarmPanel: 75, Recorder: 76,
+  WeaponLocker: 77, KennelStall: 78, OfficeDesk: 79, InterviewTable: 80,
+  MetalDetector: 81, Searchlight: 82, RazorWire: 83,
+  // --- Task 2 workplaces ---
+  Washer: 84, Dryer: 85, IroningTable: 86, MailSorter: 87,
+  GreenhousePlanter: 88, PottingBench: 89, JanitorCart: 90, RecyclingSorter: 91,
+  WoodWorkbench: 92, MetalWorkbench: 93, SewingMachine: 94, MaintenanceBench: 95,
+  ShopShelf: 96, ShopCounter: 97, PrintPress: 98, PayrollSafe: 99, LaundryBasket: 100,
 } as const;
 export type ObjKind = (typeof Obj)[keyof typeof Obj];
 
@@ -50,12 +63,14 @@ export const POSE_STAND = 0, POSE_SIT = 2, POSE_LIE_BED = 3, POSE_LIE_FLOOR = 4,
 
 export type NeedName =
   | "food" | "sleep" | "outdoors" | "comfort" | "hygiene"
-  | "recreation" | "exercise" | "bladder" | "spirituality" | "social";
+  | "recreation" | "exercise" | "bladder" | "spirituality" | "social"
+  | "family" | "safety" | "privacy" | "tobacco" | "alcohol" | "drugs";
 
 /** Every need, in HUD order. Adding one here and to NeedName is the whole job. */
 export const NEEDS: NeedName[] = [
   "food", "sleep", "outdoors", "comfort", "hygiene",
   "recreation", "exercise", "bladder", "spirituality", "social",
+  "family", "safety", "privacy", "tobacco", "alcohol", "drugs",
 ];
 
 /** How a kind gets onto the map, which decides which world setter owns it. */
@@ -480,6 +495,51 @@ export const OBJ_DEFS: ObjDef[] = [
     palette: { label: "Secure Bridge", swatch: "#59636b", group: "Security" },
   }),
 
+  // --- Task 2 access -------------------------------------------------------
+  def(Obj.StaffDoor, "Staff Door", {
+    place: "opening", walkable: true, blocksSight: true, roomBarrier: true, roofBarrier: true,
+    render: "furniture", palette: { label: "Staff Door", swatch: "#557b8d", group: "Doors" },
+  }),
+  def(Obj.StaffFenceDoor, "Staff Fence Gate", {
+    place: "opening", walkable: true, roomBarrier: true, render: "furniture",
+    palette: { label: "Staff Fence Gate", swatch: "#557b8d", group: "Doors" },
+  }),
+
+  // --- Task 2 medical/security/work furniture -----------------------------
+  def(Obj.MedicalBed, "Medical Bed", { w: 2, render: "furniture", palette: { label: "Medical Bed", swatch: "#d8e8e5", group: "Medical" } }),
+  def(Obj.TreatmentTable, "Treatment Table", { w: 2, render: "furniture", palette: { label: "Treatment Table", swatch: "#a7c6c1", group: "Medical" } }),
+  def(Obj.MedicineCabinet, "Medicine Cabinet", { render: "furniture", palette: { label: "Medicine Cabinet", swatch: "#e7efea", group: "Medical" } }),
+  def(Obj.MorgueSlab, "Morgue Slab", { w: 2, render: "furniture", palette: { label: "Morgue Slab", swatch: "#8c9aa0", group: "Medical" } }),
+  def(Obj.CCTV, "CCTV Camera", { render: "furniture", palette: { label: "CCTV Camera", swatch: "#39444b", group: "Security" } }),
+  def(Obj.MonitorBank, "Monitor Bank", { w: 2, render: "furniture", palette: { label: "Monitor Bank", swatch: "#263943", group: "Security" } }),
+  def(Obj.RemoteDoorDesk, "Remote Door Desk", { w: 2, render: "furniture", palette: { label: "Remote Door Desk", swatch: "#3f5965", group: "Security" } }),
+  def(Obj.AlarmPanel, "Alarm Panel", { render: "furniture", palette: { label: "Alarm Panel", swatch: "#b53b36", group: "Security" } }),
+  def(Obj.Recorder, "Security Recorder", { render: "furniture", palette: { label: "Security Recorder", swatch: "#20292f", group: "Security" } }),
+  def(Obj.WeaponLocker, "Weapon Locker", { render: "furniture", palette: { label: "Weapon Locker", swatch: "#4d575d", group: "Security" } }),
+  def(Obj.KennelStall, "Kennel Stall", { w: 2, render: "furniture", palette: { label: "Kennel Stall", swatch: "#7a694f", group: "Security" } }),
+  def(Obj.OfficeDesk, "Office Desk", { w: 2, render: "furniture", palette: { label: "Office Desk", swatch: "#765d43", group: "Office" } }),
+  def(Obj.InterviewTable, "Interview Table", { w: 2, render: "furniture", palette: { label: "Interview Table", swatch: "#667078", group: "Office" } }),
+  def(Obj.MetalDetector, "Metal Detector", { walkable: true, render: "furniture", palette: { label: "Metal Detector", swatch: "#7997a3", group: "Security" } }),
+  def(Obj.Searchlight, "Searchlight", { render: "furniture", palette: { label: "Searchlight", swatch: "#d9d49c", group: "Security" } }),
+  def(Obj.RazorWire, "Razor Wire", { walkable: false, render: "furniture", palette: { label: "Razor Wire", swatch: "#a8afb2", group: "Security" } }),
+  def(Obj.Washer, "Industrial Washer", { render: "furniture", palette: { label: "Washer", swatch: "#c0ced3", group: "Work" } }),
+  def(Obj.Dryer, "Industrial Dryer", { render: "furniture", palette: { label: "Dryer", swatch: "#9eabb0", group: "Work" } }),
+  def(Obj.IroningTable, "Folding Table", { w: 2, render: "furniture", palette: { label: "Folding Table", swatch: "#a4b1b4", group: "Work" } }),
+  def(Obj.MailSorter, "Mail Sorting Desk", { w: 2, render: "furniture", palette: { label: "Mail Sorter", swatch: "#b58b54", group: "Work" } }),
+  def(Obj.GreenhousePlanter, "Greenhouse Planter", { w: 2, walkable: false, render: "furniture", palette: { label: "Planter", swatch: "#557d3e", group: "Work" } }),
+  def(Obj.PottingBench, "Potting Bench", { w: 2, render: "furniture", palette: { label: "Potting Bench", swatch: "#80643f", group: "Work" } }),
+  def(Obj.JanitorCart, "Janitor Cart", { render: "furniture", palette: { label: "Janitor Cart", swatch: "#d6b33f", group: "Work" } }),
+  def(Obj.RecyclingSorter, "Recycling Sorter", { w: 2, render: "furniture", palette: { label: "Recycling Sorter", swatch: "#4f866e", group: "Work" } }),
+  def(Obj.WoodWorkbench, "Wood Workbench", { w: 2, render: "furniture", palette: { label: "Wood Workbench", swatch: "#8b6841", group: "Work" } }),
+  def(Obj.MetalWorkbench, "Metal Workbench", { w: 2, render: "furniture", palette: { label: "Metal Workbench", swatch: "#68757b", group: "Work" } }),
+  def(Obj.SewingMachine, "Sewing Machine", { render: "furniture", palette: { label: "Sewing Machine", swatch: "#ddd7c9", group: "Work" } }),
+  def(Obj.MaintenanceBench, "Maintenance Bench", { w: 2, render: "furniture", palette: { label: "Maintenance Bench", swatch: "#596b72", group: "Work" } }),
+  def(Obj.ShopShelf, "Shop Shelf", { render: "furniture", palette: { label: "Shop Shelf", swatch: "#9c7449", group: "Work" } }),
+  def(Obj.ShopCounter, "Shop Counter", { w: 2, render: "furniture", palette: { label: "Shop Counter", swatch: "#8f7048", group: "Work" } }),
+  def(Obj.PrintPress, "Print Press", { w: 2, render: "furniture", palette: { label: "Print Press", swatch: "#4e5960", group: "Work" } }),
+  def(Obj.PayrollSafe, "Payroll Safe", { render: "furniture", palette: { label: "Payroll Safe", swatch: "#36434a", group: "Office" } }),
+  def(Obj.LaundryBasket, "Laundry Basket", { walkable: true, render: "furniture", palette: { label: "Laundry Basket", swatch: "#8a7257", group: "Work" } }),
+
   // --- People ---------------------------------------------------------------
   // No palette button: a sniper is posted by building him a tower.
   def(Obj.Sniper, "Sniper", { place: "person" }),
@@ -495,6 +555,11 @@ export const OBJ_DEFS: ObjDef[] = [
   def(Obj.Workman, "Workman", {
     place: "person", palette: { label: "Workman", swatch: "#f0c020", group: "People" },
   }),
+  def(Obj.Doctor, "Doctor", { place: "person", palette: { label: "Doctor", swatch: "#d9f0e8", group: "People" } }),
+  def(Obj.Investigator, "Investigator", { place: "person", palette: { label: "Investigator", swatch: "#42566d", group: "People" } }),
+  def(Obj.DogHandler, "Dog Handler", { place: "person", palette: { label: "Dog Handler", swatch: "#536344", group: "People" } }),
+  def(Obj.ArmedGuard, "Armed Guard", { place: "person", palette: { label: "Armed Guard", swatch: "#26364d", group: "People" } }),
+  def(Obj.SecurityDog, "Security Dog", { place: "person", palette: { label: "Security Dog", swatch: "#6f5b3d", group: "People" } }),
 ];
 
 // --- Rooms ------------------------------------------------------------------
@@ -505,6 +570,10 @@ export const RoomType = {
   Empty: 0, Kitchen: 1, Yard: 2, Canteen: 3, Cell: 4, Dorm: 5, ShowerRoom: 6,
   Library: 7, Gym: 8, CommonRoom: 9, Chapel: 10, StaffRoom: 11,
   Delivery: 12, Exports: 13, Reception: 14,
+  Infirmary: 15, Morgue: 16, Solitary: 17, Security: 18, Armoury: 19,
+  Kennel: 20, Offices: 21, Interview: 22, Laundry: 23, MailRoom: 24,
+  Greenhouse: 25, Janitorial: 26, Recycling: 27, Woodshop: 28, Metalshop: 29,
+  Tailoring: 30, Maintenance: 31, Shop: 32, PrintShop: 33,
 } as const;
 
 /** A requirement is satisfied by any one of `kinds`. */
@@ -632,6 +701,45 @@ export const ROOM_DEFS: RoomDef[] = [
       { kinds: [...SEATS, ...BENCHES], issue: "Needs seating." },
     ],
   }),
+  room(RoomType.Infirmary, "Infirmary", "#8bbdb4", { minSquare: 5, requires: [
+    { kinds: [Obj.MedicalBed], issue: "Needs a medical bed." },
+    { kinds: [Obj.TreatmentTable], issue: "Needs a treatment table." },
+    { kinds: [Obj.MedicineCabinet], issue: "Needs a medicine cabinet." },
+    { kinds: [Obj.Sink], issue: "Needs a sink." },
+  ] }),
+  room(RoomType.Morgue, "Morgue", "#68777f", { minSquare: 3, requires: [{ kinds: [Obj.MorgueSlab], issue: "Needs a morgue slab." }] }),
+  room(RoomType.Solitary, "Solitary Cell", "#6f5663", { needsJailDoor: true, requires: [
+    { kinds: [Obj.Bed], issue: "Needs a bed." }, { kinds: [Obj.Toilet], issue: "Needs a toilet." },
+  ] }),
+  room(RoomType.Security, "Security Room", "#425968", { minSquare: 4, requires: [
+    { kinds: [Obj.MonitorBank], issue: "Needs a monitor bank." }, { kinds: [Obj.AlarmPanel], issue: "Needs an alarm panel." },
+  ] }),
+  room(RoomType.Armoury, "Armoury", "#4d555c", { minSquare: 3, requires: [{ kinds: [Obj.WeaponLocker], issue: "Needs a weapon locker." }] }),
+  room(RoomType.Kennel, "Kennel", "#766950", { minSquare: 4, requires: [{ kinds: [Obj.KennelStall], issue: "Needs a kennel stall." }] }),
+  room(RoomType.Offices, "Offices", "#846e55", { minSquare: 4, requires: [
+    { kinds: [Obj.OfficeDesk], issue: "Needs an office desk." }, { kinds: [Obj.Chair], issue: "Needs a chair." },
+  ] }),
+  room(RoomType.Interview, "Interview Room", "#687683", { minSquare: 3, requires: [
+    { kinds: [Obj.InterviewTable], issue: "Needs an interview table." }, { kinds: [Obj.Chair], issue: "Needs seating." },
+  ] }),
+  room(RoomType.Laundry, "Laundry", "#88a9b2", { minSquare: 5, prisonerAccess: true, requires: [
+    { kinds: [Obj.Washer], issue: "Needs a washer." }, { kinds: [Obj.Dryer], issue: "Needs a dryer." },
+    { kinds: [Obj.IroningTable], issue: "Needs a folding table." },
+  ] }),
+  room(RoomType.MailRoom, "Mail Room", "#ad865b", { minSquare: 4, prisonerAccess: true, requires: [{ kinds: [Obj.MailSorter], issue: "Needs a mail sorter." }] }),
+  room(RoomType.Greenhouse, "Greenhouse", "#668f52", { minSquare: 6, prisonerAccess: true, requires: [
+    { kinds: [Obj.GreenhousePlanter], issue: "Needs a planter." }, { kinds: [Obj.PottingBench], issue: "Needs a potting bench." },
+  ] }),
+  room(RoomType.Janitorial, "Janitorial", "#b39a50", { minSquare: 3, prisonerAccess: true, requires: [{ kinds: [Obj.JanitorCart], issue: "Needs a janitor cart." }] }),
+  room(RoomType.Recycling, "Recycling", "#56846f", { minSquare: 5, prisonerAccess: true, requires: [{ kinds: [Obj.RecyclingSorter], issue: "Needs a recycling sorter." }] }),
+  room(RoomType.Woodshop, "Woodshop", "#8b6841", { minSquare: 7, prisonerAccess: true, requires: [{ kinds: [Obj.WoodWorkbench], issue: "Needs a wood workbench." }] }),
+  room(RoomType.Metalshop, "Metalshop", "#64747b", { minSquare: 7, prisonerAccess: true, requires: [{ kinds: [Obj.MetalWorkbench], issue: "Needs a metal workbench." }] }),
+  room(RoomType.Tailoring, "Tailoring", "#9d8d83", { minSquare: 5, prisonerAccess: true, requires: [{ kinds: [Obj.SewingMachine], issue: "Needs a sewing machine." }] }),
+  room(RoomType.Maintenance, "Maintenance", "#5c7278", { minSquare: 4, prisonerAccess: true, requires: [{ kinds: [Obj.MaintenanceBench], issue: "Needs a maintenance bench." }] }),
+  room(RoomType.Shop, "Prison Shop", "#a67b4d", { minSquare: 4, prisonerAccess: true, requires: [
+    { kinds: [Obj.ShopShelf], issue: "Needs a shop shelf." }, { kinds: [Obj.ShopCounter], issue: "Needs a shop counter." },
+  ] }),
+  room(RoomType.PrintShop, "Print Shop", "#667079", { minSquare: 5, prisonerAccess: true, requires: [{ kinds: [Obj.PrintPress], issue: "Needs a print press." }] }),
 ];
 
 const ROOM_BY_TYPE: (RoomDef | undefined)[] = [];

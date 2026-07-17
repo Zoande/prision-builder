@@ -11,10 +11,10 @@ import { FLOOR_MATS, WALL_MATS, FENCE_MAT } from "./render/materials";
 // costs a row in objects.ts and nothing here.
 export type ToolCat =
   | "floor" | "wall" | "fence" | "door" | "jaildoor"
-  | "fencedoor" | "fencejaildoor"
+  | "staffdoor" | "fencedoor" | "fencestaffdoor" | "fencejaildoor"
   | "lamp" | "walllight" | "rooflight"
   | "piece"
-  | "prisoner" | "guard" | "cook" | "workman" | "baton"
+  | "person" | "prisoner" | "guard" | "cook" | "workman" | "baton"
   | "room" | "access"
   | "patrol" | "unpatrol" | "deploy" | "undeploy"
   | "erase";
@@ -36,6 +36,11 @@ function objItem(kind: number, cat: ToolCat): Item {
   return { label: d.palette!.label, swatch: d.palette!.swatch, tool: { cat, mat: 0 } };
 }
 
+function personItem(kind: number): Item {
+  const d = defOf(kind)!;
+  return { label: d.palette!.label, swatch: d.palette!.swatch, tool: { cat: "person", mat: kind } };
+}
+
 function roomItem(type: number): Item {
   const d = ROOM_DEFS.find((r) => r.type === type)!;
   return { label: d.name, swatch: d.swatch, tool: { cat: "room", mat: type } };
@@ -44,7 +49,8 @@ function roomItem(type: number): Item {
 // The few kinds that need a bespoke world setter rather than placePiece.
 const SPECIAL_CAT: Record<number, ToolCat> = {
   [Obj.Door]: "door", [Obj.JailDoor]: "jaildoor",
-  [Obj.FenceDoor]: "fencedoor", [Obj.FenceJailDoor]: "fencejaildoor",
+  [Obj.StaffDoor]: "staffdoor",
+  [Obj.FenceDoor]: "fencedoor", [Obj.StaffFenceDoor]: "fencestaffdoor", [Obj.FenceJailDoor]: "fencejaildoor",
   [Obj.Lamp]: "lamp", [Obj.WallLight]: "walllight", [Obj.RoofLight]: "rooflight",
 };
 
@@ -65,8 +71,11 @@ function groupCats(): Cat[] {
 const ROOM_GROUPS: RoomGroup[] = [
   { key: "prisoner", label: "Prisoner", types: [RoomType.Cell, RoomType.Dorm, RoomType.Canteen, RoomType.ShowerRoom, RoomType.Yard] },
   { key: "living", label: "Living", types: [RoomType.CommonRoom, RoomType.Library, RoomType.Gym, RoomType.Chapel] },
-  { key: "staff", label: "Staff", types: [RoomType.Kitchen, RoomType.StaffRoom, RoomType.Reception] },
-  { key: "utility", label: "Utility", types: [RoomType.Delivery, RoomType.Exports, RoomType.Empty] },
+  { key: "staff", label: "Staff", types: [RoomType.Kitchen, RoomType.StaffRoom, RoomType.Reception,
+    RoomType.Infirmary, RoomType.Morgue, RoomType.Security, RoomType.Armoury, RoomType.Kennel, RoomType.Offices, RoomType.Interview] },
+  { key: "work", label: "Work", types: [RoomType.Laundry, RoomType.MailRoom, RoomType.Greenhouse, RoomType.Janitorial,
+    RoomType.Recycling, RoomType.Woodshop, RoomType.Metalshop, RoomType.Tailoring, RoomType.Maintenance, RoomType.Shop, RoomType.PrintShop] },
+  { key: "utility", label: "Utility", types: [RoomType.Delivery, RoomType.Exports, RoomType.Solitary, RoomType.Empty] },
 ];
 
 function roomCats(): Cat[] {
@@ -95,9 +104,9 @@ const CATS: Cat[] = [
   {
     key: "people", label: "People",
     items: [
-      objItem(Obj.Guard, "guard"),
-      objItem(Obj.Cook, "cook"),
-      objItem(Obj.Workman, "workman"),
+      personItem(Obj.Guard), personItem(Obj.Cook), personItem(Obj.Workman), personItem(Obj.Doctor),
+      personItem(Obj.Investigator), personItem(Obj.DogHandler), personItem(Obj.ArmedGuard),
+      personItem(Obj.SecurityDog),
       { label: "Baton", swatch: "#202024", tool: { cat: "baton", mat: 0 } },
     ],
   },
@@ -196,7 +205,7 @@ export class Editor {
   setMode(mode: string, clearTool = true) {
     const modeKeys: Record<string, string[]> = {
       build: ["floor", "wall", "doors", "lights"],
-      rooms: ["prisoner", "living", "staff", "utility", "access"],
+      rooms: ["prisoner", "living", "staff", "work", "utility", "access"],
       objects: ["cells", "dining", "library", "seating", "gym", "common", "chapel", "staff", "decor", "security"],
       staff: ["people", "deploy"],
       logistics: ["logistics", "access"],
@@ -323,8 +332,10 @@ export class Editor {
       case "wall": return world.setWall(x, z, this.tool.mat);
       case "fence": return world.setFence(x, z, this.tool.mat);
       case "door": return world.setDoor(x, z);
+      case "staffdoor": return world.setDoor(x, z, "staff");
       case "jaildoor": return world.setDoor(x, z, true);
       case "fencedoor": return world.setFenceGate(x, z, false);
+      case "fencestaffdoor": return world.setFenceGate(x, z, "staff");
       case "fencejaildoor": return world.setFenceGate(x, z, true);
       case "piece": return world.placePiece(x, z, this.tool.mat, this.orient);
       case "lamp": return world.setLamp(x, z);
@@ -334,6 +345,7 @@ export class Editor {
       case "guard": return world.setPerson(x, z, Obj.Guard, this.orient);
       case "cook": return world.setPerson(x, z, Obj.Cook, this.orient);
       case "workman": return world.setPerson(x, z, Obj.Workman, this.orient);
+      case "person": return world.setPerson(x, z, this.tool.mat, this.orient);
       case "baton": return world.setBaton(x, z);
       // Rooms are dragged out like floors; main claims the room on pointerdown.
       case "room":

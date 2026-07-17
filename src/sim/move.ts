@@ -7,7 +7,8 @@
 
 import { World } from "./world.ts";
 import { Obj } from "./objects.ts";
-import { astar, angleLerp, passable, prisonerAllowed } from "./nav.ts";
+import { astar, angleLerp, passable, prisonerAllowed, roleAllowed } from "./nav.ts";
+import { accessRoleForAgent } from "./areas.ts";
 import { look, record } from "./vision.ts";
 import {
   type Agent,
@@ -21,11 +22,15 @@ export function followPath(ag: Agent, dt: number, world: World, staff: boolean):
   let ti = ag.path[ag.pathI];
   // Tolerate starting from inside furniture (e.g. seated on a bench).
   const cur = Math.floor(ag.z) * size + Math.floor(ag.x);
-  if (ti === cur && !passable(world, ti, staff) && ag.pathI + 1 < ag.path.length) {
+  if (ti === cur && !passable(world, ti, staff, ag.accessKeys) && ag.pathI + 1 < ag.path.length) {
     ag.pathI++;
     ti = ag.path[ag.pathI];
   }
-  if (!passable(world, ti, staff)) {
+  const custody = ag.protectiveCustody ? "protective" : ag.profile?.custody;
+  const areaAllowed = staff
+    ? roleAllowed(world, ti, accessRoleForAgent(ag))
+    : roleAllowed(world, ti, "prisoner", custody);
+  if (!passable(world, ti, staff, ag.accessKeys) || !areaAllowed) {
     if (ag.known) record(ag, world, ti);
     ag.path = null;
     return false;
@@ -66,7 +71,8 @@ export function knownOpen(ag: Agent) {
 export function lawfulOpen(ag: Agent, world: World, trespass = false) {
   const open = knownOpen(ag);
   if (trespass) return open;
-  return (i: number) => open(i) && prisonerAllowed(world, i);
+  const custody = (ag as Agent & { protectiveCustody?: boolean }).protectiveCustody ? "protective" : (ag.profile?.custody ?? "minimum");
+  return (i: number) => open(i) && prisonerAllowed(world, i, ag.accessKeys, custody);
 }
 
 /** Optimistic pathing for fleeing: unknown tiles are assumed walkable. */
@@ -104,7 +110,7 @@ export function stepOff(ag: Agent, world: World) {
   for (const [dx, dz] of [[0, 1], [1, 0], [0, -1], [-1, 0]]) {
     const nx = x + dx, nz = z + dz;
     if (!world.inBounds(nx, nz)) continue;
-    if (passable(world, nz * size + nx, false)) {
+    if (passable(world, nz * size + nx, false, ag.accessKeys)) {
       ag.x = nx + 0.5; ag.z = nz + 0.5;
       return;
     }

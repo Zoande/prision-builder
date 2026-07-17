@@ -97,6 +97,11 @@ const LIGHT_REACH = 9; // max radius, for region margins
 export interface LightField { x0: number; z0: number; w: number; h: number; data: Uint8Array }
 
 export class World {
+  /** Task-2 structural access resolver, installed at runtime by AreaSystem. */
+  task2Access: ((tile: number, custody: string) => boolean) | null = null;
+  /** Role-aware access resolver for staff, workers, drivers, and visitors. */
+  task2RoleAccess: ((tile: number, role: string, custody?: string) => boolean) | null = null;
+  readonly externalRoomIssues = new Map<number, string>();
   readonly size: number;
   readonly floorMat: Uint8Array;
   // Uint16: the object registry is meant to grow into the hundreds, and a
@@ -433,14 +438,14 @@ export class World {
 
   /** Turn a fence tile into a gate (open FenceDoor / guard-only FenceJailDoor);
    *  orientation follows the fence run, like doors follow walls. */
-  setFenceGate(x: number, z: number, locked: boolean): boolean {
+  setFenceGate(x: number, z: number, locked: boolean | "staff"): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
     if (this.infrastructure[i]) return false;
     const k = this.objKind[i];
-    if (k !== Obj.Fence && k !== Obj.FenceDoor && k !== Obj.FenceJailDoor) return false;
+    if (k !== Obj.Fence && k !== Obj.FenceDoor && k !== Obj.StaffFenceDoor && k !== Obj.FenceJailDoor) return false;
     const horiz = this.isFence(x - 1, z) && this.isFence(x + 1, z);
-    const kind = locked ? Obj.FenceJailDoor : Obj.FenceDoor;
+    const kind = locked === "staff" ? Obj.StaffFenceDoor : locked ? Obj.FenceJailDoor : Obj.FenceDoor;
     const orient = horiz ? 0 : 1;
     if (k === kind && this.objOrient[i] === orient && this.jailClosed[i] === 0) return false;
     this.objKind[i] = kind;
@@ -493,14 +498,14 @@ export class World {
   }
 
   /** Turn a wall tile into a door; orientation follows the surrounding wall run. */
-  setDoor(x: number, z: number, jail = false): boolean {
+  setDoor(x: number, z: number, jail: boolean | "staff" = false): boolean {
     if (!this.inBounds(x, z)) return false;
     const i = this.idx(x, z);
     if (this.infrastructure[i]) return false;
     const k = this.objKind[i];
-    if (k !== Obj.Wall && k !== Obj.Door && k !== Obj.JailDoor) return false;
+    if (k !== Obj.Wall && k !== Obj.Door && k !== Obj.StaffDoor && k !== Obj.JailDoor) return false;
     const horiz = this.wallLike(x - 1, z) && this.wallLike(x + 1, z);
-    const kind = jail ? Obj.JailDoor : Obj.Door;
+    const kind = jail === "staff" ? Obj.StaffDoor : jail ? Obj.JailDoor : Obj.Door;
     const orient = horiz ? 0 : 1;
     if (k === kind && this.objOrient[i] === orient && this.jailClosed[i] === 0) return false;
     this.objKind[i] = kind;
@@ -778,6 +783,8 @@ export class World {
 
   /** Why this room doesn't work, straight off its ROOM_DEFS row. "" = it does. */
   private roomIssue(r: Room): string {
+    const external = this.externalRoomIssues.get(r.id);
+    if (external) return external;
     const def = roomDef(r.type);
     if (!def) return "";
     if (def.minSquare > 0 && !this.containsSquare(r.tiles, def.minSquare)) {
@@ -811,7 +818,8 @@ export class World {
         const gx = x + dx, gz = z + dz;
         if (!this.inBounds(gx, gz)) continue;
         const gate = this.objKind[this.idx(gx, gz)];
-        if (gate !== Obj.FenceDoor && gate !== Obj.FenceJailDoor && gate !== Obj.Door && gate !== Obj.JailDoor) continue;
+        if (gate !== Obj.FenceDoor && gate !== Obj.StaffFenceDoor && gate !== Obj.FenceJailDoor &&
+            gate !== Obj.Door && gate !== Obj.StaffDoor && gate !== Obj.JailDoor) continue;
         for (let distance = 1; distance <= 3; distance++) {
           const rx = gx + dx * distance, rz = gz + dz * distance;
           if (this.isInfrastructure(rx, rz)) return true;
@@ -1080,7 +1088,7 @@ export class World {
   private isFence(x: number, z: number): boolean {
     if (!this.inBounds(x, z)) return false;
     const k = this.objKind[this.idx(x, z)];
-    return k === Obj.Fence || k === Obj.FenceDoor || k === Obj.FenceJailDoor || k === Obj.CutFence;
+    return k === Obj.Fence || k === Obj.FenceDoor || k === Obj.StaffFenceDoor || k === Obj.FenceJailDoor || k === Obj.CutFence;
   }
 
   /** Sim: a fence tile is cut open (escape). Keeps material for repair. */

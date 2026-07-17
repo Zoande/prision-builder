@@ -29,7 +29,7 @@ export default defineConfig({
           if (req.method === "POST") {
             const body = await readBody(req);
             const incoming = JSON.parse(body);
-            if (incoming?.version !== 3) throw new Error("Only save version 3 is accepted");
+            if (incoming?.version !== 4) throw new Error("Only save version 4 is accepted");
             writeFileSync(savePath, body, "utf8");
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ ok: true }));

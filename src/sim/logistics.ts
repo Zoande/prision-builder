@@ -30,11 +30,14 @@ export interface Truck {
   kind: "inbound" | "export" | "intake";
   state: "queued" | "arriving" | "unloading" | "departing" | "blocked";
   packageIds: number[];
+  externalItemIds: number[];
   x: number;
   z: number;
   timer: number;
   warning: string;
 }
+
+export interface ExternalExport { itemId: number; value: number; label: string; }
 
 export interface StockLine {
   commodity: string;
@@ -50,6 +53,8 @@ const PALLET_CAPACITY = 8;
 export class LogisticsSystem {
   readonly packages = new Map<number, CargoPackage>();
   readonly trucks: Truck[] = [];
+  readonly externalExports = new Map<number, ExternalExport>();
+  private readonly collectedExternal: number[] = [];
   private readonly requests: PurchaseRequest[] = [];
   private nextPackageId = 1;
   private nextRequestId = 1;
@@ -81,6 +86,13 @@ export class LogisticsSystem {
     for (const pkg of this.packages.values()) {
       if (pkg.commodity === commodity && (pkg.state === "ordered" || pkg.state === "in-transit")) total += pkg.quantity;
     }
+    for (const req of this.requests) if (req.commodity === commodity) total += req.quantity;
+    return total;
+  }
+
+  pipelineQuantity(commodity: string): number {
+    let total = 0;
+    for (const pkg of this.packages.values()) if (pkg.commodity === commodity && !["exports"].includes(pkg.state)) total += pkg.quantity;
     for (const req of this.requests) if (req.commodity === commodity) total += req.quantity;
     return total;
   }
@@ -200,6 +212,12 @@ export class LogisticsSystem {
     return true;
   }
 
+  registerExternalExport(itemId: number, value: number, label: string): void {
+    if (!this.externalExports.has(itemId)) this.externalExports.set(itemId, { itemId, value: Math.max(0, value), label });
+  }
+
+  takeCollectedExternal(): number[] { return this.collectedExternal.splice(0); }
+
   packagesForHandler(role: HandlerRole): CargoPackage[] {
     return [...this.packages.values()].filter((p) => commodityDef(p.commodity).handler === role);
   }
@@ -259,6 +277,7 @@ export class LogisticsSystem {
       this.economy.post(worldTime, "fee", -25, "Export collection truck", true);
       this.trucks.push({
         id: this.nextTruckId++, kind: "export", state: "queued", packageIds: [],
+        externalItemIds: [],
         x: 374.5, z: -8, timer: 0, warning: "",
       });
     }
@@ -277,13 +296,13 @@ export class LogisticsSystem {
   }
 
   exportQuantity(): number {
-    let result = 0;
+    let result = this.externalExports.size;
     for (const pkg of this.packages.values()) if (pkg.state === "exports") result += pkg.quantity;
     return result;
   }
 
   expectedExportCredit(): number {
-    let result = 0;
+    let result = [...this.externalExports.values()].reduce((sum, row) => sum + row.value, 0);
     for (const pkg of this.packages.values()) {
       if (pkg.state === "exports") result += commodityDef(pkg.commodity).exportValue * pkg.quantity;
     }
@@ -328,6 +347,7 @@ export class LogisticsSystem {
       for (const packageId of ids) this.packages.get(packageId)!.truckId = id;
       this.trucks.push({
         id, kind: "inbound", state: "queued", packageIds: ids,
+        externalItemIds: [],
         x: 374.5, z: -8 - this.trucks.length * 9, timer: 0, warning: "",
       });
     }
@@ -359,6 +379,10 @@ export class LogisticsSystem {
       pkg.state = "in-transit"; pkg.truckId = truck.id;
       truck.packageIds.push(pkg.id);
     }
+    for (const row of this.externalExports.values()) {
+      if (truck.packageIds.length + truck.externalItemIds.length >= TRUCK_CAPACITY) break;
+      if (!truck.externalItemIds.includes(row.itemId)) truck.externalItemIds.push(row.itemId);
+    }
     const anchor = this.palletAnchor(world, delivery);
     truck.x = anchor % world.size + 0.5;
   }
@@ -371,12 +395,17 @@ export class LogisticsSystem {
       credit += commodityDef(pkg.commodity).exportValue * pkg.quantity;
       this.packages.delete(id);
     }
+    for (const itemId of truck.externalItemIds) {
+      const row = this.externalExports.get(itemId); if (!row) continue;
+      credit += row.value; this.externalExports.delete(itemId); this.collectedExternal.push(itemId);
+    }
     if (credit > 0) this.economy.post(worldTime, "export", credit, "Exported recovered goods", true);
   }
 
   saveData() {
     return {
       packages: [...this.packages.values()], trucks: this.trucks,
+      externalExports: [...this.externalExports.values()], collectedExternal: [...this.collectedExternal],
       requests: this.requests, nextPackageId: this.nextPackageId,
       nextRequestId: this.nextRequestId, nextTruckId: this.nextTruckId,
       lastExportDay: this.lastExportDay,
@@ -396,6 +425,9 @@ export class LogisticsSystem {
       this.packages.set(pkg.id, pkg);
     }
     this.trucks.length = 0; this.trucks.push(...(data.trucks ?? []).map((t) => ({ ...t, packageIds: [...t.packageIds] })));
+    for (const truck of this.trucks) truck.externalItemIds = [...(truck.externalItemIds ?? [])];
+    this.externalExports.clear(); for (const row of data.externalExports ?? []) this.externalExports.set(row.itemId, { ...row });
+    this.collectedExternal.length = 0; this.collectedExternal.push(...(data.collectedExternal ?? []));
     this.requests.length = 0; this.requests.push(...(data.requests ?? []).map((r) => ({ ...r })));
     this.nextPackageId = data.nextPackageId ?? 1;
     this.nextRequestId = data.nextRequestId ?? 1;

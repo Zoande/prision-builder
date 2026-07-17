@@ -19,7 +19,7 @@ import type { Agents } from "./agents.ts";
 import { mem } from "./vision.ts";
 import { insideOwnCell, lockCell } from "./regime.ts";
 import { guardInSight } from "./enforcement.ts";
-import { mealContraband } from "./contraband.ts";
+import { acquire, toolCount } from "./contraband.ts";
 
 export function useCount(A: Agents, anchor: number): number {
   return A.useClaims.get(anchor)?.size ?? 0;
@@ -270,8 +270,9 @@ export function finishUse(A: Agents, ag: Agent, world: World) {
   if (kind === Obj.Table && A.mealTables.delete(ag.useIdx)) A.mealsDirty = true;
   // Eating is also how a man squirrels away a spoon or works a cutter loose.
   if (kind === Obj.Table) {
-    const spoonStolen = mealContraband(A, ag);
-    A.kitchen?.finishMeal(spoonStolen);
+    const wantsSpoon = ag.plan?.method === "dig" && toolCount(A, ag, Item.Spoon) < 4;
+    const spoonStolen = A.kitchen?.finishMeal(wantsSpoon, ag.id) ?? false;
+    if (spoonStolen) acquire(A, ag, Item.Spoon);
   }
 
   const on = use?.from === "on";

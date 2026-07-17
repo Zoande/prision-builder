@@ -49,6 +49,7 @@ import type { KitchenSystem } from "./kitchen.ts";
 import { aptitude, freshPrisonerMind, gainSkill, generatePrisonerProfile, personality, skill } from "./profiles.ts";
 import { PrisonerSocialSystem } from "./social.ts";
 import { EscapeOperationsSystem } from "./escapeOperations.ts";
+import type { Task2Systems } from "./task2Systems.ts";
 
 // The public face of the sim: everything main.ts and the render passes import.
 export {
@@ -101,6 +102,7 @@ export class Agents {
   worldDirty = false; // sim mutated world tiles (cut/repair)
   construction: ConstructionSystem | null = null;
   kitchen: KitchenSystem | null = null;
+  task2: Task2Systems | null = null;
   staffPerformance = 1;
   roadVehicleZ: number[] = [];
   readonly social = new PrisonerSocialSystem();
@@ -111,7 +113,8 @@ export class Agents {
   takeWorldDirty(): boolean { const d = this.worldDirty; this.worldDirty = false; return d; }
 
   sync(world: World) {
-    for (const kind of [Obj.Prisoner, Obj.Guard, Obj.Cook, Obj.Workman]) {
+    for (const kind of [Obj.Prisoner, Obj.Guard, Obj.Cook, Obj.Workman, Obj.Doctor,
+      Obj.Investigator, Obj.DogHandler, Obj.ArmedGuard, Obj.SecurityDog]) {
       for (const i of world.tilesOfKind(kind)) {
         const x = i % world.size, z = (i / world.size) | 0;
         const orient = world.objOrient[i];
@@ -237,8 +240,36 @@ export class Agents {
     this.manTowers(world);
     this.assignGuards(world);
 
+    // Full Lockdown is a physical operation. Prisoners first return to their
+    // cells; only once every housed, conscious prisoner is inside do guards
+    // receive tasks for the remaining secure doors and gates.
+    if (this.task2?.security.emergency === "lockdown") {
+      const prisoners = this.agents.filter((a) => a.kind === Obj.Prisoner &&
+        this.task2?.health.state(a.id)?.alive !== false && !a.underground);
+      const housed = prisoners.filter((a) => a.cellRoom >= 0 && a.bedIdx >= 0);
+      const allHousedInside = housed.length > 0 && housed.every((a) => insideOwnCell(a, world));
+      if (prisoners.length !== housed.length) this.task2.security.warnings.add("Full Lockdown has inmates without an assigned cell");
+      if (allHousedInside) for (const kind of [Obj.JailDoor, Obj.FenceJailDoor]) for (const tile of world.tilesOfKind(kind)) {
+        if (world.jailClosed[tile] || this.doorTasks.some((t) => t.idx === tile)) continue;
+        this.doorTasks.push({ idx: tile, close: true, claimedBy: -1 });
+      }
+    }
+
     for (let n = this.agents.length - 1; n >= 0; n--) {
       const ag = this.agents[n];
+      const health = this.task2?.health.ensure(ag);
+      if (ag.state === "removed" || health?.alive === false) continue;
+      if (health && (health.consciousness <= .08 || health.admitted)) {
+        ag.path = null; ag.amp = 0;
+        continue;
+      }
+      if (this.task2?.combat.isBusy(ag.id)) continue;
+      const baseSpeed = ag.kind === Obj.Prisoner && ag.profile
+        ? .9 + (ag.profile.aptitudes.agility + ag.profile.aptitudes.endurance) / 100 : 1;
+      ag.speedMul = baseSpeed * (health?.mobility ?? 1);
+      if (ag.kind !== Obj.Prisoner && ag.kind !== Obj.SecurityDog &&
+          !(ag.kind === Obj.Doctor && this.task2?.health.treatmentJobs.some((j) => j.state === "waiting")) &&
+          this.task2?.security.updateStaff(ag, dt * this.staffPerformance, this.simTime, world, this.agents)) continue;
       if (!ag.underground && world.inBounds(Math.floor(ag.x), Math.floor(ag.z))) {
         const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
         ag.elev = world.objKind[here] === Obj.SecureBridge ? 2.86 : ag.kind === Obj.Sniper ? ag.elev : 0;
@@ -250,12 +281,43 @@ export class Agents {
           continue; // wait safely for the moving vehicle to clear the crossing
         }
       }
-      if (ag.kind === Obj.Prisoner) this.updatePrisoner(ag, dt, world, isNight);
+      if (ag.kind === Obj.Prisoner && this.curActivity === REG.Work &&
+          this.task2?.work.updateWorker(ag, dt, this.simTime, world)) { /* assigned prison work */ }
+      else if (ag.kind === Obj.Prisoner) this.updatePrisoner(ag, dt, world, isNight);
       else if (ag.kind === Obj.Cook) this.updateCook(ag, dt * this.staffPerformance, world);
-      else if (ag.kind === Obj.Guard) this.updateGuard(ag, dt * this.staffPerformance, world);
+      else if (ag.kind === Obj.Doctor) {
+        if (!this.task2?.health.updateDoctor(ag, dt * this.staffPerformance, world, this.agents, this.task2.items)) {
+          ag.state = "idle"; ag.amp = 0;
+        }
+      }
+      else if ([Obj.Guard, Obj.ArmedGuard, Obj.Investigator, Obj.DogHandler].includes(ag.kind as never)) {
+        if (!this.updateCombatResponse(ag, dt * this.staffPerformance, world) &&
+            !(this.task2?.security.emergency === "none" && ag.kind === Obj.Guard && this.task2.market.updateTillGuard(ag, dt * this.staffPerformance, this.simTime, world)))
+          this.updateGuard(ag, dt * this.staffPerformance, world);
+      }
       else if (ag.kind === Obj.Sniper) this.updateSniper(ag, dt * this.staffPerformance, world);
+      else if (ag.kind === Obj.SecurityDog) { ag.amp = Math.max(0, ag.amp - dt * 2); }
       else this.updateWorkman(ag, dt * this.staffPerformance, world);
     }
+  }
+
+  private updateCombatResponse(guard: Agent, dt: number, world: World): boolean {
+    const combat = this.task2?.combat, engagement = combat?.responseFor(guard);
+    if (!combat || !engagement) return false;
+    guard.state = "respondingFight";
+    const distance = Math.hypot(guard.x - engagement.x, guard.z - engagement.z);
+    if (distance > 1.8) {
+      if (!guard.path) {
+        const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(engagement.x))),
+          Math.max(0, Math.min(world.size - 1, Math.floor(engagement.z))));
+        pathAdjacent(guard, world, target, (i) => passable(world, i, true));
+      }
+      if (guard.path) followPath(guard, dt, world, true);
+      return true;
+    }
+    combat.guardIntervene(guard, engagement, this.agents, this.simTime);
+    guard.amp = .7;
+    return true;
   }
 
   // --- Prisoner --------------------------------------------------------------
@@ -316,6 +378,27 @@ export class Agents {
     ag.escapeDesire = Math.min(1, ag.desire * (1 - ag.fear) * (1 + defiance * .16 + confidence * .08));
 
     if (ag.lastTX < 0) { ag.lastTX = Math.floor(ag.x); ag.lastTZ = Math.floor(ag.z); look(ag, world); }
+
+    if (this.task2?.security.emergency === "lockdown" && ag.state !== "escorted" && !ag.cuffed) {
+      ag.compliant = true;
+      if (ag.mind) {
+        ag.mind.stress = Math.min(1, ag.mind.stress + dt * .0025);
+        ag.mind.anger = Math.min(1, ag.mind.anger + dt * .0015 * (1 + Math.max(0, personality(ag.profile, "defiance"))));
+      }
+      if (insideOwnCell(ag, world)) {
+        ag.path = null; ag.state = "lockdownCell"; ag.amp = Math.max(0, ag.amp - dt * 8);
+        lockCell(this, ag, world); return;
+      }
+      if (ag.cellRoom < 0 || ag.bedIdx < 0) { ag.state = "lockdownNoCell"; ag.amp = 0; return; }
+      if (!ag.path && !pathAdjacent(ag, world, ag.bedIdx, lawfulOpen(ag, world))) {
+        ag.state = "lockdownBlocked"; ag.amp = 0; return;
+      }
+      ag.state = "lockdownToCell";
+      const before = ag.path;
+      if (ag.path) followPath(ag, dt, world, false);
+      if (before && !ag.path && !insideOwnCell(ag, world)) ag.decideT = .5;
+      return;
+    }
 
     // Being marched home.
     if (ag.state === "escorted") {
@@ -939,8 +1022,8 @@ export class Agents {
     const dists = [ag.x, ag.z, size - ag.x, size - ag.z];
     const dirs = [[-1, 0], [0, -1], [1, 0], [0, 1]];
     const dir = dirs[dists.indexOf(Math.min(...dists))];
-    const tx = Math.max(2, Math.min(size - 3, Math.floor(ag.x + dir[0] * 40)));
-    const tz = Math.max(2, Math.min(size - 3, Math.floor(ag.z + dir[1] * 40)));
+    const tx = dir[0] < 0 ? 0 : dir[0] > 0 ? size - 1 : Math.max(0, Math.min(size - 1, Math.floor(ag.x)));
+    const tz = dir[1] < 0 ? 0 : dir[1] > 0 ? size - 1 : Math.max(0, Math.min(size - 1, Math.floor(ag.z)));
     const start = Math.floor(ag.z) * size + Math.floor(ag.x);
     const path = astar(size, start, tz * size + tx, fleeOpen(ag), 12000, (from, to) => world.canNavigateEdge(from, to));
     if (path) {
@@ -1295,7 +1378,7 @@ export class Agents {
       ag.amp = Math.max(0, ag.amp - dt * 8);
       ag.timer -= dt;
       if (ag.timer > 0) return;
-      if (world.objKind[ag.interact] === Obj.JailDoor) {
+      if (world.objKind[ag.interact] === Obj.JailDoor || world.objKind[ag.interact] === Obj.FenceJailDoor) {
         world.jailClosed[ag.interact] = ag.aux ? 1 : 0;
         this.worldDirty = true;
       }
@@ -1371,7 +1454,8 @@ export class Agents {
         const noisy = p.state === "climbing" || p.state === "cutting";
         if (!noisy && p.state !== "fleeing") continue;
         const stealth = skill(p.profile, "stealth") + aptitude(p.profile, "agility") * .15;
-        if (!canSee(ag, world, p.x, p.z, Math.max(2, (noisy ? 10 : AWARE_R) - stealth * .32))) continue;
+        const disguise = p.disguise * (1 + skill(p.profile, "deception") * .04);
+        if (!canSee(ag, world, p.x, p.z, Math.max(2, (noisy ? 10 : AWARE_R) - stealth * .32 - disguise * 3))) continue;
         ag.chaseId = p.id;
         ag.state = "chasing";
         ag.path = null;
@@ -1439,7 +1523,7 @@ export class Agents {
       // pulling him off to work a door is what left the wings unwatched in the
       // first place. He still has eyes, though: breach-spotting below is
       // everyone's job.
-      if (!this.onDuty(ag)) {
+      if (!this.onDuty(ag) || this.task2?.security.emergency === "lockdown") {
         // Jail door tasks trump the rest of the routine.
         let task = null, bd = Infinity;
         for (const t of this.doorTasks) {
@@ -1805,6 +1889,7 @@ export class Agents {
 
   updateWorkman(ag: Agent, dt: number, world: World) {
     const size = world.size;
+    if (this.task2?.work.updateHauler(ag, dt, this.simTime, world, false)) return;
     if (ag.path) {
       if (ag.state === "deliverBuildCargo" && this.construction) this.construction.moveBundle(ag.interact, ag.x, ag.z);
       if ((ag.state === "deliverBookCargo" || ag.state === "deliverExportCargo") && this.kitchen) {
@@ -1988,6 +2073,7 @@ export class Agents {
         salvage.reservedBy = null;
       }
     }
+    this.task2?.work.updateHauler(ag, dt, this.simTime, world, true);
   }
 
   // --- Cook --------------------------------------------------------------------
@@ -2419,6 +2505,9 @@ export class Agents {
         socialGroup: -1,
         tunnelEntry: raw.tunnelEntry ?? -1,
         tunnelFace: "",
+        accessKeys: raw.accessKeys ?? 0,
+        disguise: raw.disguise ?? 0,
+        protectiveCustody: raw.protectiveCustody ?? false,
       } as Agent;
       if (ag.state === "using" || ag.state === "toUse") ag.state = "idle";
       if (["toBuild", "constructing", "demolishing", "toCargo", "deliverCargo",

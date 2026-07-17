@@ -25,6 +25,25 @@ export const COMMODITIES: CommodityDef[] = [
   commodity("tray", "Tray", 18, 6, "cook"),
   commodity("spoon", "Spoon", 2, 24, "cook"),
   commodity("book", "Book", 10, 8, "workman"),
+  commodity("cloth", "Cloth", 6, 8, "workman"),
+  commodity("metal-scrap", "Metal scrap", 8, 8, "workman"),
+  commodity("wood-scrap", "Wood scrap", 5, 8, "workman"),
+  commodity("wire", "Wire", 7, 12, "workman"),
+  commodity("paper", "Paper", 2, 16, "workman"),
+  commodity("ink", "Printing ink", 9, 6, "workman"),
+  commodity("fertilizer", "Fertilizer", 12, 6, "workman"),
+  commodity("chemical", "Cleaning chemical", 14, 6, "workman"),
+  commodity("sugar", "Sugar", 3, 12, "workman"),
+  commodity("yeast", "Yeast", 4, 12, "workman"),
+  commodity("needle", "Sewing needle", 6, 8, "workman"),
+  commodity("trowel", "Garden trowel", 25, 4, "workman"),
+  commodity("pruning-shears", "Pruning shears", 45, 4, "workman"),
+  commodity("kitchen-knife", "Kitchen knife", 55, 4, "workman"),
+  commodity("shovel", "Shovel", 60, 3, "workman"),
+  commodity("file", "Metal file", 35, 4, "workman"),
+  commodity("hacksaw-blade", "Hacksaw blade", 45, 6, "workman"),
+  commodity("hammer", "Workshop hammer", 38, 4, "workman"),
+  commodity("screwdriver", "Screwdriver", 25, 4, "workman"),
 ];
 
 const BY_ID = new Map(COMMODITIES.map((d) => [d.id, d]));
@@ -74,4 +93,3 @@ export function recipeCost(recipe: Recipe): number {
   for (const [id, quantity] of Object.entries(recipe)) total += commodityDef(id).price * quantity;
   return total;
 }
-

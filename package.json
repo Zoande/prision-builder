@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "runtime-textures": "node scripts/prepare-runtime-textures.mjs",
     "textures": "node scripts/compress-textures.mjs",
-    "check": "node scripts/check-roofs.ts && node scripts/check-stability.ts && node scripts/check-assets.mjs && node scripts/check-logistics.ts && node scripts/check-prisoners.ts",
+    "check": "node scripts/check-roofs.ts && node scripts/check-stability.ts && node scripts/check-assets.mjs && node scripts/check-logistics.ts && node scripts/check-prisoners.ts && node scripts/check-task2.ts",
     "sim-check": "node scripts/sim-golden.ts"
   },
   "devDependencies": {

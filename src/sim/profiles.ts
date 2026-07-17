@@ -308,6 +308,10 @@ export function generatePrisonerProfile(agentId: number, seed = Math.imul(agentI
 
 export function freshPrisonerMind(profile: PrisonerProfile): PrisonerMind {
   const p = profile.personality;
+  const dependencyRoll = (salt: number) => (((profile.seed ^ (salt * 0x9e3779b9)) >>> 0) % 1000) / 1000;
+  const tobacco = dependencyRoll(11) < .22 ? 1 + dependencyRoll(12) * .45 : 0;
+  const alcohol = dependencyRoll(21) < .12 ? 1 + dependencyRoll(22) * .55 : 0;
+  const drugs = dependencyRoll(31) < .075 ? 1.1 + dependencyRoll(32) * .65 : 0;
   return {
     stress: .08, anger: Math.max(0, p.aggression * .08), confidence: clamp(.5 + p.courage * .2),
     fatigue: 0, reputation: clamp((profile.skills.leadership.level + profile.skills.fighting.level) / 20 + p.dominance * .12),
@@ -316,6 +320,10 @@ export function freshPrisonerMind(profile: PrisonerProfile): PrisonerMind {
       hygiene: 1 + p.conscientiousness * .25, recreation: 1 + p.curiosity * .3,
       exercise: 1 + (profile.aptitudes.strength + profile.aptitudes.endurance - 11) * .035,
       bladder: 1, spirituality: 1, social: clamp(1 + p.sociability * .55, .35, 1.65),
+      family: clamp(1 + p.loyalty * .25 + p.empathy * .12, .55, 1.5),
+      safety: clamp(1 - p.courage * .22 - profile.aptitudes.resilience * .018, .55, 1.5),
+      privacy: clamp(1 - p.sociability * .35 + p.conscientiousness * .12, .45, 1.65),
+      tobacco, alcohol, drugs,
     },
   };
 }

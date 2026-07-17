@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Prison Builder</title>
     <style>
       :root {
@@ -91,8 +92,23 @@
       #detailType { color:#a8b76a; font-size:11px; font-weight:900; letter-spacing:.045em; text-transform:uppercase; } #detailName { margin-top:10px; color:#edf1ed; font-size:15px; font-weight:900; } #detailCopy { max-width:235px; margin:7px 0 14px; color:#aebcbd; font-size:12px; line-height:1.45; }
       #detailCost { display:block; padding-top:10px; border-top:1px solid var(--line); color:#aebcbd; font-size:10px; font-weight:800; text-transform:uppercase; } #detailCost strong { display:block; margin-top:4px; color:#bfd376; font-size:10px; line-height:1.35; text-transform:none; }
       #utility { display:none; }
-      #logisticsDashboard { position:fixed; z-index:15; right:16px; bottom:196px; display:none; width:390px; max-height:56vh; overflow:auto; padding:14px; border:1px solid var(--line-bright); border-radius:8px; background:rgba(8,19,25,.97); box-shadow:var(--shadow); }
+      #logisticsDashboard { position:fixed; z-index:15; right:16px; top:94px; bottom:18px; display:none; width:min(820px,calc(100vw - 110px)); overflow:auto; padding:14px; border:1px solid var(--line-bright); border-radius:8px; background:rgba(8,19,25,.97); box-shadow:var(--shadow); }
       #logisticsDashboard.show { display:block; }
+      #financialsDashboard, #policyDashboard { position:fixed; z-index:15; right:16px; top:94px; bottom:18px; display:none; width:min(980px,calc(100vw - 110px)); overflow:auto; padding:16px; border:1px solid var(--line-bright); border-radius:8px; background:rgba(8,19,25,.98); box-shadow:var(--shadow); }
+      #financialsDashboard.show, #policyDashboard.show { display:block; }
+      .dash-tabs { display:flex; gap:4px; margin:10px 0; }
+      .dash-tab, .tiny-btn { padding:6px 9px; border:1px solid var(--line); border-radius:4px; color:#c8d3d1; background:#10222b; cursor:pointer; }
+      .dash-tab.on, .tiny-btn:hover { color:#eef3df; border-color:#9cad68; background:#3d5134; }
+      .matrix { display:grid; gap:6px; }
+      .matrix-row { padding:8px; border:1px solid var(--line); border-radius:4px; background:#10212a; }
+      .matrix-row header { display:flex; justify-content:space-between; gap:12px; margin-bottom:6px; }
+      .toggle-grid { display:flex; flex-wrap:wrap; gap:5px 10px; color:#b8c5c5; font-size:10px; }
+      .toggle-grid label { display:flex; align-items:center; gap:4px; }
+      .policy-row { display:grid; grid-template-columns:1.45fr repeat(3,.8fr) .52fr repeat(5,.48fr); gap:5px; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); font-size:10px; }
+      .policy-row select,.policy-row input[type=number],.work-select { min-width:0; padding:5px; color:#dfe8e5; border:1px solid var(--line); border-radius:3px; background:#10242d; }
+      #emergencyBar { position:fixed; z-index:17; left:50%; top:58px; transform:translateX(-50%); display:flex; gap:4px; padding:5px; border:1px solid rgba(219,108,99,.28); border-radius:6px; background:rgba(19,24,27,.92); }
+      .emergency-btn { padding:6px 9px; border:1px solid rgba(232,126,116,.32); border-radius:4px; color:#ffd8d3; background:#692d2d; cursor:pointer; font-size:9px; font-weight:900; text-transform:uppercase; }
+      .emergency-btn.cancel { color:#cbd5d2; background:#29363b; }
       .log-title { color:#dfe9dc; font-size:13px; font-weight:900; letter-spacing:.06em; text-transform:uppercase; }
       .log-summary { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:10px 0; }
       .log-kpi { padding:8px; border:1px solid var(--line); border-radius:4px; background:#10212a; }
@@ -145,8 +161,10 @@
         <button class="mode-btn" data-mode="rooms"><span class="mode-icon">&#9638;</span><span class="mode-label">Rooms</span></button>
         <button class="mode-btn" data-mode="objects"><span class="mode-icon">&#9881;</span><span class="mode-label">Objects</span></button>
         <button class="mode-btn" data-mode="staff"><span class="mode-icon">&#9787;</span><span class="mode-label">Staff</span></button>
+        <button class="mode-btn" data-mode="financials"><span class="mode-icon">$</span><span class="mode-label">Financials</span></button>
         <button class="mode-btn" data-mode="logistics"><span class="mode-icon">&#8644;</span><span class="mode-label">Logistics</span></button>
         <button class="mode-btn" data-mode="intelligence"><span class="mode-icon">&#9673;</span><span class="mode-label">Intelligence</span></button>
+        <button class="mode-btn" data-mode="policy"><span class="mode-icon">&#167;</span><span class="mode-label">Policy</span></button>
         <button class="mode-btn" data-mode="admin"><span class="mode-icon">&#9881;</span><span class="mode-label">Admin</span></button>
       </nav>
     </aside>
@@ -154,6 +172,7 @@
     <section id="status"><div id="cap"><span><span class="status-label">Population</span><span class="status-value">0 / 0</span></span></div><div class="status-card"><span><span class="status-label">Cash</span><span id="cash" class="status-value">$20,000</span></span></div><div class="status-card"><span><span class="status-label">Net / hour</span><span id="netHourly" class="status-value">$0</span></span></div><div class="status-card"><span><span class="status-label">Escaped</span><span id="escaped" class="status-value">0</span></span></div><div class="status-card"><span><span class="status-label">Recaptured</span><span id="caught" class="status-value">0</span></span></div></section>
     <aside id="clockbox"><div id="clock">08:00</div><div id="speeds"></div><button id="regimeBtn">Regime: Free time</button></aside>
     <div id="regimePanel"></div>
+    <div id="emergencyBar"><button class="emergency-btn" data-emergency="alarm">Alarm</button><button class="emergency-btn" data-emergency="lockdown">Full Lockdown</button><button class="emergency-btn" data-emergency="shakedown">Full Shakedown</button><button class="emergency-btn" data-emergency="armed-response">Armed Response</button><button class="emergency-btn cancel" data-emergency="none">Cancel</button></div>
     <aside id="inspector"><div class="inspector-kicker">Selected resident</div><div id="inspectName">No selection</div><div id="inspectState">Click a person to inspect</div><div id="inspectStats"></div><div id="inspectProfile"></div></aside>
     <div id="tip"></div>
 
@@ -163,7 +182,9 @@
     </section>
     <div id="utility" aria-hidden="true"><button id="qualBtn"></button><button id="roofBtn"></button></div>
     <aside id="logisticsDashboard" aria-label="Logistics dashboard"></aside>
-    <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="log-title">Prisoner intelligence</div><input id="intelSearch" aria-label="Search inmates" placeholder="Search name, crime, trait…"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Profiles, social ties, intelligence, and escape operations are fully visible.</div></section></aside>
+    <aside id="financialsDashboard" aria-label="Financials dashboard"></aside>
+    <aside id="policyDashboard" aria-label="Policy dashboard"></aside>
+    <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="log-title">Prisoner intelligence</div><input id="intelSearch" aria-label="Search inmates" placeholder="Search official records or known cases"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and evidence-backed assessments are visible here.</div></section></aside>
     <div id="hud"></div><div id="err"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

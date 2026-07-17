@@ -325,11 +325,11 @@ export class ConstructionSystem {
       if (target.mat === Obj.SecureBridge && target.x !== 370) return "Secure bridge must span the road and both two-tile approaches";
       return "";
     }
-    if (target.cat === "door" || target.cat === "jaildoor") {
+    if (target.cat === "door" || target.cat === "staffdoor" || target.cat === "jaildoor") {
       if (world.objKind[i] === Obj.Wall || world.objKind[i] === Obj.WallLight) return "";
       return this.hasPlannedSupport(target.x, target.z, "wall") ? "" : "Needs a completed or planned wall";
     }
-    if (target.cat === "fencedoor" || target.cat === "fencejaildoor") {
+    if (target.cat === "fencedoor" || target.cat === "fencestaffdoor" || target.cat === "fencejaildoor") {
       if (world.objKind[i] === Obj.Fence) return "";
       return this.hasPlannedSupport(target.x, target.z, "fence") ? "" : "Needs a completed or planned fence";
     }
@@ -351,7 +351,7 @@ export class ConstructionSystem {
 
   private targetReservationKeys(target: BuildTarget, world: World): string[] {
     if (target.cat === "floor") return [`floor:${target.x},${target.z}`];
-    if (["door", "jaildoor", "fencedoor", "fencejaildoor", "walllight"].includes(target.cat)) {
+    if (["door", "staffdoor", "jaildoor", "fencedoor", "fencestaffdoor", "fencejaildoor", "walllight"].includes(target.cat)) {
       return [`fixture:${target.x},${target.z}`];
     }
     if (target.cat !== "piece") return [`object:${target.x},${target.z}`];
@@ -372,8 +372,10 @@ export class ConstructionSystem {
       case "wall": return world.setWall(target.x, target.z, target.mat);
       case "fence": return world.setFence(target.x, target.z, target.mat);
       case "door": return world.setDoor(target.x, target.z);
+      case "staffdoor": return world.setDoor(target.x, target.z, "staff");
       case "jaildoor": return world.setDoor(target.x, target.z, true);
       case "fencedoor": return world.setFenceGate(target.x, target.z, false);
+      case "fencestaffdoor": return world.setFenceGate(target.x, target.z, "staff");
       case "fencejaildoor": return world.setFenceGate(target.x, target.z, true);
       case "lamp": return world.setLamp(target.x, target.z);
       case "walllight": return world.setWallLight(target.x, target.z);
@@ -385,10 +387,10 @@ export class ConstructionSystem {
 
   private dependencyReady(target: BuildTarget, world: World): boolean {
     const i = world.idx(target.x, target.z);
-    if (target.cat === "door" || target.cat === "jaildoor" || target.cat === "walllight") {
+    if (target.cat === "door" || target.cat === "staffdoor" || target.cat === "jaildoor" || target.cat === "walllight") {
       return world.objKind[i] === Obj.Wall || world.objKind[i] === Obj.WallLight;
     }
-    if (target.cat === "fencedoor" || target.cat === "fencejaildoor") return world.objKind[i] === Obj.Fence;
+    if (target.cat === "fencedoor" || target.cat === "fencestaffdoor" || target.cat === "fencejaildoor") return world.objKind[i] === Obj.Fence;
     return true;
   }
 
@@ -430,10 +432,10 @@ export class ConstructionSystem {
   }
 
   private applyDemolition(target: BuildTarget, snapshot: DemolitionSnapshot, world: World): boolean {
-    if (snapshot.kind === Obj.WallLight || snapshot.kind === Obj.Door || snapshot.kind === Obj.JailDoor) {
+    if (snapshot.kind === Obj.WallLight || snapshot.kind === Obj.Door || snapshot.kind === Obj.StaffDoor || snapshot.kind === Obj.JailDoor) {
       return world.setWall(target.x, target.z, snapshot.mat || 1);
     }
-    if (snapshot.kind === Obj.FenceDoor || snapshot.kind === Obj.FenceJailDoor) {
+    if (snapshot.kind === Obj.FenceDoor || snapshot.kind === Obj.StaffFenceDoor || snapshot.kind === Obj.FenceJailDoor) {
       return world.setFence(target.x, target.z, snapshot.mat || 1);
     }
     return world.erase(target.x, target.z);
@@ -491,7 +493,7 @@ export class ConstructionSystem {
 }
 
 function isConstructedTool(cat: ToolCat): boolean {
-  return ["floor", "wall", "fence", "door", "jaildoor", "fencedoor", "fencejaildoor", "lamp", "walllight", "rooflight", "piece", "erase"].includes(cat);
+  return ["floor", "wall", "fence", "door", "staffdoor", "jaildoor", "fencedoor", "fencestaffdoor", "fencejaildoor", "lamp", "walllight", "rooflight", "piece", "erase"].includes(cat);
 }
 
 function operationPriority(operation: BuildOperation): number {
@@ -506,8 +508,10 @@ function isBoxedObject(kind: number): boolean {
 
 function objectKindFor(cat: ToolCat): number {
   if (cat === "door") return Obj.Door;
+  if (cat === "staffdoor") return Obj.StaffDoor;
   if (cat === "jaildoor") return Obj.JailDoor;
   if (cat === "fencedoor") return Obj.FenceDoor;
+  if (cat === "fencestaffdoor") return Obj.StaffFenceDoor;
   if (cat === "fencejaildoor") return Obj.FenceJailDoor;
   if (cat === "lamp") return Obj.Lamp;
   if (cat === "walllight") return Obj.WallLight;
@@ -554,8 +558,10 @@ function toolFromSnapshot(snapshot: DemolitionSnapshot): Tool {
   if (snapshot.kind === Obj.Wall || snapshot.kind === Obj.WallLight) return { cat: "wall", mat: snapshot.mat };
   if (snapshot.kind === Obj.Fence || snapshot.kind === Obj.CutFence) return { cat: "fence", mat: snapshot.mat };
   if (snapshot.kind === Obj.Door) return { cat: "door", mat: 0 };
+  if (snapshot.kind === Obj.StaffDoor) return { cat: "staffdoor", mat: 0 };
   if (snapshot.kind === Obj.JailDoor) return { cat: "jaildoor", mat: 0 };
   if (snapshot.kind === Obj.FenceDoor) return { cat: "fencedoor", mat: 0 };
+  if (snapshot.kind === Obj.StaffFenceDoor) return { cat: "fencestaffdoor", mat: 0 };
   if (snapshot.kind === Obj.FenceJailDoor) return { cat: "fencejaildoor", mat: 0 };
   if (snapshot.kind === Obj.Lamp) return { cat: "lamp", mat: 0 };
   if (snapshot.kind === Obj.RoofLight) return { cat: "rooflight", mat: 0 };

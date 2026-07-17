@@ -14,23 +14,34 @@ export function angleLerp(a: number, b: number, t: number): number {
   return a + d * t;
 }
 
-export function passable(world: World, i: number, staff: boolean): boolean {
+export function passable(world: World, i: number, staff: boolean, keyTier = 0): boolean {
   const k = world.objKind[i];
-  if (defOf(k)?.walkable) return true;
   // The two conditional cases the registry can't state as a flag.
-  if (k === Obj.FenceJailDoor) return staff;
+  if (k === Obj.StaffFenceDoor || k === Obj.StaffDoor) return staff || keyTier >= 1;
+  if (k === Obj.FenceJailDoor) return staff || keyTier >= 2;
   // Open jail doors let prisoners through; closed ones are staff-only.
-  if (k === Obj.JailDoor) return staff || !world.jailClosed[i];
+  if (k === Obj.JailDoor) return staff || keyTier >= 2 || !world.jailClosed[i];
+  if (defOf(k)?.walkable) return true;
   return false;
 }
 
 /** May a prisoner BE here under the access rules? (Escapes ignore this.)
  *  Doors and gates are connectors between rooms — always crossable; whether
  *  they're physically passable is a separate check. */
-export function prisonerAllowed(world: World, i: number): boolean {
+export function prisonerAllowed(world: World, i: number, keyTier = 0, custody = "minimum"): boolean {
   const k = world.objKind[i];
-  if (k === Obj.Door || k === Obj.JailDoor || k === Obj.FenceDoor || k === Obj.CutFence) return true;
+  if (k === Obj.StaffDoor || k === Obj.StaffFenceDoor) return keyTier >= 1;
+  if (k === Obj.JailDoor || k === Obj.FenceJailDoor) return keyTier >= 2 || world.jailClosed[i] === 0;
+  if (k === Obj.Door || k === Obj.JailDoor || k === Obj.FenceDoor || k === Obj.FenceJailDoor || k === Obj.CutFence) return true;
+  if (world.task2Access) return world.task2Access(i, custody);
   return world.accessAt(i) === Access.Prisoners;
+}
+
+/** Area access is independent of physical doors. Portal tiles are checked by
+ * `passable`; this predicate controls the area on the far side. */
+export function roleAllowed(world: World, i: number, role: string, custody?: string): boolean {
+  if (defOf(world.objKind[i])?.place === "opening") return true;
+  return world.task2RoleAccess ? world.task2RoleAccess(i, role, custody) : true;
 }
 
 export function sightBlocks(world: World, i: number): boolean {
@@ -38,7 +49,7 @@ export function sightBlocks(world: World, i: number): boolean {
 }
 
 export function isFenceKind(k: number): boolean {
-  return k === Obj.Fence || k === Obj.FenceJailDoor;
+  return k === Obj.Fence || k === Obj.StaffFenceDoor || k === Obj.FenceJailDoor;
 }
 
 /** A* over the tile grid. `open` decides what counts as walkable — which is how

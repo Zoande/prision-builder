@@ -22,7 +22,7 @@ export function record(ag: Agent, world: World, i: number) {
   let v = K_BLOCKED;
   if (isFenceKind(k)) v = K_FENCE;
   else if (k === Obj.CutFence) v = K_CUT;
-  else if (k === Obj.JailDoor) v = K_DOOR;
+  else if (k === Obj.JailDoor || k === Obj.StaffDoor || k === Obj.StaffFenceDoor || k === Obj.FenceJailDoor) v = K_DOOR;
   else if (passable(world, i, false)) v = K_OPEN;
   ag.known!.set(i, v);
 

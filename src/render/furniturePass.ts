@@ -5,7 +5,7 @@
 
 import furnitureShader from "../furniture.wgsl?raw";
 import { CARGO_KIND, DRIVER_KIND, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND, INTAKE_TRUCK_KIND, TRAY_STACK_KIND, TRUCK_KIND } from "../sim/agents";
-import { Obj } from "../sim/world";
+import { OBJ_DEFS, Obj } from "../sim/world";
 import { FENCE_H, PRELUDE, sceneLightEntries, type SceneLight } from "./shaderCommon";
 
 // Palette indices (mirror furniture.wgsl).
@@ -113,6 +113,14 @@ const loadingPalletMesh = () => new Float32Array([
   ...box(0.92, 1.08, 0.00, 0.10, 0.12, 1.88, DARKWOOD),
   ...box(1.75, 1.90, 0.00, 0.10, 0.12, 1.88, DARKWOOD),
 ]);
+
+function genericEquipmentMesh(w: number, d: number): Float32Array {
+  return new Float32Array([
+    ...box(0.08, Math.max(.2, w - .08), 0.00, 0.72, 0.08, Math.max(.2, d - .08), STEEL),
+    ...box(0.04, Math.max(.2, w - .04), 0.72, 0.82, 0.04, Math.max(.2, d - .04), DARK),
+    ...box(0.18, Math.max(.2, w - .18), 0.82, 1.05, 0.18, Math.max(.2, d - .18), SCREEN),
+  ]);
+}
 
 const freezerMesh = () => new Float32Array([
   ...box(0.04, 1.96, 0.00, 1.75, 0.10, 0.90, CERAMIC),
@@ -675,6 +683,11 @@ export class FurniturePass {
       [HOLE_ENTRY_KIND, holeEntryMesh()],
       [HOLE_SURF_KIND, holeSurfMesh()],
     ];
+    const present = new Set(meshes.map(([kind]) => kind));
+    for (const def of OBJ_DEFS) {
+      if (def.place !== "piece" || def.render !== "furniture" || present.has(def.kind)) continue;
+      meshes.push([def.kind, genericEquipmentMesh(def.w, def.d)]);
+    }
     for (const [kind, mesh] of meshes) {
       const buf = device.createBuffer({ size: mesh.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(buf, 0, mesh as BufferSource);
@@ -709,7 +722,7 @@ export class FurniturePass {
 /** The ghost pass consumes the exact same authored meshes as completed
  * furniture, so planned objects do not collapse into generic cubes. */
 export function furnitureMeshRegistry(): Map<number, Float32Array> {
-  return new Map<number, Float32Array>([
+  const result = new Map<number, Float32Array>([
     [Obj.Toilet, toiletMesh()], [Obj.Shower, showerMesh()], [Obj.Drain, drainMesh()],
     [Obj.FenceDoor, fenceGateMesh(ORANGE)], [Obj.FenceJailDoor, fenceGateMesh(RED)],
     [Obj.Table, tableMesh()], [Obj.Bench2, benchMesh(2)], [Obj.Bench4, benchMesh(4)],
@@ -732,4 +745,8 @@ export function furnitureMeshRegistry(): Map<number, Float32Array> {
     [Obj.SearchTable, woodTableMesh(2, 1)], [Obj.UniformRack, uniformRackMesh()],
     [Obj.SecureBridge, secureBridgeMesh()],
   ]);
+  for (const def of OBJ_DEFS) if (def.place === "piece" && def.render === "furniture" && !result.has(def.kind)) {
+    result.set(def.kind, genericEquipmentMesh(def.w, def.d));
+  }
+  return result;
 }

@@ -8,7 +8,7 @@
 import { World } from "./world.ts";
 import {
   Item, type Stack,
-  canPocket, itemDef, pocket, removeFromHands, removeItem, stashAdd, stashCount, stashTake,
+  canPocket, itemDef, pocket, removeFromHands, stashAdd, stashCount, stashTake,
   countItem, stow, takeInHands,
 } from "./items.ts";
 import { pathAdjacent } from "./move.ts";
@@ -16,7 +16,8 @@ import type { Agent } from "./agent.ts";
 import { lawfulOpen } from "./move.ts";
 import type { Agents } from "./agents.ts";
 
-/** Meals feed the escape kit: a tucked-away spoon, or progress on a cutter. */
+/** Meal service can expose a physical spoon. Cutters now come from work,
+ * trade, mail or crafting and are never fabricated by eating meals. */
 export function mealContraband(A: Agents, ag: Agent): boolean {
   if (!A.kitchen || !ag.plan) return false;
   if (ag.plan.method === "dig") {
@@ -24,25 +25,10 @@ export function mealContraband(A: Agents, ag: Agent): boolean {
     return acquire(A, ag, Item.Spoon);
   }
   if (ag.plan.method === "cut") {
-    const stolen = acquire(A, ag, Item.Spoon);
-    if (!stolen) return false;
-    if (toolCount(A, ag, Item.Spoon) >= 3) {
-      consumeTools(A, ag, Item.Spoon, 3);
-      acquire(A, ag, Item.Cutter);
-    }
-    return true;
+    return false;
   }
   return false;
 }
-
-function consumeTools(A: Agents, ag: Agent, kind: number, count: number): void {
-  let left = count;
-  while (left > 0 && removeItem(ag.inv, kind)) left--;
-  if (ag.bedIdx < 0) return;
-  const hidden = stashOf(A, ag.bedIdx);
-  while (left > 0 && stashTake(hidden, kind)) left--;
-}
-
 
 /** Take an item: into a pocket if it fits, else into a hand. If neither, it
  *  goes straight under the bunk (he can't very well stand there holding it). */

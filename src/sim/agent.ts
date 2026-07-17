@@ -24,8 +24,8 @@ export const DRIVER_KIND = 1007;
 // --- The regime -------------------------------------------------------------
 
 /** Regime activities, one per hour of the 24h clock. */
-export const REG = { Lockup: 0, Free: 1, Eating: 2, Yard: 3, Shower: 4, Sleep: 5 } as const;
-export const REG_NAMES = ["Lockup", "Free time", "Eating", "Yard", "Shower", "Sleep"];
+export const REG = { Lockup: 0, Free: 1, Eating: 2, Yard: 3, Shower: 4, Sleep: 5, Work: 6, RollCall: 7 } as const;
+export const REG_NAMES = ["Lockup", "Free time", "Eating", "Yard", "Shower", "Sleep", "Work", "Roll call"];
 
 export function defaultRegime(): number[] {
   const r = new Array(24).fill(REG.Free);
@@ -33,8 +33,11 @@ export function defaultRegime(): number[] {
   r[6] = REG.Shower;
   r[7] = REG.Eating; r[8] = REG.Eating;
   r[12] = REG.Yard; r[13] = REG.Yard;
+  r[9] = REG.Work; r[10] = REG.Work; r[11] = REG.Work;
+  r[14] = REG.Work; r[15] = REG.Work; r[16] = REG.Work;
   r[17] = REG.Eating; r[18] = REG.Eating;
   r[21] = REG.Lockup;
+  r[20] = REG.RollCall;
   r[22] = REG.Sleep; r[23] = REG.Sleep;
   return r;
 }
@@ -68,7 +71,7 @@ export const BOOK_READ_RATE = 1 / 35; // recreation per second, holding a book
 export const READ_TIME = 45;
 export const SPOONS_TO_DIG = 4;
 export const TUNNEL_DRIFT = 0.16; // radians of accumulated error per dug tile
-export const ESCAPE_MARGIN = 26;  // this close to the map edge = gone
+export const ESCAPE_MARGIN = 1;  // entering a map-edge tile completes escape
 
 // Decay is sized against the regime: meals are ~13 game hours (390s) apart
 // overnight, so food must last comfortably longer than that.
@@ -103,6 +106,12 @@ export const NEED_TUNING: Record<NeedName, { decay: number; weight: number }> = 
   bladder: { decay: 1 / 260, weight: 1.5 },
   spirituality: { decay: 1 / 1400, weight: 0.4 },
   social: { decay: 1 / 720, weight: 0.58 },
+  family: { decay: 1 / 2200, weight: 0.48 },
+  safety: { decay: 1 / 960, weight: 0.8 },
+  privacy: { decay: 1 / 1200, weight: 0.48 },
+  tobacco: { decay: 1 / 620, weight: 0.65 },
+  alcohol: { decay: 1 / 880, weight: 0.65 },
+  drugs: { decay: 1 / 760, weight: 0.8 },
 };
 
 export function freshNeeds(): Record<NeedName, number> {
@@ -208,6 +217,11 @@ export interface Agent {
   cuffed: boolean; // newcomers wait handcuffed for a cell assignment
   cellRoom: number; // claimed cell/dorm room id, -1 = none
   speedMul: number;
+  /** Physical stolen-key access: 0 none, 1 staff, 2 guard. */
+  accessKeys: number;
+  /** 0..1 suspicion reduction from a physically carried disguise. */
+  disguise: number;
+  protectiveCustody: boolean;
   plan: EscapePlan | null;
   tunnel: Tunnel | null;
   tunnelEntry: number;
@@ -272,6 +286,9 @@ export function blankAgent(kind: number): Agent {
     cuffed: prisoner,
     cellRoom: -1,
     speedMul: 1,
+    accessKeys: 0,
+    disguise: 0,
+    protectiveCustody: false,
     plan: null, tunnel: null, tunnelEntry: -1, tunnelFace: "", underground: false,
     escapeOperationId: -1, escapeRole: "", socialAction: "none", socialGroup: -1,
     planBias: null,

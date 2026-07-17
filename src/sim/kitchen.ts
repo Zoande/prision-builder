@@ -1,6 +1,7 @@
 import { dayOf, hourOf } from "./time.ts";
 import { LogisticsSystem, type CargoPackage } from "./logistics.ts";
 import { Obj, SHELF_KINDS, World } from "./world.ts";
+import type { ItemSystem } from "./itemSystem.ts";
 
 export interface KitchenSave {
   frozenMeals: number;
@@ -24,6 +25,7 @@ export interface CookHaul {
 }
 
 export class KitchenSystem {
+  physicalItems: ItemSystem | null = null;
   frozenMeals = 0;
   cleanTrays = 0;
   cleanSpoons = 0;
@@ -85,18 +87,32 @@ export class KitchenSystem {
     if (this.frozenMeals <= 0 || this.cleanTrays <= 0 || this.cleanSpoons <= 0) return false;
     this.frozenMeals--; this.cleanTrays--; this.cleanSpoons--;
     this.preparedSettings++;
+    this.movePhysical("tray", "institution:kitchen-clean", "institution:kitchen-in-use", 1);
+    this.movePhysical("spoon", "institution:kitchen-clean", "institution:kitchen-in-use", 1);
+    const frozen = this.physicalItems?.itemsIn("institution:kitchen-clean").find((i) => i.defId === "frozen-meal");
+    if (frozen) this.physicalItems!.destroy(frozen.id, 0, -1, "meal-cooked");
     return true;
   }
 
   releaseMealSet(): void {
     this.frozenMeals++; this.cleanTrays++; this.cleanSpoons++; this.preparedSettings = Math.max(0, this.preparedSettings - 1);
+    this.movePhysical("tray", "institution:kitchen-in-use", "institution:kitchen-clean", 1);
+    this.movePhysical("spoon", "institution:kitchen-in-use", "institution:kitchen-clean", 1);
   }
 
   mealTaken(): void { this.preparedSettings = Math.max(0, this.preparedSettings - 1); }
 
-  finishMeal(spoonStolen: boolean): void {
+  finishMeal(spoonStolen: boolean, prisonerId = -1): boolean {
     this.dirtyTrays++;
     if (!spoonStolen) this.dirtySpoons++;
+    this.movePhysical("tray", "institution:kitchen-in-use", "institution:kitchen-dirty", 1);
+    const spoon = this.physicalItems?.itemsIn("institution:kitchen-in-use").find((i) => i.defId === "spoon");
+    if (spoonStolen && spoon && prisonerId >= 0) {
+      this.physicalItems!.moveToContainer(spoon.id, `agent:${prisonerId}:pockets`, 0, prisonerId, true);
+      return true;
+    }
+    if (spoon) this.physicalItems!.moveToContainer(spoon.id, "institution:kitchen-dirty", 0);
+    return false;
   }
 
   claimWash(cookId: number): number {
@@ -113,6 +129,8 @@ export class KitchenSystem {
     const amount = this.washClaims.get(cookId) ?? 0;
     this.washClaims.delete(cookId);
     this.cleanTrays += amount; this.cleanSpoons += amount;
+    this.movePhysical("tray", "institution:kitchen-dirty", "institution:kitchen-clean", amount);
+    this.movePhysical("spoon", "institution:kitchen-dirty", "institution:kitchen-clean", amount);
     return amount;
   }
 
@@ -152,6 +170,8 @@ export class KitchenSystem {
     else if (pkg.commodity === "tray") this.cleanTrays += pkg.quantity;
     else if (pkg.commodity === "spoon") this.cleanSpoons += pkg.quantity;
     else return false;
+    if (this.physicalItems) for (const id of this.physicalItems.createMany(pkg.commodity, pkg.quantity, 0))
+      this.physicalItems.moveToContainer(id, "institution:kitchen-clean", 0, cookId);
     this.logistics.packages.delete(pkg.id);
     return true;
   }
@@ -167,6 +187,8 @@ export class KitchenSystem {
   acceptBookPackage(pkg: CargoPackage): boolean {
     if (pkg.commodity !== "book" || this.bookTarget <= this.books) return false;
     this.books = Math.min(this.bookTarget, this.books + pkg.quantity);
+    if (this.physicalItems) for (const id of this.physicalItems.createMany("book", pkg.quantity, 0))
+      this.physicalItems.moveToContainer(id, "institution:library-stock", 0);
     this.logistics.packages.delete(pkg.id);
     return true;
   }
@@ -205,6 +227,12 @@ export class KitchenSystem {
       return world.tilesOfKind(Obj.ServingTable)[0] ?? world.tilesOfKind(Obj.Sink)[0] ?? -1;
     }
     return -1;
+  }
+
+  private movePhysical(defId: string, from: string, to: string, amount: number): void {
+    if (!this.physicalItems) return;
+    for (const item of this.physicalItems.itemsIn(from).filter((i) => i.defId === defId).slice(0, amount))
+      this.physicalItems.moveToContainer(item.id, to, 0);
   }
 
   saveData(): KitchenSave {

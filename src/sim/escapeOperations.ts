@@ -36,6 +36,8 @@ export interface EscapeOperation {
   launchAt: number;
   blocker: string;
   tunnelNetworkId: number;
+  acquisition: { asset: string; sources: string[]; state: "needed" | "acquired" | "lost"; holderId: number; itemId: number } | null;
+  distraction: { planned: boolean; instigatorId: number; state: "none" | "pending" | "active" | "complete"; engagementId: number };
 }
 
 export interface TunnelEntry {
@@ -135,6 +137,8 @@ export class EscapeOperationsSystem {
       plan: this.copyPlan(plan), sharedIntel: [], cache: { spoons: 0, cutters: 0 },
       exposure: 0, cohesion: 1, rallyTile: plan.breaches[0] ?? plan.toiletIdx,
       launchAt: worldTime + 30, blocker: "Quietly testing possible recruits", tunnelNetworkId: -1,
+      acquisition: this.initialAcquisition(plan.method, id),
+      distraction: { planned: false, instigatorId: -1, state: "none", engagementId: -1 },
     };
     this.operations.set(id, op); ag.escapeOperationId = id; ag.escapeRole = role;
     return op;
@@ -337,6 +341,7 @@ export class EscapeOperationsSystem {
   }
 
   private hasRoleQuorum(op: EscapeOperation, byId: Map<number, Agent>): boolean {
+    if (op.acquisition && op.acquisition.state !== "acquired") { op.blocker = `Needs physical ${op.acquisition.asset}`; return false; }
     const committed = op.members.filter((m) => m.ready && m.committed && byId.has(m.agentId));
     if (committed.length < Math.max(1, Math.ceil(op.members.length * .5))) { op.blocker = "Waiting for a committed majority"; return false; }
     if (!committed.some((m) => m.agentId === op.leaderId || m.role === "lieutenant")) { op.blocker = "No coordinator ready"; return false; }
@@ -346,6 +351,19 @@ export class EscapeOperationsSystem {
   }
 
   private copyPlan(plan: EscapePlan): EscapePlan { return { ...plan, breaches: [...plan.breaches] }; }
+  private initialAcquisition(method: Method, operationId: number): EscapeOperation["acquisition"] {
+    if (method === "cut") {
+      const asset = ["cutter", "hacksaw-blade", "pruning-shears"][operationId % 3];
+      return { asset, sources: ["metalshop", "greenhouse", "trade", "crafting", "theft"], state: "needed", holderId: -1, itemId: -1 };
+    }
+    if (method === "dig") {
+      const asset = ["spoon", "trowel", "shovel"][operationId % 3];
+      return { asset, sources: ["canteen", "greenhouse", "groundskeeping", "trade", "theft"], state: "needed", holderId: -1, itemId: -1 };
+    }
+    const assets = ["staff-key", "guard-key", "staff-uniform", "rope", "radio", "service-pistol"];
+    const asset = assets[operationId % assets.length];
+    return { asset, sources: ["laundry", "maintenance", "groundskeeping", "trade", "theft", "assault"], state: "needed", holderId: -1, itemId: -1 };
+  }
   private random(): number { let x = this.rngState | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rngState = x >>> 0; return this.rngState / 0x1_0000_0000; }
 
   saveData() {
@@ -358,7 +376,9 @@ export class EscapeOperationsSystem {
 
   loadData(data: Partial<ReturnType<EscapeOperationsSystem["saveData"]>>): void {
     this.operations.clear();
-    for (const o of data.operations ?? []) this.operations.set(o.id, { ...o, members: o.members.map((m) => ({ ...m })), plan: this.copyPlan(o.plan), sharedIntel: [...o.sharedIntel], cache: { ...o.cache } });
+    for (const o of data.operations ?? []) this.operations.set(o.id, { ...o, members: o.members.map((m) => ({ ...m })), plan: this.copyPlan(o.plan), sharedIntel: [...o.sharedIntel], cache: { ...o.cache },
+      acquisition: o.acquisition ? { ...o.acquisition, sources: [...o.acquisition.sources] } : this.initialAcquisition(o.method, o.id),
+      distraction: o.distraction ? { ...o.distraction } : { planned: false, instigatorId: -1, state: "none", engagementId: -1 } });
     this.tunnels.clear();
     for (const t of data.tunnels ?? []) this.tunnels.set(t.id, { ...t, entries: t.entries.map((e) => ({ ...e, claimedBy: -1 })), edges: t.edges.map((e) => ({ ...e })), activeDiggers: [], occupants: [], mainClaimedBy: -1, cache: { ...t.cache } });
     this.nextOperationId = data.nextOperationId ?? 1; this.nextTunnelId = data.nextTunnelId ?? 1; this.rngState = data.rngState ?? 0x31d8ca71;

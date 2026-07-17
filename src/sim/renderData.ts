@@ -41,7 +41,7 @@ export class PersonInstanceStager {
   stage(agents: readonly Agent[]): PersonInstances {
     for (const batch of this.all) batch.count = 0;
     for (const ag of agents) {
-      if (ag.underground) continue;
+      if (ag.underground || ag.state === "removed") continue;
       const batch = this.batch(ag.kind);
       if (batch) batch.count++;
     }
@@ -49,7 +49,7 @@ export class PersonInstanceStager {
 
     const offsets = { prisoners: 0, guards: 0, cooks: 0, workmen: 0, snipers: 0 };
     for (const ag of agents) {
-      if (ag.underground) continue;
+      if (ag.underground || ag.state === "removed") continue;
       const key = this.key(ag.kind);
       if (!key) continue;
       const batch = this.instances[key];
@@ -83,8 +83,11 @@ export class PersonInstanceStager {
   private key(kind: number): keyof PersonInstances | null {
     if (kind === Obj.Prisoner) return "prisoners";
     if (kind === Obj.Guard) return "guards";
+    if (kind === Obj.Investigator || kind === Obj.DogHandler || kind === Obj.ArmedGuard) return "guards";
     if (kind === Obj.Cook) return "cooks";
+    if (kind === Obj.Doctor) return "cooks";
     if (kind === Obj.Workman) return "workmen";
+    if (kind === Obj.SecurityDog) return "workmen";
     if (kind === Obj.Sniper) return "snipers";
     return null;
   }
