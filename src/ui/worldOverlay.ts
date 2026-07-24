@@ -21,6 +21,7 @@ export class WorldOverlay {
     private readonly root: HTMLElement,
     private readonly capacity: HTMLElement,
     private readonly tip: HTMLElement,
+    private readonly onIssueClick?: (id: string) => void,
   ) {
     this.arrow = document.createElement("div");
     this.arrow.className = "build-preview-arrow";
@@ -59,6 +60,7 @@ export class WorldOverlay {
         el.textContent = "!";
         el.addEventListener("mousemove", (event) => this.showTip(event, el.dataset.issue ?? ""));
         el.addEventListener("mouseleave", () => { this.tip.style.display = "none"; });
+        el.addEventListener("click", () => this.onIssueClick?.(el.dataset.issueId ?? ""));
         this.root.appendChild(el);
         item = { el, x: issue.x, z: issue.z };
         this.warnings.set(issue.id, item);
@@ -66,6 +68,7 @@ export class WorldOverlay {
       item.x = issue.x;
       item.z = issue.z;
       item.el.dataset.issue = issue.issue;
+      item.el.dataset.issueId = issue.id;
     }
     for (const [id, item] of this.warnings) {
       if (!issueIds.has(id)) { item.el.remove(); this.warnings.delete(id); }

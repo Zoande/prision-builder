@@ -16,6 +16,18 @@ function readBody(req) {
 }
 
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const path = id.replaceAll("\\", "/");
+          if (path.includes("/src/render/") || path.endsWith(".wgsl")) return "rendering";
+          if (path.includes("/src/sim/")) return "simulation";
+          return undefined;
+        },
+      },
+    },
+  },
   plugins: [{
     name: "prototype-save-file",
     configureServer(server) {
@@ -29,8 +41,14 @@ export default defineConfig({
           if (req.method === "POST") {
             const body = await readBody(req);
             const incoming = JSON.parse(body);
-            if (incoming?.version !== 5) throw new Error("Only save version 5 is accepted");
+            if (incoming?.version !== 6) throw new Error("Only save version 6 is accepted");
             writeFileSync(savePath, body, "utf8");
+            res.setHeader("Content-Type", "application/json");
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (req.method === "DELETE") {
+            writeFileSync(savePath, "null", "utf8");
             res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ ok: true }));
             return;

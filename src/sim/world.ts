@@ -78,6 +78,13 @@ export interface RoomLabel {
   z: number;
 }
 
+export interface RoomValidationIssue {
+  code: "external" | "size" | "open-sky" | "roof" | "missing-object" | "jail-door" | "road-gate";
+  message: string;
+  missingKinds: number[];
+  suggestedCatalog: string;
+}
+
 // How much a well-furnished room speeds up the needs filled inside it. A bare
 // room fills at 1.0x; a lavish one at 1 + AMBIENCE_MAX.
 const AMBIENCE_MAX = 0.5;
@@ -786,39 +793,51 @@ export class World {
   /** Recheck every room's requirements and re-score its furnishing. */
   validateRooms() {
     for (const r of this.rooms.values()) {
-      r.valid = this.roomIssue(r) === "";
+      r.valid = this.roomIssues(r).length === 0;
       r.ambience = this.roomAmbience(r);
     }
   }
 
-  /** Why this room doesn't work, straight off its ROOM_DEFS row. "" = it does. */
-  private roomIssue(r: Room): string {
+  /** Every reason this room cannot operate. Invalid rooms behave as Empty. */
+  roomIssues(r: Room): RoomValidationIssue[] {
+    const issues: RoomValidationIssue[] = [];
     const external = this.externalRoomIssues.get(r.id);
-    if (external) return external;
+    if (external) issues.push({ code: "external", message: external, missingKinds: [], suggestedCatalog: "" });
     const def = roomDef(r.type);
-    if (!def) return "";
+    if (!def) return issues;
     if (def.minSquare > 0 && !this.containsSquare(r.tiles, def.minSquare)) {
-      return `Needs a ${def.minSquare}x${def.minSquare} clear area.`;
+      issues.push({ code: "size", message: `Needs a ${def.minSquare}x${def.minSquare} clear area.`, missingKinds: [], suggestedCatalog: "" });
     }
     if (def.openSky) {
-      for (const t of r.tiles) if (this.roofed[t]) return "Must be outdoors under open sky.";
+      if ([...r.tiles].some((t) => this.roofed[t])) issues.push({ code: "open-sky", message: "Must be outdoors under open sky.", missingKinds: [], suggestedCatalog: "" });
     } else if (r.type === RoomType.Reception) {
-      for (const t of r.tiles) if (!this.roofed[t]) return "Must be enclosed and roofed.";
+      if ([...r.tiles].some((t) => !this.roofed[t])) issues.push({ code: "roof", message: "Must be enclosed and roofed.", missingKinds: [], suggestedCatalog: "build:walls" });
     }
     for (const req of def.requires) {
       let found = false;
       for (const t of r.tiles) {
         if (req.kinds.includes(this.objKind[t])) { found = true; break; }
       }
-      if (!found) return req.issue;
+      if (!found) {
+        const paletteGroup = req.kinds.map((kind) => defOf(kind)?.palette?.group).find(Boolean);
+        issues.push({
+          code: "missing-object", message: req.issue, missingKinds: [...req.kinds],
+          suggestedCatalog: paletteGroup ? `objects:${paletteGroup.toLowerCase().replace(/\s+/g, "-")}` : "",
+        });
+      }
     }
     if (def.needsJailDoor && !this.roomHasJailDoor(r)) {
-      return "Needs a jail door on its boundary.";
+      issues.push({ code: "jail-door", message: "Needs a jail door on its boundary.", missingKinds: [Obj.JailDoor], suggestedCatalog: "objects:doors" });
     }
     if (def.needsRoadGate && !this.roomHasRoadGate(r)) {
-      return "Needs a road-facing gate.";
+      issues.push({ code: "road-gate", message: "Needs a road-facing gate.", missingKinds: [Obj.FenceDoor, Obj.StaffFenceDoor], suggestedCatalog: "objects:doors" });
     }
-    return "";
+    return issues;
+  }
+
+  /** Compatibility summary for labels and saves that still use one string. */
+  private roomIssue(r: Room): string {
+    return this.roomIssues(r).map((issue) => issue.message).join(" \u00b7 ");
   }
 
   private roomHasRoadGate(r: Room): boolean {

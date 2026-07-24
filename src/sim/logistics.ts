@@ -184,6 +184,14 @@ export class LogisticsSystem {
     }
   }
 
+  returnToStock(owner: string): void {
+    for (const pkg of this.packages.values()) {
+      if (pkg.reservedBy !== owner) continue;
+      pkg.reservedBy = null;
+      pkg.state = "delivery";
+    }
+  }
+
   consume(owner: string): void {
     for (const pkg of [...this.packages.values()]) {
       if (pkg.reservedBy === owner) this.packages.delete(pkg.id);
@@ -225,7 +233,8 @@ export class LogisticsSystem {
   tick(dt: number, worldTime: number, world: World): void {
     this.warnings.clear();
     this.dispatchPurchases(worldTime);
-    const yard = this.selectedRoom(world, RoomType.Delivery);
+    const yards = this.selectedRooms(world, RoomType.Delivery);
+    const yard = yards.sort((a, b) => this.freePalletSlots(world, b) - this.freePalletSlots(world, a))[0] ?? null;
     const slots = yard ? this.freePalletSlots(world, yard) : 0;
     if (!yard) this.warnings.add("No valid Delivery Yard");
 
@@ -354,20 +363,45 @@ export class LogisticsSystem {
   }
 
   private selectedRoom(world: World, type: number): Room | null {
-    return [...world.rooms.values()].find((room) => room.type === type && room.valid) ?? null;
+    return this.selectedRooms(world, type)[0] ?? null;
+  }
+
+  private selectedRooms(world: World, type: number): Room[] {
+    return [...world.rooms.values()].filter((room) => room.type === type && room.valid);
   }
 
   private palletAnchor(world: World, room: Room): number {
-    for (const tile of room.tiles) if (world.objKind[tile] === Obj.LoadingPallet) return world.anchorOf(tile);
-    return room.tiles.values().next().value ?? 0;
+    const anchors = new Set<number>();
+    for (const tile of room.tiles) if (world.objKind[tile] === Obj.LoadingPallet) anchors.add(world.anchorOf(tile));
+    let best = room.tiles.values().next().value ?? 0, bestCount = Infinity;
+    for (const anchor of anchors) {
+      let count = 0;
+      for (const pkg of this.packages.values()) {
+        if (!["delivery", "reserved"].includes(pkg.state)) continue;
+        if (Math.floor(pkg.x) === anchor % world.size && Math.floor(pkg.z) === ((anchor / world.size) | 0)) count++;
+      }
+      if (count < bestCount) { best = anchor; bestCount = count; }
+    }
+    return best;
   }
 
   private freePalletSlots(world: World, room: Room): number {
     const pallets = new Set<number>();
     for (const tile of room.tiles) if (world.objKind[tile] === Obj.LoadingPallet) pallets.add(world.anchorOf(tile));
     let occupied = 0;
-    for (const pkg of this.packages.values()) if (pkg.state === "delivery" || pkg.state === "reserved") occupied++;
+    for (const pkg of this.packages.values()) if ((pkg.state === "delivery" || pkg.state === "reserved") &&
+        world.inBounds(Math.floor(pkg.x), Math.floor(pkg.z)) && room.tiles.has(world.idx(Math.floor(pkg.x), Math.floor(pkg.z)))) occupied++;
     return Math.max(0, pallets.size * PALLET_CAPACITY - occupied);
+  }
+
+  palletUtilization(world: World): { roomId: number; used: number; capacity: number }[] {
+    return this.selectedRooms(world, RoomType.Delivery).map((room) => {
+      const capacity = this.freePalletSlots(world, room);
+      const pallets = new Set<number>();
+      for (const tile of room.tiles) if (world.objKind[tile] === Obj.LoadingPallet) pallets.add(world.anchorOf(tile));
+      const total = pallets.size * PALLET_CAPACITY;
+      return { roomId: room.id, used: total - capacity, capacity: total };
+    });
   }
 
   private loadExports(truck: Truck, world: World, delivery: Room): void {

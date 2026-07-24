@@ -40,7 +40,9 @@ import { IntakeSystem } from "./sim/intake";
 import { commodityDef, recipeCost } from "./sim/commodities";
 import { Task2Systems } from "./sim/task2Systems";
 import { Task3Systems } from "./sim/task3Systems";
-import { SAVE_VERSION, isSaveV5 } from "./sim/saveVersion";
+import { ProblemRegistry } from "./sim/problems";
+import { SAVE_VERSION, isSaveV6 } from "./sim/saveVersion";
+import { BrowserSaveRepository } from "./sim/saveRepository";
 import { ITEM_DEFS_V4, itemDefV4 } from "./sim/itemSystem";
 import { incidentCategoryForItem } from "./sim/institution";
 import {
@@ -173,6 +175,7 @@ async function main() {
   const infrastructure = new InfrastructureSystem(world);
   const task2 = new Task2Systems(WORLD_SIZE, economy, logistics);
   const task3 = new Task3Systems(task2, economy, logistics);
+  const problems = new ProblemRegistry();
   kitchen.physicalItems = task2.items;
   agents.construction = construction;
   agents.kitchen = kitchen;
@@ -266,12 +269,13 @@ async function main() {
 
   // World clock driving the day/night cycle; start at 08:00 on day 1.
   let worldTime = 8 * HOUR_SECONDS;
-  let loadedV5 = false;
+  const saveRepository = new BrowserSaveRepository();
+  let loadedV6 = false;
   let incompatibleSave = false;
+  let incompatibleData: unknown = null;
   try {
-    const res = await fetch("/api/save");
-    const data = await res.json();
-    if (isSaveV5(data)) {
+    const data = await saveRepository.load();
+    if (isSaveV6(data)) {
       world.loadData(data.world);
       infrastructure.loadData(data.infrastructure);
       agents.loadData(data.agents);
@@ -282,15 +286,17 @@ async function main() {
       intake.loadData(data.intake ?? {});
       task2.loadData(data.task2 ?? {}, world);
       task3.loadData(data.task3 ?? {}, world);
+      construction.reconcile(world, new Set(agents.agents.filter((agent) => agent.kind === Obj.Workman).map((agent) => agent.id)));
       if (typeof data.worldTime === "number") worldTime = data.worldTime;
-      loadedV5 = true;
-    } else if (data?.world || [1, 2, 3, 4].includes(data?.version)) {
+      loadedV6 = true;
+    } else if (data && typeof data === "object" && ("world" in data || [1, 2, 3, 4, 5].includes(Number((data as { version?: unknown }).version)))) {
       incompatibleSave = true;
+      incompatibleData = data;
     }
   } catch {
-    // File-backed saves only exist in the Vite dev server.
+    // A fresh game remains available when persistence is unavailable.
   }
-  if (!loadedV5) {
+  if (!loadedV6) {
     infrastructure.installNewGame();
     task2.installNewGame(world);
     task3.installNewGame(world, worldTime);
@@ -300,14 +306,14 @@ async function main() {
   rebuild();
 
   // --- Game speed + clock + regime UI ------------------------------------
-  let speed = 1;
+  let speed = loadedV6 ? 1 : 0;
   const speedsEl = document.getElementById("speeds")!;
   const speedBtns: HTMLButtonElement[] = [];
   for (const s of [0, 1, 2, 3, 5, 10]) {
     const b = document.createElement("button");
     b.className = "spd";
     b.textContent = s === 0 ? "⏸" : `${s}x`;
-    if (s === 1) b.classList.add("on");
+    if (s === speed) b.classList.add("on");
     b.onclick = () => {
       speed = s;
       speedBtns.forEach((x) => x.classList.remove("on"));
@@ -354,6 +360,55 @@ async function main() {
 
   const editor = new Editor();
   editor.onChange = () => { camera.buildMode = editor.active; };
+  const noticeEl = document.getElementById("notice")!;
+  let noticeTimer = 0;
+  function notify(message: string): void {
+    noticeEl.textContent = message;
+    noticeEl.classList.add("show");
+    noticeTimer = 4;
+  }
+  function downloadJson(value: unknown, filename: string): void {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+  const startMenu = document.getElementById("startMenu")!;
+  if (incompatibleSave) startMenu.classList.add("show");
+  document.getElementById("downloadOldBtn")!.addEventListener("click", () => {
+    if (incompatibleData) downloadJson(incompatibleData, "prison-builder-v5-backup.json");
+  });
+  document.getElementById("freshStartBtn")!.addEventListener("click", async () => {
+    await saveRepository.delete();
+    incompatibleSave = false;
+    incompatibleData = null;
+    startMenu.classList.remove("show");
+    saveDirty = true;
+    notify("Fresh v6 prison started. The game is paused while you prepare.");
+  });
+  document.getElementById("saveNowBtn")!.addEventListener("click", () => void saveNow());
+  document.getElementById("exportSaveBtn")!.addEventListener("click", () => downloadJson(saveSnapshot(), "prison-builder-v6-save.json"));
+  const importFile = document.getElementById("importSaveFile") as HTMLInputElement;
+  document.getElementById("importSaveBtn")!.addEventListener("click", () => importFile.click());
+  importFile.addEventListener("change", async () => {
+    const file = importFile.files?.[0];
+    if (!file) return;
+    try {
+      const value = JSON.parse(await file.text()) as unknown;
+      if (!isSaveV6(value)) throw new Error("Only a complete version-6 save can be imported");
+      await saveRepository.save(value);
+      location.reload();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error));
+    }
+  });
+  document.getElementById("newGameBtn")!.addEventListener("click", async () => {
+    if (!confirm("Start a new prison? Export your current save first if you want to keep it.")) return;
+    await saveRepository.delete();
+    location.reload();
+  });
 
   const buildPanel = document.getElementById("build")!;
   const logisticsDashboard = document.getElementById("logisticsDashboard")!;
@@ -378,7 +433,7 @@ async function main() {
       document.querySelectorAll(".mode-btn").forEach((x) => x.classList.remove("on"));
       btn.classList.add("on");
       activeMode = mode;
-      buildPanel.classList.toggle("open", !["financials", "logistics", "intelligence", "policy", "admin"].includes(mode));
+      buildPanel.classList.toggle("open", !["financials", "intelligence", "policy", "admin"].includes(mode));
       editor.setMode(mode);
       logisticsDashboard.classList.toggle("show", mode === "logistics");
       financialsDashboard.classList.toggle("show", mode === "financials");
@@ -437,10 +492,16 @@ async function main() {
     const cat = editor.tool?.cat;
     if (cat === "guard" || cat === "cook" || cat === "workman" || cat === "person") {
       const i = world.idx(tx, tz);
-      if (world.objKind[i] !== Obj.None || world.pieceAt[i] !== 0 || world.infrastructure[i]) return;
+      if (world.objKind[i] !== Obj.None || world.pieceAt[i] !== 0 || world.infrastructure[i]) {
+        notify("That tile is occupied. Clear it before hiring staff there.");
+        return;
+      }
       const kind = cat === "person" ? editor.tool!.mat : cat === "guard" ? Obj.Guard : cat === "cook" ? Obj.Cook : Obj.Workman;
-      if (!task3.canHire(kind, agents.agents)) return;
-      if (!economy.hire(kind, worldTime)) return;
+      if (!task3.canHire(kind, agents.agents)) { notify("That management role is already filled."); return; }
+      if (!economy.hire(kind, worldTime)) {
+        notify(`Hiring requires $${economy.hireFee(kind).toLocaleString()}; only $${Math.max(0, Math.floor(economy.cash)).toLocaleString()} is available.`);
+        return;
+      }
     }
     if (!isOrderTool() && editor.apply(world, tx, tz)) { dirty = true; saveDirty = true; }
     // Deployment acts on the guard roster, not on tiles, so it lives here.
@@ -605,7 +666,10 @@ async function main() {
       }
     }
     const group = construction.plan(editor.tool, targets, editor.orient, worldTime, world);
-    if (!group) return false;
+    if (!group) {
+      notify(construction.lastIssue?.message ?? "Nothing can be built at that location.");
+      return false;
+    }
     saveDirty = true;
     return true;
   }
@@ -852,6 +916,12 @@ async function main() {
     discardTransient();
   });
   addEventListener("keydown", (e) => {
+    if ((e.key === "Delete" || e.key === "Backspace") && hoverTile && !(e.target instanceof HTMLInputElement)) {
+      e.preventDefault();
+      const group = construction.planDemolition(hoverTile.x, hoverTile.z, worldTime, world);
+      if (group) { saveDirty = true; notify(`Demolition order ${group.id} created.`); }
+      else notify("That location cannot be demolished.");
+    }
     if (e.key === "Escape" && painting) discardTransient();
     if (e.key === "r" || e.key === "R") {
       // Editor owns the actual orientation change; this just ensures the
@@ -887,6 +957,10 @@ async function main() {
     toCooker: "Heading to the stove", cooking: "Cooking a meal",
     delivering: "Stocking the serving table", toServeDuty: "Taking serving duty",
     manning: "Serving meals", toJob: "Heading to a repair job", repairing: "Repairing",
+    toBuildCargo: "Collecting construction materials", deliverBuildCargo: "Delivering construction materials",
+    toBuild: "Walking to a construction site", constructing: "Building", demolishing: "Demolishing",
+    toBookCargo: "Collecting library stock", deliverBookCargo: "Stocking the library",
+    toExportCargo: "Collecting export goods", deliverExportCargo: "Delivering goods to Exports",
   };
   function debugTipText(ag: Agent): string {
     const kind = ag.kind === 8 ? "Prisoner" : ag.kind === 9 ? "Guard" :
@@ -974,11 +1048,72 @@ async function main() {
   canvas.addEventListener("mouseleave", () => { tip.style.display = "none"; hoverTile = null; });
 
   // --- Retained room labels + warning markers ----------------------------
+  const problemButton = document.getElementById("problemButton") as HTMLButtonElement;
+  const problemCount = document.getElementById("problemCount")!;
+  const problemsPanel = document.getElementById("problemsPanel")!;
   const worldOverlay = new WorldOverlay(
     document.getElementById("roomOverlay")!,
     document.getElementById("cap")!,
     tip,
+    () => {
+      problemsPanel.classList.add("show");
+      problemButton.setAttribute("aria-expanded", "true");
+    },
   );
+  problemButton.onclick = () => {
+    const show = !problemsPanel.classList.contains("show");
+    problemsPanel.classList.toggle("show", show);
+    problemButton.setAttribute("aria-expanded", String(show));
+  };
+
+  function openCatalog(mode: string, section: string): void {
+    const button = document.querySelector<HTMLButtonElement>(`.mode-btn[data-mode="${mode}"]`);
+    if (activeMode !== mode) button?.click();
+    editor.selectCategory(section);
+  }
+
+  function renderProblems(): void {
+    const rows = problems.list();
+    problemCount.textContent = String(rows.length);
+    problemButton.classList.toggle("has-critical", rows.some((problem) => problem.severity === "critical"));
+    const problemRows = rows.map((problem) => {
+      const actions = problem.actions.map((action) => {
+        if (action.kind === "catalog") return `<button data-catalog="${html(action.mode)}|${html(action.section)}">${html(action.label)}</button>`;
+        if (action.kind === "order") return `<button data-order="${action.orderId}">${html(action.label)}</button>`;
+        return `<button data-center="${problem.x},${problem.z}">${html(action.label)}</button>`;
+      }).join("");
+      return `<div class="problem-row ${problem.severity}"><small>${html(problem.source)} \u00b7 ${html(problem.severity)}</small>${html(problem.message)}<div class="problem-actions">${actions}</div></div>`;
+    }).join("") || `<div class="profile-sub">No operational problems.</div>`;
+    const activeGroups = [...construction.groups.values()].filter((group) => group.state !== "complete" && group.state !== "cancelled");
+    const queueRows = activeGroups.map((group) => {
+      const done = group.targets.filter((target) => target.completed).length;
+      const targetStates = [...new Set(group.targets.filter((target) => !target.completed).map((target) => target.state))].join(", ");
+      return `<div class="queue-row"><header><strong>${group.operation} #${group.id}</strong><span>${done}/${group.targets.length} complete</span></header>` +
+        `<p>${html(group.blocker || targetStates || group.state)}</p><div class="queue-actions"><button data-center="${group.targets[0]?.x ?? 0},${group.targets[0]?.z ?? 0}">Center</button>` +
+        `<button data-retry-order="${group.id}">Retry</button><button data-cancel-order="${group.id}">Cancel</button></div></div>`;
+    }).join("") || `<div class="profile-sub">No active construction orders.</div>`;
+    problemsPanel.innerHTML = `<div class="problem-head"><span>Operational problems</span><span>${rows.length}</span></div>${problemRows}<section class="queue-section"><div class="problem-head">Construction queue</div>${queueRows}</section>`;
+    problemsPanel.querySelectorAll<HTMLButtonElement>("[data-center]").forEach((button) => button.onclick = () => {
+      const [x, z] = button.dataset.center!.split(",").map(Number);
+      camera.target = [x, 0, z];
+      camera.distance = Math.min(camera.distance, 52);
+    });
+    problemsPanel.querySelectorAll<HTMLButtonElement>("[data-catalog]").forEach((button) => button.onclick = () => {
+      const [mode, section] = button.dataset.catalog!.split("|");
+      openCatalog(mode, section);
+    });
+    problemsPanel.querySelectorAll<HTMLButtonElement>("[data-order]").forEach((button) => button.onclick = () => {
+      const group = construction.groups.get(Number(button.dataset.order));
+      const target = group?.targets.find((row) => !row.completed);
+      if (target) camera.target = [target.x, 0, target.z];
+    });
+    problemsPanel.querySelectorAll<HTMLButtonElement>("[data-retry-order]").forEach((button) => button.onclick = () => {
+      if (construction.retryGroup(Number(button.dataset.retryOrder))) notify("Construction order queued for another attempt.");
+    });
+    problemsPanel.querySelectorAll<HTMLButtonElement>("[data-cancel-order]").forEach((button) => button.onclick = () => {
+      if (construction.cancelGroup(Number(button.dataset.cancelOrder))) { saveDirty = true; notify("Construction order cancelled; unused materials are available for other work."); }
+    });
+  }
   let worldOverlayDataT = 0;
 
   function previewShowsFacing(): boolean {
@@ -988,6 +1123,7 @@ async function main() {
   }
 
   function refreshWorldOverlayData() {
+    problems.clear();
     const rooms = world.roomLabels();
     const issues: IssueLabel[] = agents.issueLabels(world);
     for (const room of rooms) {
@@ -997,16 +1133,44 @@ async function main() {
         z: room.z,
         issue: `${room.name} is invalid: ${room.issue}`,
       });
+      if (!room.valid) {
+        const model = world.rooms.get(room.id);
+        const details = model ? world.roomIssues(model) : [];
+        const catalog = details.find((detail) => detail.suggestedCatalog)?.suggestedCatalog ?? "";
+        problems.add({
+          id: `room-${room.id}`, severity: room.name === "Reception" || room.name === "Delivery Yard" ? "critical" : "warning",
+          source: "room", message: `${room.name}: ${room.issue}`, x: room.x, z: room.z,
+          actions: [
+            { kind: "center", label: "Center" },
+            ...(catalog ? [{ kind: "catalog" as const, label: "Build requirement", mode: catalog.startsWith("objects:") ? "objects" : "build", section: catalog }] : []),
+          ],
+        });
+      }
     }
     if (incompatibleSave) issues.push({
       id: "save-v1", x: 366, z: 375,
-      issue: "The older save is incompatible. This is a fresh version 5 complex-simulation world.",
+      issue: "The older save is incompatible. This is a fresh version 6 gameplay-polish world.",
     });
     let warningI = 0;
     const activeOrders = [...construction.groups.values()].some((group) => group.state !== "complete" && group.state !== "cancelled");
     if (activeOrders && !agents.agents.some((agent) => agent.kind === Obj.Workman)) issues.push({
       id: "no-workmen", x: 366.5, z: 375.5, issue: "Construction is waiting: hire a workman.",
     });
+    if (activeOrders && !agents.agents.some((agent) => agent.kind === Obj.Workman)) problems.add({
+      id: "no-workmen", severity: "critical", source: "staff", message: "Construction is waiting: hire a workman.",
+      x: 366.5, z: 375.5, actions: [{ kind: "catalog", label: "Hire workman", mode: "staff", section: "staff:people" }],
+    });
+    for (const group of construction.groups.values()) {
+      if (group.state === "complete" || group.state === "cancelled") continue;
+      const blocked = group.targets.find((target) => target.state === "blocked");
+      if (!blocked && group.state !== "waiting-resources") continue;
+      problems.add({
+        id: `construction-${group.id}`, severity: blocked ? "warning" : "info", source: "construction",
+        message: `Order ${group.id}: ${blocked?.blocker || group.blocker || "Waiting for materials"}`,
+        x: blocked?.x ?? group.targets[0]?.x ?? 0, z: blocked?.z ?? group.targets[0]?.z ?? 0,
+        actions: [{ kind: "order", label: "Open order", orderId: group.id }],
+      });
+    }
     const hasSalvage = [...logistics.packages.values()].some((pkg) => pkg.state === "site");
     const validExports = [...world.rooms.values()].some((room) => room.type === RoomType.Exports && room.valid);
     if (hasSalvage && !validExports) issues.push({
@@ -1016,6 +1180,11 @@ async function main() {
     if (!validReception) issues.push({
       id: "no-reception", x: 369.5, z: 374.5, issue: "No valid Reception: the next prisoner transport will wait on the road.",
     });
+    if (!validReception) problems.add({
+      id: "no-reception", severity: "critical", source: "intake",
+      message: "No valid Reception. Intake remains paused until one is operational.",
+      x: 369.5, z: 374.5, actions: [{ kind: "catalog", label: "Build Reception", mode: "rooms", section: "rooms:staff" }],
+    });
     for (const bridge of world.piecesOfKind(Obj.SecureBridge)) if (!world.bridgeIsSecure(bridge)) issues.push({
       id: `bridge-${bridge.id}`, x: bridge.x + bridge.w / 2, z: bridge.z + 1,
       issue: "Secure Bridge ends are not enclosed by connected walls or fences.",
@@ -1024,51 +1193,72 @@ async function main() {
       id: `logistics-${warningI++}`, x: 370.5, z: 375.5 + warningI,
       issue: warning,
     });
+    for (const warning of logistics.warnings) problems.add({
+      id: `logistics-${warning}`, severity: warning.includes("Insufficient") ? "critical" : "warning", source: "logistics",
+      message: warning, x: 370.5, z: 375.5,
+      actions: [{ kind: "catalog", label: "Open facilities", mode: "logistics", section: "objects:logistics" }],
+    });
     for (const warning of kitchen.warnings) issues.push({
       id: `kitchen-${warningI++}`, x: 368.5, z: 373.5 + warningI,
       issue: warning,
+    });
+    for (const warning of kitchen.warnings) problems.add({
+      id: `kitchen-${warning}`, severity: "warning", source: "kitchen", message: warning, x: 368.5, z: 373.5,
+      actions: [{ kind: "catalog", label: "Open dining objects", mode: "objects", section: "objects:dining" }],
     });
     for (const warning of intake.warnings) issues.push({
       id: `intake-${warningI++}`, x: 374.5, z: 370.5 + warningI,
       issue: warning,
     });
+    for (const warning of intake.warnings) problems.add({
+      id: `intake-${warning}`, severity: "critical", source: "intake", message: warning, x: 374.5, z: 370.5,
+      actions: [{ kind: "catalog", label: "Open Reception", mode: "rooms", section: "rooms:staff" }],
+    });
     for (const warning of task2.warnings) issues.push({
       id: `task2-${warningI++}`, x: 369.5, z: 376.5 + warningI, issue: warning,
+    });
+    for (const warning of task2.work.warnings) problems.add({
+      id: `work-${warning}`, severity: "warning", source: "work", message: warning, x: 369.5, z: 376.5,
+      actions: [{ kind: "catalog", label: "Open work facilities", mode: "objects", section: "objects:work" }],
     });
     for (const warning of task3.warnings) issues.push({
       id: `task3-${warningI++}`, x: 371.5, z: 376.5 + warningI, issue: warning,
     });
     worldOverlay.updateData(rooms, issues, agents.prisonerCount(), world.prisonerCapacity());
+    renderProblems();
   }
 
   let saveInFlight = false;
   let saveTimer = 0;
+  const saveStatusEl = document.getElementById("saveStatus")!;
+  function saveSnapshot(): unknown {
+    return {
+      version: SAVE_VERSION,
+      savedAt: new Date().toISOString(),
+      worldTime,
+      world: world.saveData(),
+      agents: agents.saveData(),
+      infrastructure: infrastructure.saveData(),
+      economy: economy.saveData(),
+      logistics: logistics.saveData(),
+      construction: construction.saveData(),
+      kitchen: kitchen.saveData(),
+      intake: intake.saveData(),
+      task2: task2.saveData(),
+      task3: task3.saveData(),
+    };
+  }
   async function saveNow() {
     if (saveInFlight) return;
     saveInFlight = true;
+    saveStatusEl.textContent = "Saving\u2026";
     try {
-      await fetch("/api/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          version: SAVE_VERSION,
-          savedAt: new Date().toISOString(),
-          worldTime,
-          world: world.saveData(),
-          agents: agents.saveData(),
-          infrastructure: infrastructure.saveData(),
-          economy: economy.saveData(),
-          logistics: logistics.saveData(),
-          construction: construction.saveData(),
-          kitchen: kitchen.saveData(),
-          intake: intake.saveData(),
-          task2: task2.saveData(),
-          task3: task3.saveData(),
-        }),
-      });
+      await saveRepository.save(saveSnapshot());
       saveDirty = false;
-    } catch {
-      // Running from a static build or file URL: no prototype save endpoint.
+      saveStatusEl.textContent = `Saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    } catch (error) {
+      saveStatusEl.textContent = "Save failed";
+      notify(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       saveInFlight = false;
     }
@@ -1236,9 +1426,15 @@ async function main() {
       const lines = logistics.stockLines();
       const stockRows = lines.length ? lines.map((line) => `<tr><td>${html(commodityDef(line.commodity).name)}</td><td>${line.available}</td><td>${line.inTransit}</td><td>${line.reserved}</td></tr>`).join("") : `<tr><td colspan="4">No stock ordered</td></tr>`;
       const blocked = logistics.trucks.filter((truck) => truck.state === "blocked").length + intake.vehicles.filter((vehicle) => vehicle.state === "waiting" && vehicle.warning).length + [...task3.escape.externalVehicles.values()].filter((vehicle) => vehicle.state === "blocked").length;
+      const forecast = intake.forecast(worldTime, world, agents);
+      const palletRows = logistics.palletUtilization(world).map((row) => `<div class="matrix-row"><header><strong>Delivery Yard ${row.roomId}</strong><span>${row.used}/${row.capacity} pallet slots used</span></header></div>`).join("");
+      const vehicleRows = logistics.trucks.map((truck) => `<div class="matrix-row"><header><strong>${truck.kind} truck ${truck.id}</strong><span>${truck.state}</span></header><small>${truck.packageIds.length} package${truck.packageIds.length === 1 ? "" : "s"}${truck.warning ? ` \u00b7 ${html(truck.warning)}` : ""}</small></div>`).join("");
       body = `<div class="log-summary"><div class="log-kpi"><small>Vehicles</small><strong>${logistics.trucks.length + intake.vehicles.length + task3.escape.externalVehicles.size}</strong></div><div class="log-kpi"><small>Blocked</small><strong>${blocked}</strong></div><div class="log-kpi"><small>Unique items</small><strong>${[...task2.items.items.values()].filter((i) => i.locationKind !== "destroyed").length}</strong></div></div>` +
         `<table class="log-table"><thead><tr><th>Commodity</th><th>Here</th><th>Transit</th><th>Reserved</th></tr></thead><tbody>${stockRows}</tbody></table>` +
         `<div class="log-ledger">Controlled discrepancies: ${task2.items.controlledDiscrepancies().length} · Export credit expected: $${Math.round(logistics.expectedExportCredit())}</div>`;
+      body += `<div class="log-ledger">Next intake: Day ${forecast.day} \u00b7 ${forecast.ready ? `up to ${forecast.capacity} available bed${forecast.capacity === 1 ? "" : "s"}` : "paused until Reception and beds are ready"}</div>` +
+        `<div class="profile-section"><h3>Facilities</h3><div class="problem-actions"><button data-open-catalog="objects:logistics">Build logistics objects</button><button data-open-catalog="rooms:logistics">Paint Delivery / Exports</button></div><div class="matrix">${palletRows || "No valid Delivery Yard."}</div></div>` +
+        `<div class="profile-section"><h3>Vehicle manifests</h3><div class="matrix">${vehicleRows || "No active vehicles."}</div></div>`;
       const gates = [...task3.facility.gatehouses.values()].map((gate) => `<div class="matrix-row"><header><strong>Gatehouse ${gate.pieceId}</strong><span>${gate.guardId >= 0 ? `Manned by guard ${gate.guardId}` : "Unmanned"}</span></header><label>Outgoing inspection <select class="work-select" data-gate-inspection="${gate.pieceId}">${["none", "spot", "standard", "full"].map((value) => `<option ${gate.inspection === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>${gate.warning ? `<small>${html(gate.warning)}</small>` : ""}</div>`).join("");
       body += `<div class="profile-section"><h3>Road control</h3><div class="matrix">${gates || `<div class="profile-sub">No Gatehouse is built. Outgoing vehicles cannot be inspected at the road boundary.</div>`}</div></div>`;
     } else if (logisticsTab === "deployment") {
@@ -1271,6 +1467,7 @@ async function main() {
     }
     logisticsDashboard.innerHTML = `<div class="log-title">Institutional logistics</div>${tabBar()}${body}`;
     logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-logtab]").forEach((button) => button.onclick = () => { logisticsTab = button.dataset.logtab as typeof logisticsTab; updateLogisticsUi(); });
+    logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-open-catalog]").forEach((button) => button.onclick = () => openCatalog("logistics", button.dataset.openCatalog!));
     logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-deploy]").forEach((button) => button.onclick = () => {
       const [area, role, delta] = button.dataset.deploy!.split(":"); const row = task2.security.deploymentTargets.get(Number(area)) ?? {};
       task2.security.setDeployment(Number(area), role as never, (row[role as keyof typeof row] ?? 0) + Number(delta)); saveDirty = true; updateLogisticsUi();
@@ -1282,7 +1479,15 @@ async function main() {
     logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-supervision]").forEach((select) => select.onchange = () => { const w = task2.work.workplaces.get(Number(select.dataset.supervision)); if (w) w.supervision = select.value as never; saveDirty = true; });
     logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-gate-inspection]").forEach((select) => select.onchange = () => { task3.facility.setInspection(Number(select.dataset.gateInspection), select.value as never); saveDirty = true; updateLogisticsUi(); });
     const detail = document.querySelector<HTMLElement>("#detailCost strong");
-    if (detail && editor.tool && isOrderTool()) { const recipe = construction.estimate(editor.tool, Math.max(1, orderTargets().length)); detail.textContent = `$${recipeCost(recipe).toLocaleString()} · ${Object.entries(recipe).map(([id, n]) => `${commodityDef(id).name} ${Math.max(0, logistics.quantity(id) - logistics.reserved(id))}/${n}`).join(", ")}`; }
+    if (detail && editor.tool && isOrderTool()) {
+      const recipe = construction.estimate(editor.tool, Math.max(1, orderTargets().length));
+      const invalid = construction.preview(editor.tool, orderTargets(), editor.orient, world).find((target) => !target.valid);
+      detail.textContent = invalid
+        ? `Cannot place: ${invalid.blocker}`
+        : `$${recipeCost(recipe).toLocaleString()} · ${Object.entries(recipe).map(([id, n]) => `${commodityDef(id).name} ${Math.max(0, logistics.quantity(id) - logistics.reserved(id))}/${n}`).join(", ")}`;
+    } else if (detail && editor.tool?.cat === "person") {
+      detail.textContent = `$${economy.hireFee(editor.tool.mat).toLocaleString()} hire · $${economy.hourlyWage(editor.tool.mat)}/hour`;
+    }
   }
 
   function updateFinancialsUi(): void {
@@ -1349,6 +1554,10 @@ async function main() {
     last = now;
     resize();
     camera.update(dt);
+    if (noticeTimer > 0) {
+      noticeTimer -= dt;
+      if (noticeTimer <= 0) noticeEl.classList.remove("show");
+    }
     if (dirty) { rebuild(); dirty = false; }
 
     // Advance the world clock at the selected speed; substep the sim so

@@ -122,9 +122,10 @@ the 1k entries re-encode from `public/textures/` alone. Encoding is slow
 ## Dev-server endpoints
 
 `vite.config.mjs` adds a small middleware so the prototype can persist to disk.
-Both files are gitignored local state. Saves are version 3. Earlier versions are
-intentionally incompatible with the prisoner-social simulation and are not
-migrated by this milestone.
+Both files are gitignored local state. Production saves use browser storage;
+the development endpoint mirrors version-6 autosaves for diagnostics. Earlier
+versions are intentionally incompatible and can be exported before starting a
+fresh prison.
 
 | Route | Methods | File |
 | --- | --- | --- |

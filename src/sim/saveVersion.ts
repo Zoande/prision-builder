@@ -1,6 +1,6 @@
-export const SAVE_VERSION = 5;
+export const SAVE_VERSION = 6;
 
-export interface SaveEnvelopeV5 {
+export interface SaveEnvelopeV6 {
   version: typeof SAVE_VERSION;
   savedAt: string;
   worldTime: number;
@@ -28,8 +28,8 @@ export interface SaveEnvelopeV5 {
   task3: any;
 }
 
-export function isSaveV5(value: unknown): value is SaveEnvelopeV5 {
+export function isSaveV6(value: unknown): value is SaveEnvelopeV6 {
   if (!value || typeof value !== "object") return false;
-  const row = value as Partial<SaveEnvelopeV5>;
+  const row = value as Partial<SaveEnvelopeV6>;
   return row.version === SAVE_VERSION && !!row.world && !!row.agents && !!row.task2 && !!row.task3;
 }

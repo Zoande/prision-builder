@@ -154,6 +154,7 @@ export class Agents {
   }
 
   removeAgent(ag: Agent) {
+    this.construction?.releaseWorker(ag.id);
     if (ag.bedIdx >= 0) this.claimedBeds.delete(ag.bedIdx);
     if (ag.cookerIdx >= 0) this.claimedCookers.delete(ag.cookerIdx);
     releaseUse(this, ag);
@@ -2045,8 +2046,11 @@ export class Agents {
     // Construction is below security repairs in the work priority. The order
     // system itself sorts oldest-first and uses distance as its tie breaker.
     if (this.construction) {
-      const claim = this.construction.claimNext(ag.id, ag.x, ag.z, world);
-      if (claim) {
+      // A blocked old target must not monopolize every workman. Try the next
+      // candidates in the same decision after recording an unreachable site.
+      for (let attempt = 0; attempt < 32; attempt++) {
+        const claim = this.construction.claimNext(ag.id, ag.x, ag.z, world);
+        if (!claim) break;
         const pkg = claim.packageId >= 0 ? this.construction.logistics.packages.get(claim.packageId) : null;
         const idx = pkg
           ? world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(pkg.x))), Math.max(0, Math.min(world.size - 1, Math.floor(pkg.z))))

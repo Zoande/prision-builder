@@ -2,8 +2,8 @@
 // current tool. Placement itself is driven by main (pointer + picking); this
 // module owns tool state and the UI.
 
-import { Access, OBJ_DEFS, Obj, ROOM_DEFS, RoomType, World, defOf } from "./sim/world";
-import { FLOOR_MATS, WALL_MATS, FENCE_MAT } from "./render/materials";
+import { Access, OBJ_DEFS, Obj, ROOM_DEFS, RoomType, World, defOf } from "./sim/world.ts";
+import { FLOOR_MATS, WALL_MATS, FENCE_MAT } from "./render/materials.ts";
 
 // Structural tools get their own cat because each has a bespoke world setter
 // (a door converts a wall, a wall light must find an open face). Everything
@@ -20,7 +20,14 @@ export type ToolCat =
   | "erase";
 export interface Tool { cat: ToolCat; mat: number }
 interface Item { label: string; swatch: string; tool: Tool }
-interface Cat { key: string; label: string; items: Item[] }
+export type CatalogSectionId =
+  | `build:${string}`
+  | `objects:${string}`
+  | `rooms:${string}`
+  | `staff:${string}`
+  | `security:${string}`
+  | `admin:${string}`;
+interface Cat { key: CatalogSectionId; label: string; items: Item[] }
 
 interface RoomGroup { key: string; label: string; types: number[] }
 
@@ -65,7 +72,11 @@ function groupCats(): Cat[] {
     const special = SPECIAL_CAT[d.kind];
     byGroup.get(g)!.push(special ? objItem(d.kind, special) : pieceItem(d.kind));
   }
-  return order.map((g) => ({ key: g.toLowerCase(), label: g, items: byGroup.get(g)! }));
+  return order.map((g) => ({
+    key: `objects:${g.toLowerCase().replace(/\s+/g, "-")}` as CatalogSectionId,
+    label: g,
+    items: byGroup.get(g)!,
+  }));
 }
 
 const ROOM_GROUPS: RoomGroup[] = [
@@ -77,12 +88,13 @@ const ROOM_GROUPS: RoomGroup[] = [
   { key: "work", label: "Work", types: [RoomType.Laundry, RoomType.MailRoom, RoomType.Greenhouse, RoomType.Janitorial,
     RoomType.Recycling, RoomType.Woodshop, RoomType.Metalshop, RoomType.Tailoring, RoomType.Maintenance, RoomType.Shop, RoomType.PrintShop,
     RoomType.ConstructionYard, RoomType.WasteYard] },
-  { key: "utility", label: "Utility", types: [RoomType.Delivery, RoomType.Exports, RoomType.Solitary, RoomType.Empty] },
+  { key: "logistics", label: "Logistics", types: [RoomType.Delivery, RoomType.Exports] },
+  { key: "utility", label: "Utility", types: [RoomType.Solitary, RoomType.Empty] },
 ];
 
 function roomCats(): Cat[] {
   return ROOM_GROUPS.map((group) => ({
-    key: group.key,
+    key: `rooms:${group.key}` as CatalogSectionId,
     label: group.label,
     items: group.types.map((type) => roomItem(type)),
   }));
@@ -90,12 +102,12 @@ function roomCats(): Cat[] {
 
 const CATS: Cat[] = [
   {
-    key: "floor", label: "Floors",
+    key: "build:floors", label: "Floors",
     items: FLOOR_MATS.filter((m) => m.buildable !== false)
       .map((m) => ({ label: m.name, swatch: m.swatch, tool: { cat: "floor", mat: m.id } })),
   },
   {
-    key: "wall", label: "Walls",
+    key: "build:walls", label: "Walls",
     items: [
       ...WALL_MATS.map((m) => ({ label: m.name, swatch: m.swatch, tool: { cat: "wall", mat: m.id } as Tool })),
       { label: "Fence", swatch: "#9aa0a6", tool: { cat: "fence", mat: FENCE_MAT.id } },
@@ -104,7 +116,7 @@ const CATS: Cat[] = [
   // One tab per registry group, so the catalog stays browsable as it grows.
   ...groupCats(),
   {
-    key: "people", label: "People",
+    key: "staff:people", label: "People",
     items: [
       personItem(Obj.Guard), personItem(Obj.Cook), personItem(Obj.Workman), personItem(Obj.Doctor),
       personItem(Obj.Investigator), personItem(Obj.DogHandler), personItem(Obj.ArmedGuard),
@@ -115,7 +127,7 @@ const CATS: Cat[] = [
   },
   ...roomCats(),
   {
-    key: "access", label: "Access",
+    key: "rooms:access", label: "Access",
     items: [
       { label: "Staff", swatch: "#e8d44d", tool: { cat: "access", mat: Access.Staff } },
       { label: "Prisoners", swatch: "#f07018", tool: { cat: "access", mat: Access.Prisoners } },
@@ -123,7 +135,7 @@ const CATS: Cat[] = [
     ],
   },
   {
-    key: "patrol", label: "Patrol",
+    key: "security:patrol", label: "Patrol",
     items: [
       // Two colours so two beats can cross without becoming one beat.
       { label: "Blue Beat", swatch: "#3372f2", tool: { cat: "patrol", mat: 0 } },
@@ -132,15 +144,27 @@ const CATS: Cat[] = [
     ],
   },
   {
-    key: "deploy", label: "Deploy",
+    key: "staff:deploy", label: "Deploy",
     items: [
       // Click a beat to put a guard on it; click a room to post one inside.
       { label: "Assign Guard", swatch: "#f2c53d", tool: { cat: "deploy", mat: 0 } },
       { label: "Remove Guard", swatch: "#d66666", tool: { cat: "undeploy", mat: 0 } },
     ],
   },
-  { key: "erase", label: "Erase", items: [{ label: "Erase", swatch: "#d66666", tool: { cat: "erase", mat: 0 } }] },
+  { key: "admin:erase", label: "Erase", items: [{ label: "Erase", swatch: "#d66666", tool: { cat: "erase", mat: 0 } }] },
 ];
+
+const OBJECT_SECTION_IDS = CATS.filter((cat) => cat.key.startsWith("objects:")).map((cat) => cat.key);
+const ROOM_SECTION_IDS = CATS.filter((cat) => cat.key.startsWith("rooms:")).map((cat) => cat.key);
+const MODE_SECTIONS: Record<string, CatalogSectionId[]> = {
+  build: ["build:floors", "build:walls", "objects:doors", "objects:lights"],
+  rooms: ROOM_SECTION_IDS,
+  objects: OBJECT_SECTION_IDS,
+  staff: ["staff:people", "staff:deploy"],
+  logistics: ["objects:logistics", "rooms:logistics", "rooms:access"],
+  intelligence: ["rooms:access", "security:patrol"],
+  admin: ["admin:erase"],
+};
 
 export class Editor {
   tool: Tool | null = null;
@@ -155,6 +179,8 @@ export class Editor {
   private cats: HTMLElement;
   private activeCat = CATS[0];
   private visibleCats: Cat[] = CATS;
+  private currentMode = "build";
+  private searchQuery = "";
   private itemButtons: HTMLButtonElement[] = [];
   private candidate: Item | null = null;
   private detailType: HTMLElement;
@@ -162,17 +188,18 @@ export class Editor {
   private detailCopy: HTMLElement;
 
   private readonly categoryHelp: Record<string, string> = {
-    floor: "Choose a surface finish for paths, interiors, and yards.",
-    wall: "Build the perimeter and define secure interior spaces.",
-    prisoner: "Core prisoner spaces for meals, sleep, hygiene, and yard access.",
-    living: "Shared welfare rooms that raise comfort and routine.",
-    staff: "Back-of-house rooms for the prison team.",
-    utility: "Empty room lets you clear a painted area back to nothing.",
-    people: "Place residents and operational staff.",
-    access: "Control where staff and prisoners are permitted to go.",
-    patrol: "Lay out patrol routes and security coverage.",
-    deploy: "Assign guards to rooms and patrol routes.",
-    erase: "Remove a structure, object, or resident from the yard.",
+    "build:floors": "Choose a surface finish for paths, interiors, and yards.",
+    "build:walls": "Build the perimeter and define secure interior spaces.",
+    "rooms:prisoner": "Core prisoner spaces for meals, sleep, hygiene, and yard access.",
+    "rooms:living": "Shared welfare rooms that raise comfort and routine.",
+    "rooms:staff": "Back-of-house rooms for the prison team.",
+    "rooms:logistics": "Road-connected yards for incoming materials and outgoing goods.",
+    "rooms:utility": "Empty room lets you clear a painted area back to nothing.",
+    "staff:people": "Hire operational staff. Hiring fees and wages are charged immediately.",
+    "rooms:access": "Control where staff and prisoners are permitted to go.",
+    "security:patrol": "Lay out patrol routes and security coverage.",
+    "staff:deploy": "Assign guards to rooms and patrol routes.",
+    "admin:erase": "Schedule demolition or remove a staff member.",
   };
 
   constructor() {
@@ -181,6 +208,11 @@ export class Editor {
     this.detailType = document.getElementById("detailType")!;
     this.detailName = document.getElementById("detailName")!;
     this.detailCopy = document.getElementById("detailCopy")!;
+    const search = document.getElementById("catalogSearch") as HTMLInputElement | null;
+    if (search) search.addEventListener("input", () => {
+      this.searchQuery = search.value.trim().toLowerCase();
+      this.applyVisibleSections(false);
+    });
 
     this.setMode("build", false);
 
@@ -206,24 +238,25 @@ export class Editor {
 
   /** Open a catalog section from the operations rail. */
   setMode(mode: string, clearTool = true) {
-    const modeKeys: Record<string, string[]> = {
-      build: ["floor", "wall", "doors", "lights"],
-      rooms: ["prisoner", "living", "staff", "work", "utility", "access"],
-      objects: ["cells", "dining", "library", "seating", "gym", "common", "chapel", "staff", "decor", "security"],
-      staff: ["people", "deploy"],
-      logistics: ["logistics", "access"],
-      intelligence: ["access", "patrol"],
-      admin: ["erase"],
-    };
-    const keys = modeKeys[mode] ?? modeKeys.build;
-    this.visibleCats = CATS.filter((cat) => keys.includes(cat.key));
+    this.currentMode = mode;
+    this.applyVisibleSections(clearTool);
+  }
+
+  private applyVisibleSections(clearTool: boolean) {
+    const keys = MODE_SECTIONS[this.currentMode] ?? MODE_SECTIONS.build;
+    this.visibleCats = this.searchQuery
+      ? CATS.filter((cat) =>
+          cat.label.toLowerCase().includes(this.searchQuery) ||
+          cat.items.some((item) => item.label.toLowerCase().includes(this.searchQuery)))
+      : CATS.filter((cat) => keys.includes(cat.key));
     this.renderCategories();
     const first = this.visibleCats[0] ?? CATS[0];
     this.selectCat(first, (first as Cat & { el?: HTMLButtonElement }).el!, clearTool);
   }
 
   selectCategory(key: string) {
-    const cat = CATS.find((x) => x.key === key) ?? CATS[0];
+    const normalized = key.toLowerCase();
+    const cat = CATS.find((x) => x.key === key || x.label.toLowerCase() === normalized) ?? CATS[0];
     if (!this.visibleCats.includes(cat)) {
       this.visibleCats = [cat];
       this.renderCategories();
@@ -249,8 +282,8 @@ export class Editor {
     const title = document.getElementById("toolName")!;
     const hint = document.getElementById("toolHint")!;
     const icons: Record<string, string> = {
-      floor: "\u25A4", wall: "\u25A5", rooms: "\u25A6", people: "\u2659", access: "\u25C9",
-      patrol: "\u2301", deploy: "\u2691", erase: "\u00D7",
+      "build:floors": "\u25A4", "build:walls": "\u25A5", "staff:people": "\u2659", "rooms:access": "\u25C9",
+      "security:patrol": "\u2301", "staff:deploy": "\u2691", "admin:erase": "\u00D7",
     };
     icon.textContent = icons[this.activeCat.key] ?? "\u25C8";
     title.textContent = this.activeCat.label;
@@ -263,7 +296,10 @@ export class Editor {
   private renderPalette() {
     this.palette.innerHTML = "";
     this.itemButtons = [];
-    this.activeCat.items.forEach((item) => {
+    const items = this.searchQuery && !this.activeCat.label.toLowerCase().includes(this.searchQuery)
+      ? this.activeCat.items.filter((item) => item.label.toLowerCase().includes(this.searchQuery))
+      : this.activeCat.items;
+    items.forEach((item) => {
       const b = document.createElement("button");
       b.className = "build-item";
       const swatch = document.createElement("span");
@@ -287,6 +323,11 @@ export class Editor {
     if (item.tool.cat === "floor") return "Surface finish";
     if (item.tool.cat === "wall" || item.tool.cat === "fence") return "Structural";
     if (item.tool.cat === "room") return "Room designation";
+    if (item.tool.cat === "piece") {
+      const def = defOf(item.tool.mat);
+      if (def) return `${def.w}\u00d7${def.d} footprint`;
+    }
+    if (item.tool.cat === "person") return "Hire staff";
     if (item.tool.cat === "patrol" || item.tool.cat === "deploy") return "Security tool";
     if (item.tool.cat === "erase") return "Removal tool";
     return "Ready to place";
@@ -306,8 +347,19 @@ export class Editor {
   private itemDescription(item: Item): string {
     if (item.tool.cat === "floor") return `Lay ${item.label.toLowerCase()} across a selected area. Drag to fill a rectangle.`;
     if (item.tool.cat === "wall" || item.tool.cat === "fence") return `Draw a straight run of ${item.label.toLowerCase()} to shape and secure the prison.`;
-    if (item.tool.cat === "room") return `Mark a zone as a ${item.label.toLowerCase()} so residents and staff understand its purpose.`;
+    if (item.tool.cat === "room") {
+      const room = ROOM_DEFS.find((row) => row.type === item.tool.mat);
+      const requirements = room?.requires.map((req) => req.issue.replace(/^Needs? /, "").replace(/\.$/, "")).join(", ");
+      return `Mark a zone as a ${item.label.toLowerCase()}.` +
+        (room?.minSquare ? ` Minimum clear area: ${room.minSquare}\u00d7${room.minSquare}.` : "") +
+        (requirements ? ` Requires: ${requirements}.` : "");
+    }
     if (item.tool.cat === "patrol" || item.tool.cat === "deploy") return `Use this ${item.label.toLowerCase()} tool directly on the yard.`;
+    if (item.tool.cat === "person") return `Hire and place ${item.label.toLowerCase()}. The hiring fee is charged on placement and payroll is charged hourly.`;
+    if (item.tool.cat === "piece") {
+      const def = defOf(item.tool.mat);
+      return `Place ${item.label.toLowerCase()}${def ? ` (${def.w}\u00d7${def.d} tiles)` : ""}. Use R to rotate before placement.`;
+    }
     return `Place ${item.label.toLowerCase()} in the world. Use R to rotate before placement where applicable.`;
   }
 
@@ -376,4 +428,9 @@ export class Editor {
 
 function sameTool(a: Tool, b: Tool): boolean {
   return a.cat === b.cat && a.mat === b.mat;
+}
+
+/** Read-only catalog view used by coverage checks and problem deep links. */
+export function catalogSnapshot(): { section: CatalogSectionId; label: string; tool: Tool }[] {
+  return CATS.flatMap((cat) => cat.items.map((item) => ({ section: cat.key, label: item.label, tool: { ...item.tool } })));
 }

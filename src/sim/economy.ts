@@ -41,6 +41,8 @@ export class EconomySystem {
   }
 
   canAfford(amount: number): boolean { return this.cash >= amount; }
+  hireFee(kind: number): number { return HIRE_FEES.get(kind) ?? 0; }
+  hourlyWage(kind: number): number { return WAGES.get(kind) ?? 0; }
 
   post(time: number, kind: LedgerKind, amount: number, memo: string, mandatory = false): boolean {
     if (!mandatory && amount < 0 && this.cash + amount < 0) return false;

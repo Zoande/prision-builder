@@ -32,11 +32,12 @@ export class IntakeSystem {
   tick(dt: number, worldTime: number, world: World, agents: Agents): void {
     this.warnings.clear();
     const day = dayOf(worldTime);
-    if (Math.floor(hourOf(worldTime)) === 8 && day !== this.lastScheduledDay) {
+    const reception = [...world.rooms.values()].find((r) => r.type === RoomType.Reception && r.valid) ?? null;
+    if (day >= 2 && Math.floor(hourOf(worldTime)) === 8 && day !== this.lastScheduledDay &&
+        reception && world.prisonerCapacity() - agents.prisonerCount() - this.queuedArrivals > 0) {
       this.lastScheduledDay = day;
       this.schedule(world, agents);
     }
-    const reception = [...world.rooms.values()].find((r) => r.type === RoomType.Reception && r.valid) ?? null;
     for (const vehicle of this.vehicles) {
       vehicle.timer -= dt;
       if (vehicle.state === "arriving" && vehicle.timer <= 0) vehicle.state = "waiting";
@@ -88,9 +89,11 @@ export class IntakeSystem {
 
   private schedule(world: World, agents: Agents): void {
     const free = Math.max(0, world.prisonerCapacity() - agents.prisonerCount() - this.queuedArrivals);
+    if (free <= 0) return;
     const p = Math.max(0.08, Math.min(0.8, 0.08 + (free / 35) * 0.72));
     let arrivals = 1;
     for (let i = 0; i < 14; i++) if (this.random() < p) arrivals++;
+    arrivals = Math.min(arrivals, free);
     this.vehicles.push({
       id: this.nextVehicleId++, arrivals, remaining: arrivals, state: "arriving",
       x: 374.5, z: -8, timer: 8, warning: "",
@@ -138,10 +141,17 @@ export class IntakeSystem {
   }
 
   sampleArrivalCount(freeBeds: number): number {
+    if (freeBeds <= 0) return 0;
     const p = Math.max(0.08, Math.min(0.8, 0.08 + (Math.max(0, freeBeds) / 35) * 0.72));
     let arrivals = 1;
     for (let i = 0; i < 14; i++) if (this.random() < p) arrivals++;
-    return arrivals;
+    return Math.min(arrivals, Math.max(0, freeBeds));
+  }
+
+  forecast(worldTime: number, world: World, agents: Agents): { day: number; capacity: number; ready: boolean } {
+    const capacity = Math.max(0, world.prisonerCapacity() - agents.prisonerCount() - this.queuedArrivals);
+    const ready = capacity > 0 && [...world.rooms.values()].some((room) => room.type === RoomType.Reception && room.valid);
+    return { day: Math.max(2, dayOf(worldTime) + (hourOf(worldTime) >= 8 ? 1 : 0)), capacity, ready };
   }
 
   saveData() {

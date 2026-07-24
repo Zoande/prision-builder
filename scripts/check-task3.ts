@@ -7,7 +7,7 @@ import { InfrastructureSystem } from "../src/sim/infrastructure.ts";
 import { LogisticsSystem } from "../src/sim/logistics.ts";
 import { Obj, RoomType } from "../src/sim/objects.ts";
 import { freshPrisonerMind, generatePrisonerProfile } from "../src/sim/profiles.ts";
-import { SAVE_VERSION, isSaveV5 } from "../src/sim/saveVersion.ts";
+import { SAVE_VERSION, isSaveV6 } from "../src/sim/saveVersion.ts";
 import { PrisonerSocialSystem } from "../src/sim/social.ts";
 import { Task2Systems } from "../src/sim/task2Systems.ts";
 import { Task3Systems } from "../src/sim/task3Systems.ts";
@@ -53,9 +53,9 @@ function setup() {
 }
 
 function saveAndGatehouseChecks(): void {
-  assert.equal(SAVE_VERSION, 5);
-  for (const version of [1, 2, 3, 4]) assert.equal(isSaveV5({ version, world: {}, agents: {}, task2: {}, task3: {} }), false);
-  assert.equal(isSaveV5({ version: 5, world: {}, agents: {}, task2: {}, task3: {} }), true);
+  assert.equal(SAVE_VERSION, 6);
+  for (const version of [1, 2, 3, 4, 5]) assert.equal(isSaveV6({ version, world: {}, agents: {}, task2: {}, task3: {} }), false);
+  assert.equal(isSaveV6({ version: 6, world: {}, agents: {}, task2: {}, task3: {} }), true);
   const { world, task3 } = setup();
   assert.equal(world.placePiece(100, 100, Obj.Gatehouse, 0), false, "Gatehouse must not be placeable away from the road");
   assert.equal(world.placePiece(370, 100, Obj.Gatehouse, 1), false, "Gatehouse orientation is fixed");

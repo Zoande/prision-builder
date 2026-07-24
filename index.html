@@ -82,6 +82,8 @@
       #catalogIcon { display:grid; place-items:center; width:23px; height:23px; border:1px solid var(--line-bright); border-radius:4px; color:#bdc9c5; font-size:13px; }
       #toolName { color:#eff2ec; font-size:13px; font-weight:900; letter-spacing:.035em; text-transform:uppercase; }
       #toolHint { color:var(--muted); font-size:11px; }
+      #catalogSearch { margin-left:auto; width:min(260px,28vw); padding:7px 10px; color:#eef3ef; background:#0b1820; border:1px solid rgba(166,190,190,.22); border-radius:5px; outline:none; }
+      #catalogSearch:focus { border-color:#9fb56c; box-shadow:0 0 0 2px rgba(159,181,108,.16); }
       #palette { display:flex; gap:8px; height:130px; margin-top:7px; padding:2px 1px 5px; overflow-x:auto; overflow-y:hidden; scrollbar-color:#536b4a transparent; }
       .build-item { flex:0 0 108px; height:123px; padding:6px; border:1px solid rgba(165,190,193,.12); border-radius:5px; color:#dbe3e2; background:linear-gradient(145deg,#152731,#102029); cursor:pointer; text-align:left; transition:border-color .14s,transform .14s,background .14s; }
       .build-item:hover { border-color:rgba(191,215,175,.52); transform:translateY(-2px); background:#1a2c35; } .build-item.on { border-color:#bbc878; box-shadow:inset 0 0 0 1px rgba(187,200,120,.25); }
@@ -143,9 +145,33 @@
       .inspector-kicker { color:#b2c879; font-size:10px; font-weight:900; letter-spacing:.12em; text-transform:uppercase; } #inspectName { margin:4px 0 3px; font-size:18px; font-weight:900; } #inspectState { color:var(--muted); } #inspectStats { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:13px; } .inspect-stat { padding:8px; border:1px solid var(--line); border-radius:4px; background:rgba(255,255,255,.035); } .inspect-stat small { display:block; color:var(--muted); font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; } .inspect-stat strong { display:block; margin-top:2px; font-size:12px; }
       #inspectProfile { margin-top:10px; color:#aebcbd; font:10px/1.55 ui-monospace,monospace; white-space:pre-wrap; }
       .room-label { position:absolute; transform:translate(-50%,-50%); padding:5px 9px; border:1px solid rgba(211,225,209,.26); border-radius:3px; color:#e5ebdf; background:rgba(10,22,27,.78); box-shadow:0 2px 9px rgba(0,0,0,.35); font-size:10px; font-weight:900; letter-spacing:.08em; text-shadow:0 1px 2px #000; text-transform:uppercase; white-space:nowrap; }
-      .warn-mark { position:absolute; transform:translate(-50%,-50%); display:grid; place-items:center; width:24px; height:24px; border:2px solid #ffe7ac; border-radius:50%; color:#302202; background:#e0b94b; box-shadow:0 3px 12px rgba(0,0,0,.45); font-weight:900; pointer-events:auto; cursor:help; }
+      .warn-mark { position:absolute; transform:translate(-50%,-50%); display:grid; place-items:center; width:24px; height:24px; border:2px solid #ffe7ac; border-radius:50%; color:#302202; background:#e0b94b; box-shadow:0 3px 12px rgba(0,0,0,.45); font-weight:900; pointer-events:auto; cursor:pointer; }
       .build-preview { position:absolute; border:1px solid rgba(105,190,255,.92); background:rgba(55,137,225,.28); box-shadow:0 0 13px rgba(70,156,255,.42); pointer-events:none; } .build-preview.invalid { border-color:rgba(255,112,105,.95); background:rgba(210,48,48,.30); box-shadow:0 0 13px rgba(255,70,70,.42); } .build-preview.persistent { background:rgba(55,137,225,.20); border-style:dashed; } .build-preview-arrow { position:absolute; height:3px; transform-origin:0 50%; background:#b9ddff; box-shadow:0 0 8px rgba(75,166,255,.7); pointer-events:none; } .build-preview-arrow::after { content:""; position:absolute; right:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:9px solid #b9ddff; }
       #tip { position:fixed; z-index:30; display:none; min-width:180px; max-width:350px; padding:10px 12px; border:1px solid rgba(182,206,182,.4); border-radius:5px; color:#e9efeb; background:rgba(7,16,21,.96); box-shadow:var(--shadow); font:11px/1.5 ui-monospace,monospace; white-space:pre; pointer-events:none; }
+      #problemButton { position:fixed; z-index:36; top:86px; right:18px; padding:8px 12px; color:#eef3ed; background:#14252c; border:1px solid rgba(206,175,92,.35); border-radius:6px; cursor:pointer; font-weight:800; }
+      #problemButton.has-critical { color:#fff0e8; border-color:#d66d55; background:#55291f; }
+      #problemsPanel { position:fixed; z-index:45; display:none; top:126px; right:18px; width:min(440px,calc(100vw - 36px)); max-height:calc(100vh - 160px); overflow:auto; padding:14px; color:#e7eeea; background:rgba(8,20,27,.98); border:1px solid rgba(173,194,189,.2); border-radius:8px; box-shadow:0 18px 60px #000a; }
+      #problemsPanel.show { display:block; }
+      .problem-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; font-size:16px; font-weight:900; }
+      .problem-row { margin:7px 0; padding:9px 10px; background:#11242c; border-left:3px solid #81935a; border-radius:4px; }
+      .problem-row.critical { border-left-color:#d66d55; } .problem-row.warning { border-left-color:#d2a84f; }
+      .problem-row small { display:block; color:#829397; margin-bottom:3px; text-transform:uppercase; letter-spacing:.06em; }
+      .problem-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+      .problem-actions button,.queue-actions button { padding:4px 7px; color:#dfe9e2; background:#23383e; border:1px solid #40575c; border-radius:4px; cursor:pointer; }
+      .queue-section { margin-top:14px; padding-top:12px; border-top:1px solid #294048; }
+      .queue-row { margin:7px 0; padding:8px; background:#0d1c23; border-radius:4px; }
+      .queue-row header { display:flex; justify-content:space-between; gap:8px; } .queue-row p { margin:5px 0; color:#aab8b6; font-size:11px; }
+      #notice { position:fixed; z-index:90; left:50%; bottom:26px; display:none; transform:translateX(-50%); max-width:min(560px,90vw); padding:10px 14px; color:#f5f7f2; background:rgba(39,25,20,.96); border:1px solid #b47b55; border-radius:6px; box-shadow:0 10px 34px #0009; }
+      #notice.show { display:block; }
+      #saveStatus { position:fixed; z-index:35; right:18px; bottom:18px; color:#91a19f; font-size:11px; }
+      #saveControls { position:fixed; z-index:35; right:18px; bottom:38px; display:flex; gap:5px; }
+      #saveControls button { padding:5px 8px; color:#cad5d0; background:#14252c; border:1px solid #33484d; border-radius:4px; cursor:pointer; font-size:10px; }
+      #startMenu { position:fixed; z-index:120; inset:0; display:none; place-items:center; background:rgba(3,9,12,.82); }
+      #startMenu.show { display:grid; }
+      .start-card { width:min(520px,calc(100vw - 32px)); padding:24px; color:#eaf0ea; background:#0c1c24; border:1px solid #53666a; border-radius:10px; box-shadow:0 24px 80px #000c; }
+      .start-card h1 { margin:0 0 8px; } .start-card p { color:#a7b5b2; line-height:1.5; }
+      .start-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; }
+      .start-actions button { padding:9px 12px; color:#eef3ec; background:#435b36; border:1px solid #72845d; border-radius:5px; cursor:pointer; }
       @media (max-width:1050px) { #sideRail { width:70px; } #sideRail:hover, #sideRail:focus-within { width:250px; } #status { width:480px; max-width:calc(100vw - 320px); } #build { grid-template-columns:184px minmax(0,1fr); } #itemDetail { display:none; } #catalogMain { grid-template-columns:1fr; } }
       @media (max-width:720px) { #sideRail { display:none; } #status { left:10px; transform:none; width:calc(100vw - 185px); grid-template-columns:repeat(3,1fr); padding:4px; } .status-card,#cap { padding:7px; } .status-card::before,#cap::before { display:none; } .status-value { font-size:14px; } #clockbox { width:168px; } #clock { gap:7px; padding:0 9px; } .clock-day { font-size:12px; } .clock-time { font-size:17px; } .clock-sun { display:none; } #speeds { gap:3px; padding:6px; } #regimeBtn { padding:0 9px; font-size:10px; } #build { height:166px; grid-template-columns:112px 1fr; } #catalogSide { padding:11px 7px; } .console-eyebrow { margin-left:7px; font-size:10px; } .build-cat { padding:5px; font-size:9px; } #catalogList { padding:10px; } #palette { height:123px; } .build-item { flex-basis:102px; height:116px; } .item-swatch { height:58px; } #inspector { left:10px; top:105px; } }
     </style>
@@ -171,6 +197,8 @@
 
     <section id="status"><div id="cap"><span><span class="status-label">Population</span><span class="status-value">0 / 0</span></span></div><div class="status-card"><span><span class="status-label">Cash</span><span id="cash" class="status-value">$20,000</span></span></div><div class="status-card"><span><span class="status-label">Net / hour</span><span id="netHourly" class="status-value">$0</span></span></div><div class="status-card"><span><span class="status-label">Escaped</span><span id="escaped" class="status-value">0</span></span></div><div class="status-card"><span><span class="status-label">Recaptured</span><span id="caught" class="status-value">0</span></span></div></section>
     <aside id="clockbox"><div id="clock">08:00</div><div id="speeds"></div><button id="regimeBtn">Regime: Free time</button></aside>
+    <button id="problemButton" type="button" aria-expanded="false">Problems <span id="problemCount">0</span></button>
+    <aside id="problemsPanel" aria-label="Problems and construction queue"></aside>
     <div id="regimePanel"></div>
     <div id="emergencyBar"><button class="emergency-btn" data-emergency="alarm">Alarm</button><button class="emergency-btn" data-emergency="lockdown">Full Lockdown</button><button class="emergency-btn" data-emergency="shakedown">Full Shakedown</button><button class="emergency-btn" data-emergency="armed-response">Armed Response</button><button class="emergency-btn cancel" data-emergency="none">Cancel</button></div>
     <aside id="inspector"><div class="inspector-kicker">Selected resident</div><div id="inspectName">No selection</div><div id="inspectState">Click a person to inspect</div><div id="inspectStats"></div><div id="inspectProfile"></div></aside>
@@ -178,13 +206,16 @@
 
     <section id="build" aria-label="Construction catalog">
       <aside id="catalogSide"><div class="console-eyebrow">Categories</div><nav id="cats" aria-label="Build categories"></nav></aside>
-      <div id="catalogMain"><div id="catalogList"><div id="build-head"><span id="catalogIcon">&#9874;</span><span id="toolName">Floors</span><span id="toolHint">Choose a construction material</span></div><div id="palette"></div></div><aside id="itemDetail"><div id="detailType">Construction</div><div id="detailName">Choose an item</div><p id="detailCopy">Select an item from the catalog to enter placement mode.</p><div id="detailCost"><span>Build cost</span><strong>Ready</strong></div></aside></div>
+      <div id="catalogMain"><div id="catalogList"><div id="build-head"><span id="catalogIcon">&#9874;</span><span id="toolName">Floors</span><span id="toolHint">Choose a construction material</span><input id="catalogSearch" type="search" aria-label="Search every object, room, and staff type" placeholder="Search all facilities"></div><div id="palette"></div></div><aside id="itemDetail"><div id="detailType">Construction</div><div id="detailName">Choose an item</div><p id="detailCopy">Select an item from the catalog to enter placement mode.</p><div id="detailCost"><span>Build cost</span><strong>Ready</strong></div></aside></div>
     </section>
     <div id="utility" aria-hidden="true"><button id="qualBtn"></button><button id="roofBtn"></button></div>
     <aside id="logisticsDashboard" aria-label="Logistics dashboard"></aside>
     <aside id="financialsDashboard" aria-label="Financials dashboard"></aside>
     <aside id="policyDashboard" aria-label="Policy dashboard"></aside>
     <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="log-title">Prisoner intelligence</div><input id="intelSearch" aria-label="Search inmates" placeholder="Search official records or known cases"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and evidence-backed assessments are visible here.</div></section></aside>
+    <div id="notice" role="status" aria-live="polite"></div><div id="saveStatus" aria-live="polite">Not saved</div>
+    <div id="saveControls"><button id="saveNowBtn" type="button">Save now</button><button id="exportSaveBtn" type="button">Export</button><button id="importSaveBtn" type="button">Import</button><button id="newGameBtn" type="button">New game</button><input id="importSaveFile" type="file" accept="application/json" hidden></div>
+    <div id="startMenu"><div class="start-card"><h1>Fresh v6 prison required</h1><p>This release rebuilds construction, logistics, intake, and persistence. Version-5 saves are intentionally not migrated. You can download the old save before starting fresh.</p><div class="start-actions"><button id="freshStartBtn" type="button">Start fresh</button><button id="downloadOldBtn" type="button">Download old save</button></div></div></div>
     <div id="hud"></div><div id="err"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
