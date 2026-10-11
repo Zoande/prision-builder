@@ -74,6 +74,7 @@ export class ConstructionSystem {
   private nextGroupId = 1;
   private nextTargetId = 1;
   private retryTimer = 3;
+  private demandTime = 0;
   lastIssue: PlacementValidation | null = null;
 
   readonly logistics: LogisticsSystem;
@@ -113,7 +114,8 @@ export class ConstructionSystem {
     }
     if (group.targets.length === 0) return null;
     this.groups.set(group.id, group);
-    this.logistics.request(this.groupRecipe(group), worldTime, false, `construction:${group.id}`);
+    this.demandTime = worldTime;
+    this.refreshConstructionDemand(worldTime);
     return group;
   }
 
@@ -174,9 +176,9 @@ export class ConstructionSystem {
       this.logistics.returnToStock(this.owner(group.id, target.id));
     }
     this.releaseMapReservations(group.id);
-    this.logistics.cancelSource(`construction:${group.id}`);
     group.state = "cancelled";
     group.blocker = "Cancelled by player";
+    this.refreshConstructionDemand(this.demandTime);
     return true;
   }
 
@@ -219,10 +221,11 @@ export class ConstructionSystem {
 
   /** Oldest order first; distance breaks ties. Reachability is checked by the
    *  staff pathfinder after claiming and unreachable claims are released. */
-  claimNext(workerId: number, x: number, z: number, world: World): {
+  claimNext(workerId: number, x: number, z: number, world: World, worldTime = this.demandTime): {
     group: BuildOrderGroup; target: BuildTarget; phase: "haul" | "work"; packageId: number;
   } | null {
     this.refreshStates();
+    if (Number.isFinite(worldTime)) this.demandTime = worldTime;
     const candidates: { group: BuildOrderGroup; target: BuildTarget; distance: number }[] = [];
     for (const group of this.groups.values()) {
       if (group.state === "cancelled" || group.state === "complete") continue;
@@ -250,6 +253,7 @@ export class ConstructionSystem {
       target.claimedBy = workerId;
       target.state = phase === "haul" ? "hauling" : "working";
       group.state = "active";
+      if (phase === "haul") this.refreshConstructionDemand(this.demandTime);
       return { group, target, phase, packageId };
     }
     return null;
@@ -302,6 +306,7 @@ export class ConstructionSystem {
     target.delivered[pkg.commodity] = (target.delivered[pkg.commodity] ?? 0) + pkg.quantity;
     target.claimedBy = -1;
     target.state = Object.values(this.remainingRecipe(target)).some((amount) => amount > 0) ? "queued" : "ready";
+    this.refreshConstructionDemand(this.demandTime);
     this.refreshStates();
     return true;
   }
@@ -346,6 +351,7 @@ export class ConstructionSystem {
     if (!changed) target.blocker = "World changed before work completed";
     this.refreshStates();
     if (group.state === "complete") this.releaseMapReservations(group.id);
+    if (changed) this.refreshConstructionDemand(this.demandTime);
     return changed;
   }
 
@@ -565,6 +571,11 @@ export class ConstructionSystem {
     const bulkStructure = snapshot.kind === Obj.SecureBridge || snapshot.kind === Obj.Gatehouse;
     if ((snapshot.piece || isBoxedObject(snapshot.kind)) && !bulkStructure) {
       const kind = snapshot.piece?.kind ?? snapshot.kind;
+      const def = defOf(kind);
+      if (!def) return;
+      // Existing buildings can predate any matching construction purchase, so
+      // make sure their salvage commodity exists before adding recovered stock.
+      ensureBoxCommodity(def);
       this.logistics.addSalvage(boxCommodity(kind), 1, target.x, target.z);
       return;
     }
@@ -604,7 +615,10 @@ export class ConstructionSystem {
         const needsMaterials = Object.values(remaining).some((amount) => amount > 0);
         if (!needsMaterials || group.operation !== "build") target.state = "ready";
         else {
-          const available = Object.entries(remaining).some(([id, n]) => n > 0 && this.logistics.quantity(id) - this.logistics.reserved(id) > 0);
+          // Reserved cargo is already absent from quantity()'s delivery/site
+          // states. Do not subtract it a second time when deciding whether an
+          // order can be worked.
+          const available = Object.entries(remaining).some(([id, n]) => n > 0 && this.logistics.quantity(id) > 0);
           target.state = available ? "queued" : "awaiting-materials";
         }
       }
@@ -642,6 +656,32 @@ export class ConstructionSystem {
   }
 
   private owner(groupId: number, targetId: number): string { return `build:${groupId}:${targetId}`; }
+
+  /** Procurement covers the combined outstanding requirements of all build
+   * orders. A per-order request cannot treat another order's pending purchase
+   * as shared stock: cancelling that first order would strand the later one. */
+  private refreshConstructionDemand(time: number): void {
+    this.logistics.cancelSource("construction:orders");
+    const outstanding: Recipe = {};
+    for (const group of this.groups.values()) {
+      if (group.operation !== "build" || group.state === "cancelled" || group.state === "complete") continue;
+      for (const target of group.targets) {
+        if (target.completed || target.state === "cancelled") continue;
+        const remaining = this.remainingRecipe(target);
+        const held: Recipe = {};
+        const owner = this.owner(group.id, target.id);
+        for (const pkg of this.logistics.packages.values()) if (pkg.reservedBy === owner) {
+          held[pkg.commodity] = (held[pkg.commodity] ?? 0) + pkg.quantity;
+        }
+        for (const [commodity, amount] of Object.entries(remaining)) {
+          remaining[commodity] = Math.max(0, amount - (held[commodity] ?? 0));
+        }
+        addRecipe(outstanding, remaining);
+      }
+    }
+    if (Object.values(outstanding).some((amount) => amount > 0))
+      this.logistics.request(outstanding, time, false, "construction:orders");
+  }
 
   saveData() {
     return {
