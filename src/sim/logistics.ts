@@ -344,6 +344,13 @@ export class LogisticsSystem {
     }
     const readyIds = new Set(ready.map((r) => r.id));
     for (let i = this.requests.length - 1; i >= 0; i--) if (readyIds.has(this.requests[i].id)) this.requests.splice(i, 1);
+    // A demand is a snapshot of what its source needs now, not a standing
+    // stocking target. Once that snapshot has been converted to physical
+    // packages, those inbound packages satisfy the other live sources. Keep
+    // the snapshot around after its packages are later consumed would
+    // resurrect old setup orders on the next rebuild (for example, a serving
+    // table's initial cutlery order after a daily replacement request).
+    for (const req of ready) this.demands.delete(`${req.source}::${req.commodity}`);
     const packageIds: number[] = [];
     for (const req of ready) {
       let left = req.quantity;

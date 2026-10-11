@@ -3,6 +3,7 @@ import { boxCommodity, ensureBoxCommodity } from "../src/sim/commodities.ts";
 import { ConstructionSystem } from "../src/sim/construction.ts";
 import { EconomySystem } from "../src/sim/economy.ts";
 import { InfrastructureSystem } from "../src/sim/infrastructure.ts";
+import { KitchenSystem } from "../src/sim/kitchen.ts";
 import { LogisticsSystem } from "../src/sim/logistics.ts";
 import { OBJ_DEFS, Obj, RoomType, World } from "../src/sim/world.ts";
 
@@ -77,6 +78,64 @@ function finishBuild(construction: ConstructionSystem, world: World, workerId: n
   restored.loadData(JSON.parse(JSON.stringify(logistics.saveData())));
   assert.deepEqual(restored.saveData().demands, logistics.saveData().demands);
   assert.equal(pending()[0]?.source, "workshop");
+}
+
+// Once a request is converted into a shipment, its source snapshot is retired.
+// A later replacement order must not resurrect the original setup quantity.
+{
+  const { logistics, economy, world } = setup(500);
+  new InfrastructureSystem(world).installNewGame();
+  economy.cash = 100_000;
+  logistics.request({ tray: 6 }, 0, true, "serving-table:42");
+  logistics.tick(.1, 8, world);
+  assert.equal(logistics.saveData().demands.length, 0,
+    "dispatched setup demand should retire while physical cargo represents the order");
+  const shipment = [...logistics.packages.values()].reduce((sum, pkg) => sum + pkg.quantity, 0);
+  assert.equal(shipment, 6);
+  // Simulate the kitchen accepting the shipment into its own inventory.
+  for (const id of [...logistics.packages.keys()]) logistics.packages.delete(id);
+  logistics.request({ tray: 2 }, 20, true, "tray-replacement");
+  logistics.tick(.1, 28, world);
+  assert.equal([...logistics.packages.values()].reduce((sum, pkg) => sum + pkg.quantity, 0), 2,
+    "replacement demand must buy only its deficit, not repeat the retired table setup order");
+}
+
+// Exercise three daily kitchen procurement windows against live trucks and
+// physical acceptance. Filled institutional stock must retire its original
+// setup requests, rather than buying those quantities again each day.
+{
+  const { world, logistics, economy } = setup(500);
+  new InfrastructureSystem(world).installNewGame();
+  world.placePiece(100, 100, Obj.Freezer, 0);
+  world.placePiece(104, 100, Obj.ServingTable, 0);
+  world.placePiece(108, 100, Obj.Bookshelf, 0);
+  const kitchen = new KitchenSystem(logistics);
+  economy.cash = 1_000_000;
+  kitchen.tick(690, world); // 23:00 on day one
+  let time = 698;
+  for (let i = 0; i < 3000; i++, time += .1) logistics.tick(.1, time, world);
+  let cookId = 90;
+  for (const pkg of [...logistics.packages.values()].filter((row) => row.state === "delivery")) {
+    if (pkg.commodity === "book") { kitchen.acceptBookPackage(pkg); continue; }
+    const haul = kitchen.claimHaul(cookId++, world);
+    assert(haul, `delivered ${pkg.commodity} stock should be claimable by the kitchen`);
+    assert(kitchen.pickUp(haul.packageId, cookId - 1));
+    assert(kitchen.deliver(haul.packageId, cookId - 1));
+  }
+  assert.equal(kitchen.frozenMeals, 48);
+  assert.equal(kitchen.totalTrays(), 6);
+  assert.equal(kitchen.totalSpoons(), 6);
+  assert.equal(kitchen.books, 8);
+  assert.equal(logistics.saveData().demands.length, 0);
+  const purchaseCount = economy.saveData().ledger.length;
+  for (const day of [1, 2]) {
+    const dayTime = day * 24 * 30 + 23 * 30;
+    kitchen.tick(dayTime, world);
+    for (let i = 0; i < 100; i++) logistics.tick(.1, dayTime + i * .1, world);
+    assert.equal(logistics.saveData().demands.length, 0, `day ${day + 1} should have no outstanding kitchen demand`);
+  }
+  assert.equal(economy.saveData().ledger.length, purchaseCount,
+    "full freezer, place settings, and bookshelf should not trigger repeat purchases over three days");
 }
 
 // Multiple construction targets can each haul one bundle, finish, and release

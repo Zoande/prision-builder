@@ -1,4 +1,4 @@
-import { dayOf, hourOf } from "./time.ts";
+import { dayOf } from "./time.ts";
 import { LogisticsSystem, type CargoPackage } from "./logistics.ts";
 import { Obj, SHELF_KINDS, World } from "./world.ts";
 import type { ItemSystem } from "./itemSystem.ts";
@@ -59,15 +59,17 @@ export class KitchenSystem {
 
   tick(worldTime: number, world: World): void {
     this.warnings.clear();
-    this.discoverObjects(world, worldTime);
+    this.discoverObjects(world);
     const day = dayOf(worldTime);
-    if (Math.floor(hourOf(worldTime)) === 23 && day !== this.lastReconcileDay) {
-      this.lastReconcileDay = day;
-      this.logistics.request({ "frozen-meal": Math.max(0, this.freezerCapacity - this.frozenMeals) }, worldTime, true, "daily-food");
-      this.logistics.request({ tray: Math.max(0, this.placeSettingTarget - this.totalTrays()) }, worldTime, true, "tray-replacement");
-      this.logistics.request({ spoon: Math.max(0, this.placeSettingTarget - this.totalSpoons()) }, worldTime, true, "spoon-replacement");
-      this.logistics.request({ book: Math.max(0, this.bookTarget - this.books) }, worldTime, true, "book-replacement");
-    }
+    // Keep a live target for the combined kitchen stock. Per-object startup
+    // orders plus daily replacements duplicated the same trays/books, while
+    // one request per day could repeat food already on an inbound truck.
+    this.logistics.request({
+      "frozen-meal": Math.max(0, this.freezerCapacity - this.frozenMeals - this.kitchenPipeline("frozen-meal")),
+      tray: Math.max(0, this.placeSettingTarget - this.totalTrays() - this.kitchenPipeline("tray")),
+      spoon: Math.max(0, this.placeSettingTarget - this.totalSpoons() - this.kitchenPipeline("spoon")),
+      book: Math.max(0, this.bookTarget - this.books - this.kitchenPipeline("book")),
+    }, worldTime, true, "kitchen:restock");
     if (this.freezerCapacity === 0 && this.knownServing.size > 0) this.warnings.add("Food shortage: no freezer");
     if (this.frozenMeals <= 0 && this.knownServing.size > 0) this.warnings.add("Food shortage: no frozen meals");
     if (this.cleanTrays <= 0 && this.knownServing.size > 0) this.warnings.add("Meal service needs clean trays");
@@ -196,26 +198,29 @@ export class KitchenSystem {
   totalTrays(): number { return this.cleanTrays + this.dirtyTrays + this.preparedSettings; }
   totalSpoons(): number { return this.cleanSpoons + this.dirtySpoons + this.preparedSettings; }
 
-  private discoverObjects(world: World, worldTime: number): void {
+  private discoverObjects(world: World): void {
     this.sinkCapacity = new Set(world.tilesOfKind(Obj.Sink).map((i) => world.anchorOf(i))).size * 12;
     const freezers = new Set(world.tilesOfKind(Obj.Freezer).map((i) => world.anchorOf(i)));
     this.knownFreezers.clear(); for (const anchor of freezers) this.knownFreezers.add(anchor);
     const serving = new Set(world.tilesOfKind(Obj.ServingTable).map((i) => world.anchorOf(i)));
-    for (const i of world.tilesOfKind(Obj.ServingTable)) {
-      const anchor = world.anchorOf(i);
-      if (this.knownServing.has(anchor)) continue;
-      this.logistics.request({ tray: 6, spoon: 6 }, worldTime, true, `serving-table:${anchor}`);
-    }
     this.knownServing.clear(); for (const anchor of serving) this.knownServing.add(anchor);
     const shelves = new Map<number, number>();
     for (const kind of SHELF_KINDS) for (const i of world.tilesOfKind(kind)) {
       const anchor = world.anchorOf(i);
       shelves.set(anchor, kind);
-      if (this.knownShelves.has(anchor)) continue;
-      const capacity = kind === Obj.Bookshelf ? 8 : kind === Obj.BookshelfLarge ? 16 : 24;
-      this.logistics.request({ book: capacity }, worldTime, true, `bookshelf:${anchor}`);
     }
     this.knownShelves.clear(); for (const [anchor, kind] of shelves) this.knownShelves.set(anchor, kind);
+  }
+
+  private kitchenPipeline(commodity: string): number {
+    let total = 0;
+    for (const pkg of this.logistics.packages.values()) {
+      if (pkg.commodity !== commodity) continue;
+      if (pkg.state === "ordered" || pkg.state === "in-transit") total += pkg.quantity;
+      else if ((pkg.state === "delivery" || pkg.state === "carried" || pkg.state === "reserved") &&
+          (!pkg.reservedBy || pkg.reservedBy.startsWith("cook:"))) total += pkg.quantity;
+    }
+    return total;
   }
 
   private destination(pkg: CargoPackage, world: World): number {
