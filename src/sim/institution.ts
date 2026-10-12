@@ -82,9 +82,17 @@ export interface PunishmentOrder {
   incidentId: number;
   prisonerId: number;
   solitaryUntil: number;
+  /** Next attempt at a solitary route when every valid room is occupied. */
+  retryAt?: number;
   custodyUp: boolean;
   search: PolicyRule["search"];
   interrogate: boolean;
+  /** Policy obligations are copied onto the order so later rule edits and merged incidents remain effective. */
+  solitaryHours?: number;
+  protectiveOffer?: boolean;
+  searchStarted?: PolicyRule["search"];
+  searchCompleted?: PolicyRule["search"];
+  interrogated?: boolean;
   state: "queued" | "active" | "complete" | "cancelled";
   solitaryRoomId?: number;
   released?: boolean;
@@ -260,9 +268,28 @@ export class InstitutionSystem {
       const rule = this.ruleFor(incident.category, incident.itemDefId), confidence = this.confidenceFor(incident);
       const threshold = rule.threshold === "suspected" ? .25 : rule.threshold === "probable" ? .6 : .9;
       if (confidence < threshold || this.punishments.some((p) => p.incidentId === incident.id)) continue;
+      const open = this.punishments.filter((p) => p.prisonerId === incident.aggressorId &&
+        p.state !== "cancelled" && p.state !== "complete");
+      // Fold additional reported incidents into an order that has not started.
+      // An active sentence cannot absorb a new offense: preserve it as a
+      // separate follow-up order instead of silently dropping the new case.
+      const queued = open.find((p) => p.state === "queued");
+      if (queued) {
+        const rank: Record<PolicyRule["search"], number> = { none: 0, person: 1, cell: 2, workplace: 2, targeted: 3, full: 4 };
+        if (rank[rule.search] > rank[queued.search]) queued.search = rule.search;
+        queued.custodyUp ||= rule.custodyUp;
+        queued.protectiveOffer ||= rule.protectiveOffer;
+        queued.interrogate ||= rule.interrogate;
+        queued.solitaryHours = Math.max(queued.solitaryHours ?? 0, rule.solitaryHours);
+        queued.solitaryUntil = Math.max(queued.solitaryUntil, time + rule.solitaryHours * 30);
+        incident.state = "responding";
+        const c = this.cases.get(incident.caseId); if (c) c.status = "actioned";
+        continue;
+      }
       this.punishments.push({ incidentId: incident.id, prisonerId: incident.aggressorId,
         solitaryUntil: time + rule.solitaryHours * 30, custodyUp: rule.custodyUp,
-        search: rule.search, interrogate: rule.interrogate, state: "queued" });
+        search: rule.search, interrogate: rule.interrogate, solitaryHours: rule.solitaryHours,
+        protectiveOffer: rule.protectiveOffer, state: "queued" });
       incident.state = "responding";
       const c = this.cases.get(incident.caseId); if (c) c.status = "actioned";
     }

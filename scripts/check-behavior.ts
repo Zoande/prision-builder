@@ -793,8 +793,11 @@ function interruptedCasualtyTransportCanBeReclaimed() {
   const nextJob = task2.health.treatmentJobs.find((row) => row.patientId === secondVictim.id)!;
   for (let tick = 0; tick < 200 && nextJob.transportGuardId === undefined; tick++)
     task2.security.updateStaff(firstGuard, .1, 60 + tick * .1, world, roster);
-  assert.equal(secondVictim.state, "beingTransported");
   assert.equal(nextJob.transportGuardId, firstGuard.id);
+  assert.equal(firstGuard.state, "toCasualty", "the guard walks to a distant casualty before carrying him");
+  for (let tick = 0; tick < 1000 && secondVictim.state !== "beingTransported"; tick++)
+    task2.security.updateStaff(firstGuard, .1, 80 + tick * .1, world, roster);
+  assert.equal(secondVictim.state, "beingTransported", "the patient enters transport only after the guard reaches him");
   firstGuard.state = "patrol"; // a higher-priority guard duty preempts the carry
   task2.health.tick(.1, 60.1, world, roster, task2.items);
   assert.equal(secondVictim.state, "idle", "health clears the transport pose when its guard leaves the carry");

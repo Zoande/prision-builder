@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { blankAgent, ESCAPE_MARGIN, type Agent } from "../src/sim/agent.ts";
+import { blankAgent, ESCAPE_MARGIN, REG, type Agent } from "../src/sim/agent.ts";
 import { Agents } from "../src/sim/agents.ts";
 import { AreaSystem } from "../src/sim/areas.ts";
 import { CombatSystem } from "../src/sim/combat.ts";
@@ -102,6 +102,21 @@ function combatResponseLifecycleChecks(): void {
     "a sufficient unarmed guard response should contain a two-prisoner fight");
   assert.equal(fight.state, "contained");
   assert(attacker.cuffed && defender.cuffed, "both prisoners are restrained when guards contain the fight");
+
+  const armedA = inmate(37, 10.5, 10.5), armedB = inmate(38, 11.4, 10.5);
+  for (const prisoner of [armedA, armedB]) {
+    for (const slot of ["hands", "equipment"]) items.ensureContainer({ id: `agent:${prisoner.id}:${slot}`,
+      name: slot, x: prisoner.x, z: prisoner.z, capacity: 8, concealment: .4, bodyCapacity: 0,
+      lockedTier: "none", ownerId: prisoner.id, tags: [slot] });
+    const shiv = items.create("shiv", 0); items.moveToContainer(shiv.id, `agent:${prisoner.id}:hands`, 0, prisoner.id);
+  }
+  const armedFight = combat.start(armedA, armedB, 10)!;
+  institution.incidents.get(armedFight.incidentId)!.state = "reported";
+  const loneGuard = staff(60, Obj.Guard, 10.5, 10.5);
+  assert.equal(combat.guardIntervene(loneGuard, armedFight, [armedA, armedB, loneGuard], 13), true,
+    "one unarmed guard must keep responding to two actively armed inmates rather than instantly restraining them");
+  assert.equal(armedFight.state, "active");
+  assert.equal(armedA.cuffed || armedB.cuffed, false, "headcount alone does not cuff armed attackers");
 
   const admitted = inmate(32, 12.5, 10.5), remaining = inmate(33, 13.4, 10.5);
   const admittedFight = combat.start(admitted, remaining, 4)!;
@@ -251,9 +266,26 @@ function securityMedicalEmergencyAndTillChecks(): void {
   assert.equal(items.count("service-pistol") + items.count("sniper-rifle"), firearmsBefore, "Armed Response must not create firearms");
   security.command("none", 30, [guard, patient]); for (let n = 30; n < 50; n++) security.updateStaff(guard, 1, n, world, [guard, patient]);
   addRoom(2, RoomType.Infirmary, 18, 6, 7, 7); world.placePiece(20, 8, Obj.MedicalBed, 0);
+  patient.needs.food = .12; patient.needs.sleep = .12;
   health.applyInjury(patient, "cut", "left-leg", .7, 50, -1);
-  for (let n = 50; n < 120 && !health.state(patient.id)!.admitted; n++) security.updateStaff(guard, 1, n, world, [guard, patient]);
+  const casualtyJob = health.treatmentJobs.find((job) => job.patientId === patient.id)!;
+  let emergencyDuringTransportTested = false;
+  for (let n = 50; n < 120 && !health.state(patient.id)!.admitted; n++) {
+    security.updateStaff(guard, 1, n, world, [guard, patient]);
+    if (casualtyJob.transportGuardId === guard.id && !emergencyDuringTransportTested) {
+      security.command("lockdown", n + .1, [guard, patient]);
+      security.updateStaff(guard, .1, n + .1, world, [guard, patient]);
+      assert.equal(casualtyJob.transportGuardId, guard.id, "an emergency does not steal an active medical escort");
+      security.command("none", n + .2, [guard, patient]);
+      emergencyDuringTransportTested = true;
+    }
+  }
+  assert.equal(emergencyDuringTransportTested, true, "the casualty transport acquired its physical guard owner");
   assert.equal(health.state(patient.id)!.admitted, true, "guard should physically admit a casualty before treatment");
+  const foodAtAdmission = patient.needs.food;
+  for (let n = 0; n < 12; n++) health.tick(.5, 120 + n * .5, world, [guard, patient], items);
+  assert(patient.needs.sleep > .12, "valid infirmary bedrest restores sleep while ordinary prisoner upkeep is paused");
+  assert.equal(patient.needs.food, foodAtAdmission, "bedrest does not disguise hunger without a consumed meal");
   const doctor = staff(92, Obj.Doctor, 18.5, 8.5), blockedTile = world.idx(19, 8);
   world.setWall(19, 8, 1);
   assert.equal(world.objKind[blockedTile], Obj.Wall);
@@ -269,8 +301,23 @@ function securityMedicalEmergencyAndTillChecks(): void {
   }
   assert(treated, "doctor should reach the admitted patient and treat the physical injury");
   assert.equal(health.state(patient.id)!.admitted, false, "medical treatment releases the bed and patient");
+  assert.equal(health.isUnavailable(patient.id), false, "discharge returns a living patient to ordinary behavior");
+  const routine = new Agents(); routine.task2 = new Task2Systems(world.size, economy, logistics);
+  routine.agents.push(patient); routine.regime.fill(REG.Free); patient.decideT = 0;
+  const canteenTiles = new Set<number>();
+  for (let x = 26; x < 33; x++) for (let z = 5; z < 12; z++) {
+    const tile = world.idx(x, z); canteenTiles.add(tile); world.roomId[tile] = 3;
+  }
+  world.rooms.set(3, { id: 3, type: RoomType.Canteen, access: 0, tiles: canteenTiles, valid: true, ambience: 0, guards: 0 });
+  assert(world.placePiece(29, 8, Obj.ServingTable, 0));
+  routine.servingStock.set(world.idx(29, 8), 3);
+  const foodAtDischarge = patient.needs.food;
+  routine.update(.1, world, false, 12, 151);
+  assert(patient.needs.food < foodAtDischarge, "ordinary prisoner needs resume after medical discharge");
+  assert(["toUse", "toQueue"].includes(patient.state) && patient.interact === world.idx(29, 8),
+    "a discharged hungry patient resumes the real canteen food route");
   assert(doctor.x !== 18.5 || doctor.z !== 8.5, "doctor physically walks along an accessible route to the patient");
-  const secondPatient = inmate(93, 12.5, 8.5);
+  const secondPatient = inmate(93, 12.5, 8.5); secondPatient.needs.sleep = .2;
   health.applyInjury(secondPatient, "cut", "left-leg", .7, 130);
   const transportJob = health.treatmentJobs.find((job) => job.patientId === secondPatient.id)!;
   const lostEscort = staff(94, Obj.Guard, 12, 8.5), replacementEscort = staff(95, Obj.Guard, 10.5, 8.5);
@@ -288,8 +335,10 @@ function securityMedicalEmergencyAndTillChecks(): void {
   }
   assert(reclaimed, "a second living guard reclaims the casualty after the original escort is removed");
   assert.equal(health.state(secondPatient.id)!.admitted, true, "the reassigned escort completes physical admission");
+  const sleepAtAdmission = secondPatient.needs.sleep;
   world.rooms.get(2)!.valid = false;
   health.tick(.1, 150, world, [patient, doctor, secondPatient, replacementEscort], items);
+  assert.equal(secondPatient.needs.sleep, sleepAtAdmission, "an invalid or closed Infirmary bed does not provide bedrest");
   assert.equal(health.state(secondPatient.id)!.admitted, false, "closing the Infirmary releases an unusable treatment bed");
   assert.equal(health.state(secondPatient.id)!.treatmentBed, -1);
   assert.equal(transportJob.state, "waiting", "casualty remains eligible for transfer to another valid Infirmary");
@@ -308,6 +357,174 @@ function securityMedicalEmergencyAndTillChecks(): void {
   const cashBefore = economy.cash; market.tick(.1, 23 * 30, world, [guard, patient]);
   for (let n = 0; n < 80 && economy.cash === cashBefore; n++) market.updateTillGuard(guard, 1, 23 * 30 + n, world);
   assert.equal(economy.cash, cashBefore + 7); assert.equal(items.cashValue(till.id), 0);
+}
+
+function solitaryBacklogReleasesCustodyChecks(): void {
+  const world = new World(40), economy = new EconomySystem(), logistics = new LogisticsSystem(economy);
+  const task2 = new Task2Systems(world.size, economy, logistics), prisoner = inmate(301, 10.5, 8.5);
+  const officer = staff(302, Obj.Guard, 10.5, 8.5);
+  task2.installNewGame(world); task2.ensureAgent(prisoner, 0); task2.ensureAgent(officer, 0);
+  const addSolitary = (id: number, x: number) => {
+    const tiles = new Set<number>();
+    for (let tx = x; tx < x + 5; tx++) for (let z = 6; z < 11; z++) {
+      const tile = world.idx(tx, z); tiles.add(tile); world.roomId[tile] = id;
+    }
+    world.rooms.set(id, { id, type: RoomType.Solitary, access: 0, tiles, valid: true, ambience: 0, guards: 0 });
+    world.placePiece(x + 1, 7, Obj.Bed, 0);
+    world.placePiece(x, 8, Obj.JailDoor, 0);
+  };
+  addSolitary(10, 6); addSolitary(11, 14);
+  for (const [id, roomId] of [[900, 10], [901, 11]]) task2.institution.punishments.push({ incidentId: id,
+    prisonerId: id + 1000, solitaryUntil: 10000, custodyUp: false, search: "none", interrogate: false,
+    state: "active", solitaryRoomId: roomId });
+  const incident = task2.institution.createIncident("assault-inmate", prisoner.id, -1, prisoner.x, prisoner.z, 0);
+  task2.institution.punishments.push({ incidentId: incident.id, prisonerId: prisoner.id, solitaryUntil: 0,
+    custodyUp: true, search: "none", interrogate: false, state: "queued" });
+
+  task2.security.updateStaff(officer, .1, 1, world, [prisoner, officer]);
+  const order = task2.institution.punishments.find((row) => row.incidentId === incident.id)!;
+  assert.equal(order.state, "queued", "a full solitary block leaves the case queued");
+  assert(order.retryAt! > 1, "the queued order retries after capacity may turn over");
+  assert.equal(prisoner.cuffed, false, "a prisoner is not left restrained while waiting for a solitary bed");
+  assert.equal(prisoner.state, "idle");
+  assert.equal(task2.security.updateStaff(officer, .1, 2, world, [prisoner, officer]), false,
+    "a deferred order releases its officer until retry time");
+
+  for (let i = 0; i < 2; i++) {
+    const duplicate = task2.institution.createIncident("assault-inmate", prisoner.id, -1, prisoner.x, prisoner.z, 2 + i);
+    task2.institution.addEvidence(duplicate.id, "witness", 99, prisoner.id, .95,
+      "A second reported assault", 2 + i, prisoner.x, prisoner.z);
+  }
+  task2.institution.shareRoutineReports(4);
+  assert.equal(task2.institution.punishments.filter((row) => row.prisonerId === prisoner.id &&
+    !["cancelled", "complete"].includes(row.state)).length, 1,
+  "new incidents coalesce while one discipline order for the prisoner is still open");
+
+  task2.institution.punishments.find((row) => row.incidentId === 900)!.state = "complete";
+  for (let tick = 1; tick <= 200 && prisoner.state !== "policyEscort"; tick++)
+    task2.security.updateStaff(officer, .1, order.retryAt! + tick * .1, world, [prisoner, officer]);
+  assert.equal(prisoner.cuffed, true, "the pending sentence resumes once a solitary room is free");
+  assert.equal(prisoner.state, "policyEscort", "the resumed order physically retakes the prisoner for solitary transfer");
+}
+
+function policyEscalationPreservesNewEvidenceChecks(): void {
+  const institution = new InstitutionSystem();
+  const first = institution.createIncident("unauthorized", 410, -1, 4.5, 4.5, 0);
+  institution.addEvidence(first.id, "guard", 1, 410, .8, "Minor unauthorized movement", 0, 4.5, 4.5);
+  assert.equal(institution.punishments.length, 0, "initial report is evaluated through the policy cadence");
+  institution.shareRoutineReports(1);
+  const base = institution.punishments.find((row) => row.incidentId === first.id)!;
+  assert(base, "probable unauthorized movement creates its initial policy order");
+  assert.equal(base.search, "none"); assert.equal(base.solitaryHours, 0);
+
+  institution.setItemOverride("firearm", "", { protectiveOffer: true });
+  const serious = institution.createIncident("firearm", 410, -1, 4.5, 4.5, 2);
+  institution.addEvidence(serious.id, "guard", 2, 410, .9, "Firearm recovered", 2, 4.5, 4.5);
+  institution.shareRoutineReports(3);
+  assert.equal(institution.punishments.filter((row) => row.prisonerId === 410 && row.state === "queued").length, 1,
+    "an unstarted queued order absorbs the stronger follow-up rather than stacking restraints");
+  assert.equal(base.search, "full");
+  assert.equal(base.solitaryHours, 72);
+  assert(base.custodyUp && base.interrogate && base.protectiveOffer === true,
+    "the merged order preserves stronger custody, interrogation, and protective policy obligations");
+  assert(base.solitaryUntil >= 3 + 72 * 30, "the sentence expiry reflects the strongest reported incident time");
+
+  base.state = "active";
+  const followup = institution.createIncident("assault-staff", 410, 9, 4.5, 4.5, 4);
+  institution.addEvidence(followup.id, "guard", 3, 410, .95, "Assaulted an officer", 4, 4.5, 4.5);
+  institution.shareRoutineReports(5);
+  const orders = institution.punishments.filter((row) => row.prisonerId === 410 && !["cancelled", "complete"].includes(row.state));
+  assert.equal(orders.length, 2, "a distinct offense during an active sentence is preserved as a follow-up order");
+  assert(orders.some((row) => row.incidentId === followup.id && row.search === "targeted" && row.solitaryHours === 24));
+}
+
+function bedlessCasualtyDoesNotMonopolizeSecurityChecks(): void {
+  const world = new World(32), economy = new EconomySystem(), logistics = new LogisticsSystem(economy);
+  const task2 = new Task2Systems(world.size, economy, logistics);
+  const occupied = inmate(420, 12.5, 8.5), patient = inmate(421, 10.5, 8.5), guard = staff(422, Obj.Guard, 10.5, 8.5);
+  const tiles = new Set<number>();
+  for (let x = 16; x < 22; x++) for (let z = 6; z < 12; z++) {
+    const tile = world.idx(x, z); tiles.add(tile); world.roomId[tile] = 2;
+  }
+  world.rooms.set(2, { id: 2, type: RoomType.Infirmary, access: 0, tiles, valid: true, ambience: 0, guards: 0 });
+  world.placePiece(18, 8, Obj.MedicalBed, 0);
+  const bed = world.anchorOf(world.tilesOfKind(Obj.MedicalBed)[0]!);
+  assert.equal(task2.health.admit(occupied, bed), true);
+  assert.equal(task2.health.availableMedicalBed(world, patient.id), -1, "the one physical bed is occupied");
+  task2.health.applyInjury(patient, "cut", "left-leg", .7, 0);
+  const job = task2.health.treatmentJobs.find((row) => row.patientId === patient.id)!;
+  task2.security.updateStaff(guard, .1, 1, world, [occupied, patient, guard]);
+  assert.equal(job.transportGuardId, undefined, "a patient with no bed does not retain a guard transport claim");
+  assert.notEqual(guard.state, "casualtyWaiting", "bedless response does not park a guard indefinitely");
+  assert.equal(patient.state, "idle", "a conscious patient is not moved into a fictitious transport");
+}
+
+function parallelCasualtyTransportsReserveDistinctBedsChecks(): void {
+  const world = new World(40), economy = new EconomySystem(), logistics = new LogisticsSystem(economy);
+  const task2 = new Task2Systems(world.size, economy, logistics);
+  const patients = [inmate(430, 11.5, 8.5), inmate(431, 12.5, 8.5)];
+  const guards = [staff(432, Obj.Guard, 10.5, 8.5), staff(433, Obj.Guard, 13.5, 8.5)];
+  const tiles = new Set<number>();
+  for (let x = 8; x < 32; x++) for (let z = 5; z < 15; z++) {
+    const tile = world.idx(x, z); tiles.add(tile); world.roomId[tile] = 2;
+  }
+  world.rooms.set(2, { id: 2, type: RoomType.Infirmary, access: 0, tiles, valid: true, ambience: 0, guards: 0 });
+  const closedTiles = new Set<number>();
+  for (let x = 0; x < 7; x++) for (let z = 5; z < 15; z++) {
+    const tile = world.idx(x, z); closedTiles.add(tile); world.roomId[tile] = 3;
+  }
+  world.rooms.set(3, { id: 3, type: RoomType.Infirmary, access: 0, tiles: closedTiles, valid: false, ambience: 0, guards: 0 });
+  assert(world.placePiece(2, 7, Obj.MedicalBed, 0));
+  assert(world.placePiece(20, 7, Obj.MedicalBed, 0)); assert(world.placePiece(25, 7, Obj.MedicalBed, 0));
+  assert.equal(task2.health.availableMedicalBed(world, patients[0]!.id), world.anchorOf(world.idx(20, 7)),
+    "a closed Infirmary is skipped rather than blocking valid beds in another room");
+  for (let i = 0; i < patients.length; i++) task2.health.applyInjury(patients[i]!, "cut", "left-leg", .65, i);
+  const agents = [...patients, ...guards];
+  task2.security.updateStaff(guards[0]!, .1, 0, world, agents);
+  task2.security.updateStaff(guards[1]!, .1, .1, world, agents);
+  const jobs = patients.map((patient) => task2.health.treatmentJobs.find((row) => row.patientId === patient.id)!);
+  assert(jobs.every((job) => job.transportBed !== undefined), "both active escorts reserve a physical bed before moving");
+  assert.notEqual(jobs[0]!.transportBed, jobs[1]!.transportBed,
+    "parallel guards cannot reserve opposite footprint tiles of the same two-tile bed");
+  for (let tick = 1; tick <= 600 && patients.some((patient) => task2.health.state(patient.id)!.admitted === false); tick++) {
+    for (const guard of guards) task2.security.updateStaff(guard, .1, tick * .1, world, agents);
+  }
+  assert(patients.every((patient) => task2.health.state(patient.id)!.admitted),
+    "both physically escorted casualties reach their reserved Infirmary beds");
+  assert.notEqual(task2.health.state(patients[0]!.id)!.treatmentBed, task2.health.state(patients[1]!.id)!.treatmentBed,
+    "admission preserves distinct bed ownership after escort claims are released");
+}
+
+function morgueSlotsArePhysicalAndGuardsDoNotWaitIndefinitelyChecks(): void {
+  const world = new World(32), economy = new EconomySystem(), logistics = new LogisticsSystem(economy);
+  const task2 = new Task2Systems(world.size, economy, logistics);
+  const roomTiles = new Set<number>();
+  for (let x = 7; x < 15; x++) for (let z = 7; z < 14; z++) {
+    const tile = world.idx(x, z); roomTiles.add(tile); world.roomId[tile] = 2;
+  }
+  world.rooms.set(2, { id: 2, type: RoomType.Morgue, access: 0, tiles: roomTiles, valid: true, ambience: 0, guards: 0 });
+  assert(world.placePiece(10, 10, Obj.MorgueSlab, 0));
+  const slab = world.anchorOf(world.idx(10, 10));
+  const onSlab = { agentId: 440, x: 10.5, z: 10.5, deathTime: 0, discovered: true, hiddenIn: "",
+    bloodEvidence: 1, odor: 0, morgueSlab: slab, removed: false };
+  const waiting = { agentId: 441, x: 8.5, z: 10.5, deathTime: 1, discovered: true, hiddenIn: "",
+    bloodEvidence: 1, odor: 0, morgueSlab: -1, removed: false };
+  task2.health.bodies.set(onSlab.agentId, onSlab); task2.health.bodies.set(waiting.agentId, waiting);
+  const guards = [staff(442, Obj.Guard, 8.5, 10.5), staff(443, Obj.Guard, 8.5, 10.5)];
+
+  assert.equal(task2.security.updateStaff(guards[0]!, .1, 100, world, guards), false,
+    "a guard releases the morgue response when every physical slab is occupied");
+  assert.equal(task2.security.updateStaff(guards[1]!, .1, 100, world, guards), false,
+    "a second guard does not claim the other tile of the same two-wide slab");
+  assert.equal(waiting.morgueSlab, -1, "two footprint tiles still provide only one physical body slot");
+  assert(guards.every((guard) => guard.state !== "bodyWaiting"), "full capacity never parks guards indefinitely");
+
+  task2.health.tick(.1, 180, world, guards, task2.items);
+  assert(onSlab.removed, "the scheduled hearse clears the occupied slab at the next 06:00 pickup");
+  for (let tick = 1; tick <= 400 && waiting.morgueSlab < 0; tick++) {
+    task2.security.updateStaff(guards[0]!, .1, 180 + tick * .1, world, guards);
+  }
+  assert.equal(waiting.morgueSlab, slab, "the waiting body uses the released physical slab after hearse turnover");
 }
 
 function task2RoundTripAndScale(): void {
@@ -349,6 +566,11 @@ combatResponseLifecycleChecks();
 combatResponseSimulationChecks();
 workCashGangEscapeChecks();
 securityMedicalEmergencyAndTillChecks();
+solitaryBacklogReleasesCustodyChecks();
+policyEscalationPreservesNewEvidenceChecks();
+bedlessCasualtyDoesNotMonopolizeSecurityChecks();
+parallelCasualtyTransportsReserveDistinctBedsChecks();
+morgueSlotsArePhysicalAndGuardsDoNotWaitIndefinitelyChecks();
 task2RoundTripAndScale();
 hiddenUiChecks();
 console.log("Task 2 items/areas/combat/health/policy/work/market/gangs/escape/save/UI checks passed");
