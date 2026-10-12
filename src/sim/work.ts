@@ -109,23 +109,65 @@ export class WorkSystem {
       this.requestStock(workplace, def, time);
       workplace.assigned = [...this.assignments].filter(([, r]) => r === room.id).map(([id]) => id).sort((a, b) => a - b);
     }
-    for (const roomId of [...this.workplaces.keys()]) if (!valid.has(roomId)) this.workplaces.delete(roomId);
+    for (const roomId of [...this.workplaces.keys()]) if (!valid.has(roomId)) {
+      const workplace = this.workplaces.get(roomId)!;
+      // Return controlled tools while the old assignment and workplace still
+      // exist. Otherwise demolishing a workplace strands its tools in workers'
+      // hands and lets a later assignment reuse the wrong job's equipment.
+      for (const agentId of workplace.assigned) this.returnTool(agentId, time);
+      this.workplaces.delete(roomId);
+    }
     for (const [agentId, roomId] of [...this.assignments]) if (!valid.has(roomId)) this.assignments.delete(agentId);
   }
 
   assign(agentId: number, roomId: number): boolean {
     const workplace = this.workplaces.get(roomId);
-    if (!workplace || workplace.assigned.length >= workplace.capacity) return false;
+    if (!workplace) return false;
+    if (this.assignments.get(agentId) === roomId) return true;
+    if (workplace.assigned.length >= workplace.capacity) return false;
+    if (this.assignments.has(agentId)) this.unassign(agentId);
     this.assignments.set(agentId, roomId);
     workplace.assigned = [...new Set([...workplace.assigned, agentId])];
     return true;
   }
 
-  unassign(agentId: number): void {
-    const roomId = this.assignments.get(agentId); this.assignments.delete(agentId);
+  unassign(agentId: number, time = 0): void {
+    const roomId = this.assignments.get(agentId);
+    // returnTool resolves the worker's current workplace through assignments,
+    // so it must run before deleting that mapping.
+    this.returnTool(agentId, time);
+    this.assignments.delete(agentId);
     const workplace = roomId === undefined ? null : this.workplaces.get(roomId);
     if (workplace) workplace.assigned = workplace.assigned.filter((id) => id !== agentId);
-    this.returnTool(agentId, 0);
+  }
+
+  /** Release a departing worker's leases and return any carried institution
+   * property to its workplace/stock before the agent is removed. */
+  releaseAgent(agent: Agent, time: number): void {
+    const agentId = agent.id;
+    const roomId = this.assignments.get(agentId);
+    const workplace = roomId === undefined ? null : this.workplaces.get(roomId);
+    this.unassign(agentId, time);
+    this.taskProgress.delete(agentId);
+    const outputHaul = this.hauls.get(agentId);
+    if (outputHaul) {
+      const item = this.items.items.get(outputHaul.itemId);
+      if (outputHaul.phase === "dropoff" && item && item.locationKind === "container" &&
+          [`agent:${agentId}:hands`, `body:${agentId}:loot`].includes(item.containerId)) {
+        if (workplace?.outputContainer) this.items.moveToContainer(item.id, workplace.outputContainer, time, -1);
+        else this.items.moveToWorld(item.id, agent.x, agent.z, time, -1);
+      }
+      this.clearHaul(agentId, outputHaul.itemId);
+    }
+    const inputHaul = this.inputHauls.get(agentId);
+    if (inputHaul) {
+      const pkg = this.logistics.packages.get(inputHaul.packageId);
+      if (pkg) {
+        if (inputHaul.phase === "dropoff") { pkg.x = agent.x; pkg.z = agent.z; }
+        pkg.reservedBy = null; pkg.state = "delivery";
+      }
+      this.clearInputHaul(agentId, inputHaul.packageId);
+    }
   }
 
   tick(dt: number, time: number, world: World, agents: readonly Agent[], health: HealthSystem, workActive: boolean): void {
@@ -235,6 +277,7 @@ export class WorkSystem {
     const targetX = haul.phase === "pickup" ? item.x : exportContainer.x;
     const targetZ = haul.phase === "pickup" ? item.z : exportContainer.z;
     if (Math.hypot(agent.x - targetX, agent.z - targetZ) > 1.4) {
+      this.validateHaulPath(agent, targetX, targetZ, world);
       if (!agent.path) {
         const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
         const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(targetX))), Math.max(0, Math.min(world.size - 1, Math.floor(targetZ))));
@@ -280,6 +323,21 @@ export class WorkSystem {
     this.rngState = data.rngState ?? 0x67f23a91;
   }
 
+  /** Keep a carried production output or delivery package colocated with its
+   * worker when another staff action temporarily preempts the hauling update. */
+  syncCarried(agentId: number, x: number, z: number): void {
+    const output = this.hauls.get(agentId);
+    if (output?.phase === "dropoff") {
+      const item = this.items.items.get(output.itemId);
+      if (item && item.locationKind !== "destroyed") { item.x = x; item.z = z; }
+    }
+    const input = this.inputHauls.get(agentId);
+    if (input?.phase === "dropoff") {
+      const pkg = this.logistics.packages.get(input.packageId);
+      if (pkg) { pkg.x = x; pkg.z = z; pkg.state = "carried"; }
+    }
+  }
+
   private def(workplace: Workplace): JobDef { return JOB_DEFS.find((d) => d.id === workplace.jobId)!; }
   private capacity(room: Room, def: JobDef, world: World): number {
     if (def.areaJob) return Math.max(1, Math.floor(room.tiles.size / 20));
@@ -295,7 +353,13 @@ export class WorkSystem {
     const demand: Record<string, number> = {};
     for (const toolId of def.toolIds) {
       const target = Math.max(1, Math.min(3, workplace.capacity || 1));
-      demand[toolId] = Math.max(0, target - this.items.itemsIn(workplace.stockContainer).filter((i) => i.defId === toolId).length - this.logistics.pipelineQuantity(toolId));
+      const issued = [...this.assignments].filter(([, roomId]) => roomId === workplace.roomId)
+        .reduce((sum, [agentId]) => {
+          const itemId = this.activeTools.get(agentId), item = itemId === undefined ? undefined : this.items.items.get(itemId);
+          return sum + (item?.defId === toolId && item.locationKind === "container" &&
+            item.containerId === `agent:${agentId}:hands` ? 1 : 0);
+        }, 0);
+      demand[toolId] = Math.max(0, target - issued - this.items.itemsIn(workplace.stockContainer).filter((i) => i.defId === toolId).length - this.logistics.pipelineQuantity(toolId));
     }
     for (const [defId, perJob] of Object.entries(JOB_INPUTS[def.id] ?? {})) {
       const target = Math.max(4, workplace.capacity * perJob * 3);
@@ -325,6 +389,7 @@ export class WorkSystem {
     const targetX = haul.phase === "pickup" ? pkg.x : stock.x, targetZ = haul.phase === "pickup" ? pkg.z : stock.z;
     if (haul.phase === "dropoff") { pkg.x = agent.x; pkg.z = agent.z; pkg.state = "carried"; }
     if (Math.hypot(agent.x - targetX, agent.z - targetZ) > 1.4) {
+      this.validateHaulPath(agent, targetX, targetZ, world);
       if (!agent.path) {
         const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
         const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(targetX))), Math.max(0, Math.min(world.size - 1, Math.floor(targetZ))));
@@ -347,7 +412,16 @@ export class WorkSystem {
     this.logistics.packages.delete(pkg.id); this.clearInputHaul(agent.id, pkg.id); agent.state = "idle"; return true;
   }
   private claimTool(agent: Agent, workplace: Workplace, def: JobDef, time: number): boolean {
-    if (this.activeTools.has(agent.id) || !def.toolIds.length) return true;
+    const activeId = this.activeTools.get(agent.id);
+    if (!def.toolIds.length) return true;
+    if (activeId !== undefined) {
+      const active = this.items.items.get(activeId);
+      if (active && def.toolIds.includes(active.defId) && active.locationKind === "container" &&
+          active.containerId === `agent:${agent.id}:hands`) return true;
+      // Search, confiscation, or another inventory action may have removed an
+      // issued tool. Clear the stale lease so the worker can claim a replacement.
+      this.activeTools.delete(agent.id);
+    }
     const tool = this.items.itemsIn(workplace.stockContainer).find((i) => def.toolIds.includes(i.defId));
     if (!tool) { workplace.blocked = `Missing controlled ${def.toolIds.join("/")}`; return false; }
     if (this.items.moveToContainer(tool.id, `agent:${agent.id}:hands`, time, agent.id)) { this.activeTools.set(agent.id, tool.id); return true; }
@@ -355,8 +429,13 @@ export class WorkSystem {
   }
   private returnTool(agentId: number, time: number): void {
     const itemId = this.activeTools.get(agentId); if (itemId === undefined) return;
+    const item = this.items.items.get(itemId);
     const workplace = this.workplaces.get(this.assignments.get(agentId) ?? -1);
-    if (workplace) this.items.moveToContainer(itemId, workplace.stockContainer, time, agentId);
+    if (item && item.locationKind === "container" &&
+        [`agent:${agentId}:hands`, `body:${agentId}:loot`].includes(item.containerId)) {
+      if (workplace) this.items.moveToContainer(itemId, workplace.stockContainer, time, agentId);
+      else this.items.moveToWorld(itemId, item.x, item.z, time, agentId);
+    }
     this.activeTools.delete(agentId);
   }
   private hasInputs(workplace: Workplace, def: JobDef): boolean {
@@ -393,6 +472,15 @@ export class WorkSystem {
   }
   private clearHaul(agentId: number, itemId: number): void { this.hauls.delete(agentId); this.haulClaims.delete(itemId); }
   private clearInputHaul(agentId: number, packageId: number): void { this.inputHauls.delete(agentId); this.inputClaims.delete(packageId); }
+  private validateHaulPath(agent: Agent, targetX: number, targetZ: number, world: World): void {
+    if (!agent.path) return;
+    const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(targetX))), Math.max(0, Math.min(world.size - 1, Math.floor(targetZ))));
+    const here = world.idx(Math.floor(agent.x), Math.floor(agent.z));
+    const next = agent.path[agent.pathI];
+    if (agent.path[agent.path.length - 1] !== target || (next !== undefined && next !== here && !world.canNavigateEdge(here, next))) {
+      agent.path = null; agent.pathI = 0;
+    }
+  }
   private random(): number { let x = this.rngState | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rngState = x >>> 0; return this.rngState / 0x1_0000_0000; }
 }
 

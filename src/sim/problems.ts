@@ -7,7 +7,7 @@ export type ProblemAction =
 export interface Problem {
   id: string;
   severity: ProblemSeverity;
-  source: "construction" | "room" | "logistics" | "intake" | "staff" | "kitchen" | "work";
+  source: "construction" | "room" | "logistics" | "intake" | "staff" | "kitchen" | "work" | "health" | "security" | "management";
   message: string;
   x: number;
   z: number;

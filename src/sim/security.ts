@@ -1,4 +1,4 @@
-import type { Agent } from "./agent.ts";
+import { POSE_LIE_FLOOR, POSE_STAND, type Agent } from "./agent.ts";
 import type { CombatSystem } from "./combat.ts";
 import type { HealthSystem } from "./health.ts";
 import { incidentCategoryForItem, type InstitutionSystem, type PunishmentOrder } from "./institution.ts";
@@ -26,6 +26,7 @@ export class SecuritySystem {
   private readonly dogCooldown = new Map<number, number>();
   private readonly bodyClaims = new Map<number, number>();
   private readonly casualtyClaims = new Map<number, number>();
+  private readonly blockedMoveRetries = new Map<number, { target: number; remaining: number }>();
   private lastRollCallStamp = -1;
   private seededArmouries = new Set<number>();
   private readonly emergencyIssue = new Map<number, number[]>();
@@ -65,6 +66,29 @@ export class SecuritySystem {
     this.deploymentTargets.set(areaId, row); this.deploymentTimer = 0;
   }
 
+  /** Clear claims owned by staff leaving the roster so work and escorts can
+   * be claimed again without deleting the people or bodies they served. */
+  releaseAgent(agentId: number, agents: readonly Agent[]): void {
+    this.staff.delete(agentId); this.postings.delete(agentId); this.emergencyIssue.delete(agentId);
+    for (const [incidentId, ownerId] of [...this.claims]) if (ownerId === agentId) {
+      this.claims.delete(incidentId); this.policyPhases.delete(incidentId); this.actionTimers.delete(agentId);
+      const order = this.institution.punishments.find((row) => row.incidentId === incidentId && row.state === "queued");
+      const prisoner = order && agents.find((row) => row.id === order.prisonerId);
+      if (prisoner?.state === "policyEscort") { prisoner.state = prisoner.cuffed ? "cuffed" : "idle"; prisoner.path = null; }
+    }
+    for (const [bodyId, ownerId] of [...this.bodyClaims]) if (ownerId === agentId) this.bodyClaims.delete(bodyId);
+    for (const [patientId, ownerId] of [...this.casualtyClaims]) if (ownerId === agentId) {
+      this.casualtyClaims.delete(patientId); this.health.clearTransportGuard(patientId, agentId);
+      const patient = agents.find((row) => row.id === patientId);
+      if (patient?.state === "beingTransported") {
+        const health = this.health.state(patientId);
+        patient.state = health && health.consciousness < .12 ? "incapacitated" : "idle";
+        patient.pose = patient.state === "incapacitated" ? POSE_LIE_FLOOR : POSE_STAND;
+        patient.path = null;
+      }
+    }
+  }
+
   tick(dt: number, time: number, world: World, agents: readonly Agent[], rollCall: boolean): void {
     this.warnings.clear();
     for (const order of this.institution.punishments) if (order.state === "complete" && order.solitaryRoomId !== undefined && !order.released) {
@@ -73,6 +97,8 @@ export class SecuritySystem {
       order.released = true;
     }
     for (const agent of agents) {
+      if (agent.state === "dead" || agent.state === "morgue" || agent.state === "removed" ||
+          this.health.state(agent.id)?.alive === false) continue;
       if (agent.kind === Obj.Prisoner) this.registeredPrisoners.add(agent.id);
       else if (agent.kind !== Obj.SecurityDog) {
         let duty = this.staff.get(agent.id);
@@ -81,7 +107,19 @@ export class SecuritySystem {
         if (urgent) { duty.onBreak = false; duty.assignmentOpen = false; }
         else if (duty.onBreak) duty.fatigue = Math.max(0, duty.fatigue - dt / 90);
         else duty.fatigue = Math.min(1, duty.fatigue + dt / 900);
-        if (duty.fatigue >= .82 && !urgent) { duty.onBreak = true; duty.assignmentOpen = true; }
+        if (duty.fatigue >= .82 && !urgent && !duty.onBreak) {
+          // Fatigue accumulates at the same rate for everyone, so a large
+          // roster otherwise reaches this threshold on the same tick and
+          // leaves the entire kitchen / guard force unavailable together.
+          // Admit breaks in a small per-role pool; the most fatigued staff
+          // rotate through it as earlier breaks finish.
+          const activeRole = agents.filter((candidate) => candidate.kind === agent.kind &&
+            candidate.state !== "dead" && candidate.state !== "morgue" && candidate.state !== "removed" &&
+            this.health.state(candidate.id)?.alive !== false);
+          const roleOnBreak = activeRole.filter((candidate) => this.staff.get(candidate.id)?.onBreak).length;
+          const breakLimit = Math.max(1, Math.floor(activeRole.length / 3));
+          if (roleOnBreak < breakLimit) { duty.onBreak = true; duty.assignmentOpen = true; }
+        }
       }
     }
     this.syncArmouries(world, time);
@@ -109,6 +147,10 @@ export class SecuritySystem {
   updateStaff(agent: Agent, dt: number, time: number, world: World, agents: readonly Agent[]): boolean {
     const duty = this.staff.get(agent.id);
     const securityRole = [Obj.Guard, Obj.ArmedGuard, Obj.Investigator, Obj.DogHandler].includes(agent.kind as never);
+    // Intake and regime escorts are paired state machines: taking the guard
+    // away mid-route strands the prisoner's escortedBy claim. Finish these
+    // short handovers before honoring a fatigue break or deployment change.
+    if (duty?.onBreak && ["intakeGo", "intakeEscort", "regimeGo", "regimeEscort"].includes(agent.state)) return false;
     if (securityRole && this.updateCasualtyResponse(agent, dt, world, agents)) return true;
     if (securityRole && this.updateBodyResponse(agent, dt, world, agents)) return true;
     if (securityRole && this.updatePolicyAction(agent, dt, time, world, agents)) return true;
@@ -118,7 +160,8 @@ export class SecuritySystem {
       const room = [...world.rooms.values()].find((r) => r.valid && r.type === RoomType.StaffRoom);
       if (!room) { this.warnings.add("Fatigued staff have no valid Staff Room"); return false; }
       const target = [...room.tiles].find((i) => passable(world, i, true)) ?? [...room.tiles][0];
-      if (!this.moveToward(agent, target, dt, world, true)) { agent.state = "staffBreak"; agent.amp = 0; }
+      this.moveToward(agent, target, dt, world, true);
+      agent.state = "staffBreak";
       if (duty.fatigue <= .28) { duty.onBreak = false; duty.assignmentOpen = false; }
       return true;
     }
@@ -128,8 +171,24 @@ export class SecuritySystem {
     }
     const posting = this.postings.get(agent.id), area = posting && this.areas.areas.get(posting.areaId);
     if (!posting || !area) return false;
+    if (!securityRole) {
+      const activeDuty = !["idle", "deployed", "toDeployment"].includes(agent.state);
+      const here = world.inBounds(Math.floor(agent.x), Math.floor(agent.z))
+        ? this.areas.areaAt[world.idx(Math.floor(agent.x), Math.floor(agent.z))] : 0;
+      // A productive post is a home area, not a leash. Let active jobs leave
+      // for materials, patients, and deliveries; only idle staff return. Once
+      // inside the assigned area, do not keep re-targeting its first tile each
+      // tick, which would interrupt their local work loop.
+      if (activeDuty || here === posting.areaId) {
+        if (!activeDuty) agent.state = "idle";
+        return false;
+      }
+    }
     const target = [...area.tiles].find((i) => passable(world, i, true)) ?? -1;
     if (target >= 0 && this.moveToward(agent, target, dt, world, true)) { agent.state = "toDeployment"; return true; }
+    // Deployment is a position constraint, not a job state. Once productive
+    // staff arrive they must re-enter their own work loop (cook, haul, treat).
+    if (!securityRole) { agent.state = "idle"; return false; }
     agent.state = "deployed"; agent.amp = 0; return true;
   }
 
@@ -315,6 +374,22 @@ export class SecuritySystem {
   }
 
   private updateCasualtyResponse(guard: Agent, dt: number, world: World, agents: readonly Agent[]): boolean {
+    for (const [patientId, guardId] of this.casualtyClaims) {
+      const assigned = agents.find((agent) => agent.id === guardId);
+      const assignedHealth = assigned && this.health.state(assigned.id);
+      const active = !!assigned && assignedHealth?.alive !== false &&
+        ["toCasualty", "movingCasualty", "casualtyWaiting"].includes(assigned.state);
+      if (active) continue;
+      this.casualtyClaims.delete(patientId);
+      this.health.clearTransportGuard(patientId, guardId);
+      const abandoned = agents.find((agent) => agent.id === patientId);
+      if (abandoned?.state === "beingTransported") {
+        const health = this.health.state(patientId);
+        abandoned.state = health && health.consciousness < .12 ? "incapacitated" : "idle";
+        abandoned.pose = abandoned.state === "incapacitated" ? POSE_LIE_FLOOR : POSE_STAND;
+        abandoned.path = null;
+      }
+    }
     let job = this.health.treatmentJobs.find((row) => row.state === "waiting" && this.casualtyClaims.get(row.patientId) === guard.id);
     if (!job) {
       job = this.health.treatmentJobs.filter((row) => row.state === "waiting" && !this.casualtyClaims.has(row.patientId))
@@ -322,7 +397,10 @@ export class SecuritySystem {
       if (!job) return false; this.casualtyClaims.set(job.patientId, guard.id);
     }
     const patient = agents.find((a) => a.id === job!.patientId), h = patient && this.health.state(patient.id);
-    if (!patient || !h?.alive) { this.casualtyClaims.delete(job.patientId); job.state = "stable"; return false; }
+    if (!patient || !h?.alive) {
+      this.casualtyClaims.delete(job.patientId); this.health.clearTransportGuard(job.patientId, guard.id);
+      job.state = "stable"; return false;
+    }
     const bed = this.health.availableMedicalBed(world, patient.id);
     if (bed < 0) { this.warnings.add("A casualty is waiting for a free Infirmary medical bed"); guard.state = "casualtyWaiting"; return true; }
     if (guard.state !== "movingCasualty" && Math.hypot(guard.x - patient.x, guard.z - patient.z) > 1.25) {
@@ -330,10 +408,13 @@ export class SecuritySystem {
       guard.state = "toCasualty"; return true;
     }
     guard.state = "movingCasualty"; patient.state = "beingTransported"; patient.path = null;
+    this.health.setTransportGuard(patient.id, guard.id);
     patient.x = guard.x; patient.z = guard.z; patient.pose = 4;
     if (this.moveToward(guard, bed, dt * .68, world, true)) return true;
     patient.x = bed % world.size + .5; patient.z = ((bed / world.size) | 0) + .5;
-    this.health.admit(patient, bed); this.casualtyClaims.delete(patient.id); guard.state = "idle"; return true;
+    const admitted = this.health.admit(patient, bed);
+    if (!admitted) this.health.clearTransportGuard(patient.id, guard.id);
+    this.casualtyClaims.delete(patient.id); guard.state = "idle"; return true;
   }
 
   private searchPrisoner(officer: Agent, prisoner: Agent, order: PunishmentOrder, time: number, world: World): void {
@@ -477,10 +558,16 @@ export class SecuritySystem {
 
   private moveToward(agent: Agent, target: number, dt: number, world: World, staff: boolean): boolean {
     if (agent.path && agent.pathI >= agent.path.length) agent.path = null;
-    const tx = target % world.size + .5, tz = ((target / world.size) | 0) + .5;
-    if (Math.hypot(agent.x - tx, agent.z - tz) < .65) { agent.path = null; return false; }
+    if (!world.inBounds(target % world.size, (target / world.size) | 0)) return true;
     const role = accessRoleForAgent(agent);
     const open = (i: number) => passable(world, i, staff, agent.accessKeys) && roleAllowed(world, i, role);
+    if (agent.path) {
+      for (let p = Math.max(1, agent.pathI); p < agent.path.length; p++) {
+        if (!open(agent.path[p]) || !world.canNavigateEdge(agent.path[p - 1], agent.path[p])) {
+          agent.path = null; agent.pathI = 0; break;
+        }
+      }
+    }
     let navTarget = target;
     if (!open(navTarget)) {
       const x = target % world.size, z = (target / world.size) | 0;
@@ -488,15 +575,48 @@ export class SecuritySystem {
         .filter(([nx, nz]) => world.inBounds(nx, nz)).map(([nx, nz]) => world.idx(nx, nz)).filter(open)
         .sort((a, b) => Math.hypot(a % world.size + .5 - agent.x, ((a / world.size) | 0) + .5 - agent.z) -
           Math.hypot(b % world.size + .5 - agent.x, ((b / world.size) | 0) + .5 - agent.z));
-      if (!adjacent.length) return false; navTarget = adjacent[0];
+      if (!adjacent.length) {
+        agent.path = null;
+        const retry = this.blockedMoveRetries.get(agent.id);
+        if (!retry || retry.target !== target) this.blockedMoveRetries.set(agent.id, { target, remaining: 4 });
+        else if ((retry.remaining -= dt) <= 0) this.blockedMoveRetries.set(agent.id, { target, remaining: 4 });
+        this.warnings.add("A staff response route is blocked");
+        return true;
+      }
+      // The nearest side of a destination can change as the agent moves. Keep
+      // the active approach side until arrival, or the target can oscillate
+      // around a large/blocked tile forever.
+      const previousEnd = agent.path?.at(-1);
+      navTarget = previousEnd !== undefined && adjacent.includes(previousEnd) ? previousEnd : adjacent[0];
     }
     const navX = navTarget % world.size + .5, navZ = ((navTarget / world.size) | 0) + .5;
-    if (Math.hypot(agent.x - navX, agent.z - navZ) < .65) { agent.path = null; return false; }
-    if (!agent.path) {
+    if (Math.hypot(agent.x - navX, agent.z - navZ) < .65) {
+      agent.path = null; this.blockedMoveRetries.delete(agent.id); return false;
+    }
+    // A staff response can interrupt a construction haul, deployment, or
+    // patrol. Keep an existing route only while it still leads to this goal.
+    // Otherwise the agent would keep walking toward its previous task until
+    // that path happened to end, delaying the new assignment.
+    if (!agent.path || agent.path[agent.path.length - 1] !== navTarget) {
+      if (agent.path) agent.path = null;
+      const retry = this.blockedMoveRetries.get(agent.id);
+      if (retry?.target === navTarget) {
+        retry.remaining -= dt;
+        if (retry.remaining > 0) {
+          this.warnings.add("A staff response route is blocked");
+          return true;
+        }
+      }
       const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
       agent.path = astar(world.size, start, navTarget, open, 20000, (a, b) => world.canNavigateEdge(a, b)); agent.pathI = 0;
+      if (!agent.path) {
+        this.blockedMoveRetries.set(agent.id, { target: navTarget, remaining: 4 });
+        this.warnings.add("A staff response route is blocked");
+        return true;
+      }
+      this.blockedMoveRetries.delete(agent.id);
     }
-    if (!agent.path || agent.pathI >= agent.path.length) return false;
+    if (!agent.path || agent.pathI >= agent.path.length) return true;
     const next = agent.path[agent.pathI], nx = next % world.size + .5, nz = ((next / world.size) | 0) + .5, d = Math.hypot(nx - agent.x, nz - agent.z);
     if (d < .12) agent.pathI++; else { agent.x += (nx - agent.x) / d * Math.min(d, dt * 2.1); agent.z += (nz - agent.z) / d * Math.min(d, dt * 2.1); }
     agent.amp = 1; return true;

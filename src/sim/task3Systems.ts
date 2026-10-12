@@ -52,7 +52,7 @@ export class Task3Systems {
     for (const agent of agents) {
       const profile = this.staff.ensure(agent);
       if (profile) this.credentials.ensureStaffIdentity(agent, time);
-      if (agent.kind === Obj.Prisoner) agent.accessKeys = this.credentials.keyTier(agent.id, time) || agent.accessKeys;
+      if (agent.kind === Obj.Prisoner) agent.accessKeys = this.credentials.keyTier(agent.id, time);
     }
     this.staff.tick(dt, time, this.task2.areas, agents);
     const roadVehicles = [...this.logistics.trucks, ...this.escape.externalVehicles.values()];
@@ -69,8 +69,9 @@ export class Task3Systems {
     if (this.management.updateManager(agent, dt, world)) return true;
     return this.facility.updateGuard(agent, dt, world, urgentResponse);
   }
-  updatePrisoner(agent: Agent, dt: number, time: number, world: World, agents: readonly Agent[]): boolean {
-    return this.escape.updatePrisoner(agent, dt, time, world, agents);
+  updatePrisoner(agent: Agent, dt: number, time: number, world: World, agents: readonly Agent[], activity?: number): boolean {
+    return this.escape.updatePrisoner(agent, dt, time, world, agents, activity,
+      this.task2.health.isUnavailable(agent.id));
   }
   staffEfficiency(agent: Agent, time: number): number { return this.management.staffEfficiency(agent, time); }
   mayTakeSpoon(prisonerId: number, time: number): boolean {

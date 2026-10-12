@@ -30,6 +30,33 @@ function finishBuild(construction: ConstructionSystem, world: World, workerId: n
   assert.fail(`construction target ${x},${z} did not finish`);
 }
 
+// Grants and payroll follow the current population instead of lifetime
+// admissions, so escapees, deaths, and removed staff stop affecting income.
+{
+  const economy = new EconomySystem();
+  economy.markPrisonerProcessed(); economy.markPrisonerProcessed();
+  economy.setPrisonerCount(1);
+  const firstHourStaff = new Map([[Obj.Guard, 1], [Obj.Doctor, 1]]);
+  economy.setStaffCounts(firstHourStaff);
+  assert.equal(economy.netHourly(), 12 - 8 - 14);
+  economy.tick(0, firstHourStaff);
+  assert.equal(economy.ledger.filter((row) => row.kind === "grant").reduce((sum, row) => sum + row.amount, 0), 12);
+
+  economy.setPrisonerCount(0); // the only inmate escaped or died
+  economy.setStaffCounts(new Map()); // both staff were removed
+  assert.equal(economy.netHourly(), 0);
+  economy.tick(30, new Map());
+  assert.equal(economy.ledger.filter((row) => row.kind === "grant").reduce((sum, row) => sum + row.amount, 0), 12,
+    "housing grants stop when no living prisoners remain");
+  assert.equal(economy.ledger.filter((row) => row.kind === "wage").reduce((sum, row) => sum + row.amount, 0), -22,
+    "payroll only covers staff alive at the hour boundary");
+
+  const oldSave = economy.saveData(); delete (oldSave as Record<string, unknown>).prisonerCount;
+  oldSave.processedPrisoners = 4;
+  const restored = new EconomySystem(); restored.loadData(oldSave);
+  assert.equal(restored.netHourly(), 48, "older saves retain their recorded prisoner count");
+}
+
 // A reservation moves cargo out of available stock. Procurement and other
 // build orders must count only the remaining free cargo, exactly once.
 {
@@ -114,6 +141,14 @@ function finishBuild(construction: ConstructionSystem, world: World, workerId: n
   kitchen.tick(690, world); // 23:00 on day one
   let time = 698;
   for (let i = 0; i < 3000; i++, time += .1) logistics.tick(.1, time, world);
+  const cutleryHaul = kitchen.claimHaul(80, world, ["tray", "spoon"]);
+  assert(cutleryHaul, "a cook may restrict hauling to the deficient cutlery classes");
+  assert(["tray", "spoon"].includes(logistics.packages.get(cutleryHaul.packageId)!.commodity),
+    "cutlery-only haul selection never claims a meal package");
+  const mealHaul = kitchen.claimHaul(81, world, ["frozen-meal"]);
+  assert(mealHaul); assert.equal(logistics.packages.get(mealHaul.packageId)!.commodity, "frozen-meal",
+    "ordered commodity preferences select only the intended frozen-meal stock");
+  logistics.release("cook:80"); logistics.release("cook:81");
   let cookId = 90;
   for (const pkg of [...logistics.packages.values()].filter((row) => row.state === "delivery")) {
     if (pkg.commodity === "book") { kitchen.acceptBookPackage(pkg); continue; }
@@ -136,6 +171,102 @@ function finishBuild(construction: ConstructionSystem, world: World, workerId: n
   }
   assert.equal(economy.saveData().ledger.length, purchaseCount,
     "full freezer, place settings, and bookshelf should not trigger repeat purchases over three days");
+}
+
+// A stolen spoon leaves trays washable, and a staff interruption releases only
+// that cook's unfinished meal reservation. Loads in a sink remain counted as stock.
+{
+  const { world, logistics } = setup();
+  world.placePiece(12, 12, Obj.Sink, 0);
+  world.placePiece(15, 12, Obj.ServingTable, 0);
+  const kitchen = new KitchenSystem(logistics);
+  kitchen.frozenMeals = 2; kitchen.cleanTrays = 4; kitchen.cleanSpoons = 2; kitchen.dirtyTrays = 2;
+  kitchen.tick(0, world);
+  assert(kitchen.reserveMealSet(31));
+  assert(kitchen.reserveMealSet(31), "reserving again for the same cook is idempotent");
+  assert.equal(kitchen.preparedSettings, 1);
+  kitchen.releaseMealSet(99);
+  assert.equal(kitchen.preparedSettings, 1, "another cook cannot release this meal set");
+  kitchen.releaseMealSet(31);
+  assert.equal(kitchen.preparedSettings, 0);
+  assert.equal(kitchen.cleanTrays, 4); assert.equal(kitchen.cleanSpoons, 2);
+
+  kitchen.dirtySpoons = 0;
+  assert.equal(kitchen.claimWash(32), 2, "dirty trays remain washable after both spoons were stolen");
+  assert.equal(kitchen.totalTrays(), 6, "trays claimed for washing still count toward inventory");
+  kitchen.tick(1, world);
+  assert.equal(logistics.saveData().requests.filter((row) => row.commodity === "tray").length, 0,
+    "in-wash trays must not create replacement purchases");
+  kitchen.finishWash(32);
+  assert.equal(kitchen.cleanTrays, 6);
+  assert.equal(kitchen.totalTrays(), 6);
+  assert.equal(kitchen.totalSpoons(), 2, "tray washing must not invent replacement spoons");
+
+  assert(kitchen.reserveMealSet(33));
+  kitchen.commitMealSet(33);
+  kitchen.releaseMealSet(33);
+  assert.equal(kitchen.preparedSettings, 1, "a delivered setting remains in-use until a prisoner takes it");
+  kitchen.mealTaken();
+  assert.equal(kitchen.preparedSettings, 0);
+  assert.equal(kitchen.totalTrays(), 6, "a tabled meal stays in inventory while its tray is in use");
+  kitchen.tick(2, world);
+  assert.equal(logistics.saveData().requests.filter((row) => row.commodity === "tray").length, 0,
+    "a tray at an occupied meal table must not trigger a replacement purchase");
+  kitchen.finishMeal(true, 31);
+  assert.equal(kitchen.totalTrays(), 6);
+  assert.equal(kitchen.totalSpoons(), 1, "a stolen spoon leaves kitchen inventory after meal cleanup");
+
+  const pending = new KitchenSystem(logistics);
+  pending.frozenMeals = 2; pending.cleanTrays = 2; pending.cleanSpoons = 2; pending.dirtyTrays = 2;
+  pending.tick(0, world);
+  assert(pending.reserveMealSet(41));
+  assert.equal(pending.claimWash(42), 2);
+  const restored = new KitchenSystem(logistics);
+  restored.loadData(pending.saveData());
+  assert(restored.hasMealSetClaim(41), "a cooking reservation survives a save/load round trip");
+  assert(restored.hasWashClaim(42), "an in-progress wash reservation survives a save/load round trip");
+  assert.equal(restored.totalTrays(), pending.totalTrays(), "restored claims remain counted without changing kitchen inventory");
+  restored.finishWash(42);
+  assert.equal(restored.cleanTrays, 3, "the restored cook can finish its claimed tray wash");
+  restored.commitMealSet(41);
+  assert.equal(restored.hasMealSetClaim(41), false, "a delivered setting releases its owner claim");
+  restored.releaseMealSet(41);
+  assert.equal(restored.preparedSettings, 1, "a delivered setting cannot be refunded after restoration");
+}
+
+// Outstanding books include workman-owned cargo and temporarily borrowed
+// readers. If shelves fill during a haul, the surplus package is still
+// consumed so its carried reservation cannot strand an idle workman.
+{
+  const { world, logistics } = setup(500);
+  world.placePiece(100, 100, Obj.Bookshelf, 0);
+  const kitchen = new KitchenSystem(logistics);
+  kitchen.borrowedBooks = 0;
+  logistics.addSalvage("book", 8, 100, 100);
+  const pkg = [...logistics.packages.values()][0];
+  pkg.state = "carried"; pkg.reservedBy = "workman:12";
+  kitchen.tick(1, world);
+  assert.equal(logistics.saveData().requests.filter((row) => row.commodity === "book").length, 0,
+    "workman-carried books count toward the shelf target during a restock tick");
+  logistics.packages.delete(pkg.id);
+
+  kitchen.books = 8;
+  logistics.addSalvage("book", 8, 100, 100);
+  const overflow = [...logistics.packages.values()].at(-1)!;
+  const overflowId = overflow.id;
+  overflow.state = "carried"; overflow.reservedBy = "workman:13";
+  assert(kitchen.acceptBookPackage(overflow), "a delivered book package must always close its cargo reservation");
+  assert.equal(kitchen.books, 8, "overflow must not exceed the shelf target");
+  assert.equal(overflow.state, "exports", "an overfull shelf must release its surplus package for export");
+  assert.equal(overflow.reservedBy, null, "an overfull shelf must close the workman cargo reservation");
+
+  assert(kitchen.borrowBook());
+  kitchen.tick(2, world);
+  assert.equal(logistics.saveData().requests.filter((row) => row.commodity === "book").length, 0,
+    "borrowed library books remain part of stock and must not trigger replacements");
+  kitchen.returnBook();
+  assert.equal(kitchen.books, 8);
+  assert.equal(kitchen.saveData().borrowedBooks, 0);
 }
 
 // Multiple construction targets can each haul one bundle, finish, and release

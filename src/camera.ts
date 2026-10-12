@@ -41,12 +41,18 @@ export class Camera {
     private eyeMargin = 0,
   ) {
     addEventListener("keydown", (e) => {
+      const target = e.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
       this.keys.add(this.norm(e.key));
       if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(this.norm(e.key)))
         e.preventDefault();
     });
     addEventListener("keyup", (e) => this.keys.delete(this.norm(e.key)));
-    addEventListener("blur", () => this.keys.clear());
+    addEventListener("blur", () => { this.keys.clear(); this.dragging = false; });
+    addEventListener("focusin", () => this.keys.clear());
+    canvas.addEventListener("pointercancel", () => { this.dragging = false; });
+    canvas.addEventListener("lostpointercapture", () => { this.dragging = false; });
 
     canvas.addEventListener("contextmenu", (e) => e.preventDefault());
     canvas.addEventListener("pointerdown", (e) => {

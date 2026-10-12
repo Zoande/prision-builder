@@ -244,6 +244,11 @@ if (process.argv.includes("--peek")) {
   process.exit(0);
 }
 
+if (process.argv.includes("--dump")) {
+  console.log(run());
+  process.exit(0);
+}
+
 const bless = process.argv.includes("--bless");
 const state = run();
 const h = hash(state);

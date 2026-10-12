@@ -58,6 +58,48 @@ export interface Clique {
 
 const clamp = (v: number, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
 const bondKey = (from: number, to: number) => `${from}:${to}`;
+const OBSERVATION_CELL_SIZE = 8;
+type AgentBuckets = { cells: Map<string, number[]>; indexes: number[]; unlocatedIndexes: number[] };
+
+function bucketAgents(agents: readonly Agent[], kind: number): AgentBuckets {
+  const cells = new Map<string, number[]>(), indexes: number[] = [], unlocatedIndexes: number[] = [];
+  for (let i = 0; i < agents.length; i++) {
+    const agent = agents[i];
+    if (agent.kind !== kind) continue;
+    indexes.push(i);
+    if (!Number.isFinite(agent.x) || !Number.isFinite(agent.z)) {
+      // The legacy `distance > range` predicate treats NaN as visible because
+      // that comparison is false. Keep invalid-position agents as candidates
+      // so the existing predicate remains authoritative.
+      unlocatedIndexes.push(i);
+      continue;
+    }
+    const x = Math.floor(agent.x / OBSERVATION_CELL_SIZE), z = Math.floor(agent.z / OBSERVATION_CELL_SIZE);
+    const key = `${x},${z}`;
+    let cell = cells.get(key);
+    if (!cell) cells.set(key, cell = []);
+    cell.push(i);
+  }
+  return { cells, indexes, unlocatedIndexes };
+}
+
+function nearbyAgentIndexes(agent: Agent, radius: number, buckets: AgentBuckets): readonly number[] {
+  if (!Number.isFinite(agent.x) || !Number.isFinite(agent.z) || !Number.isFinite(radius)) return buckets.indexes;
+  const minX = Math.floor((agent.x - radius) / OBSERVATION_CELL_SIZE);
+  const maxX = Math.floor((agent.x + radius) / OBSERVATION_CELL_SIZE);
+  const minZ = Math.floor((agent.z - radius) / OBSERVATION_CELL_SIZE);
+  const maxZ = Math.floor((agent.z + radius) / OBSERVATION_CELL_SIZE);
+  const candidates: number[] = [...buckets.unlocatedIndexes];
+  for (let z = minZ; z <= maxZ; z++) for (let x = minX; x <= maxX; x++) {
+    const cell = buckets.cells.get(`${x},${z}`);
+    if (cell) for (const index of cell) candidates.push(index);
+  }
+  // In crowded cells most candidates are relevant. Reusing the source-order
+  // list avoids sorting a dense candidate set while preserving legacy order.
+  if (candidates.length >= buckets.indexes.length * .8) return buckets.indexes;
+  candidates.sort((a, b) => a - b);
+  return candidates;
+}
 
 export class PrisonerSocialSystem {
   readonly bonds = new Map<string, SocialBond>();
@@ -299,6 +341,8 @@ export class PrisonerSocialSystem {
   }
 
   private observe(worldTime: number, world: World, agents: Agent[]): void {
+    const guards = bucketAgents(agents, Obj.Guard);
+    const prisoners = bucketAgents(agents, Obj.Prisoner);
     for (const ag of agents) {
       if (ag.kind !== Obj.Prisoner || ag.underground || !world.inBounds(Math.floor(ag.x), Math.floor(ag.z))) continue;
       const tile = world.idx(Math.floor(ag.x), Math.floor(ag.z));
@@ -307,13 +351,15 @@ export class PrisonerSocialSystem {
       if (kind !== Obj.None) this.addFact(ag.id, { key: `object:${kind}:${tile}`, type: "object", subject: `object ${kind}`, tile, value: String(kind), sourceId: ag.id, observedAt: worldTime, confidence: 1, precision: 1, firsthand: true, expiresAt: Infinity });
       if (kind === Obj.JailDoor || kind === Obj.Door) this.addFact(ag.id, { key: `door:${tile}`, type: "door-window", subject: kind === Obj.JailDoor ? "jail door" : "door", tile, value: world.jailClosed[tile] ? "closed" : "open", sourceId: ag.id, observedAt: worldTime, confidence: 1, precision: 1, firsthand: true, expiresAt: worldTime + 60 });
       const range = 5 + aptitude(ag.profile, "perception") * .65;
-      for (const other of agents) {
-        if (other.kind !== Obj.Guard || Math.hypot(other.x - ag.x, other.z - ag.z) > range) continue;
+      for (const index of nearbyAgentIndexes(ag, range, guards)) {
+        const other = agents[index];
+        if (Math.hypot(other.x - ag.x, other.z - ag.z) > range) continue;
         const gt = world.inBounds(Math.floor(other.x), Math.floor(other.z)) ? world.idx(Math.floor(other.x), Math.floor(other.z)) : -1;
         this.addFact(ag.id, { key: `guard:${other.id}`, type: other.postRoom >= 0 ? "guard-post" : "guard-route", subject: `guard ${other.id}`, tile: gt, value: `${other.routeId}:${other.postRoom}`, sourceId: ag.id, observedAt: worldTime, confidence: clamp(.65 + aptitude(ag.profile, "perception") * .035), precision: .8, firsthand: true, expiresAt: worldTime + 90 });
       }
-      for (const other of agents) {
-        if (other.id === ag.id || other.kind !== Obj.Prisoner || Math.hypot(other.x - ag.x, other.z - ag.z) > range * .55) continue;
+      for (const index of nearbyAgentIndexes(ag, range * .55, prisoners)) {
+        const other = agents[index];
+        if (other.id === ag.id || Math.hypot(other.x - ag.x, other.z - ag.z) > range * .55) continue;
         const visible = other.inv.hands.filter((stack) => itemDef(stack.kind)?.contraband);
         if (visible.length) this.addFact(ag.id, { key: `contraband:${other.id}`, type: "contraband", subject: `inmate ${other.id}`, tile: world.idx(Math.floor(other.x), Math.floor(other.z)), value: visible.map((s) => `${s.kind}:${s.count}`).join(","), sourceId: ag.id, observedAt: worldTime, confidence: .92, precision: .9, firsthand: true, expiresAt: worldTime + 120 });
         const b = this.bond(ag.id, other.id, false);

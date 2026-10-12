@@ -82,19 +82,22 @@ export function trySatisfy(A: Agents, ag: Agent, world: World, need: NeedName): 
         const d = Math.abs((t % size) - ax) + Math.abs(((t / size) | 0) - az);
         if (d < kd) { kd = d; known = t; }
       }
-      if (known >= 0 && ag.needs.food < 0.6) {
+      const queueCooling = (A.foodQueueRetryAt.get(ag.id) ?? 0) > A.simTime;
+      if (known >= 0 && ag.needs.food < 0.6 && !queueCooling) {
         if (isNextTo(ag, world, known)) {
           ag.state = "queueing";
           ag.interact = known;
-          ag.timer = 2;
+          ag.timer = 10;
           return true;
         }
         if (pathAdjacent(ag, world, known, lawfulOpen(ag, world, trespass))) {
           ag.state = "toQueue";
           ag.interact = known;
+          ag.aux = A.simTime + 10;
           return true;
         }
       }
+      if (queueCooling) return false;
       // Starving and knows of no food anywhere: go and look, rules be damned.
       if (ag.needs.food < 0.15) { explore(ag, world, true); return true; }
       return false;

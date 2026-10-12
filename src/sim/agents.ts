@@ -17,7 +17,7 @@ import { Access, RoomType, World, type Room } from "./world.ts";
 import { rnd } from "./rng.ts";
 import {
   Item, POCKET_SLOTS, type Stack,
-  countItem, hasItem, newInventory, removeItem, takeInHands,
+  countItem, hasItem, newInventory, removeItem, stow, takeInHands,
 } from "./items.ts";
 import {
   NEEDS, Obj, POSE_STAND, POSE_LIE_FLOOR, POSE_CLIMB,
@@ -49,6 +49,7 @@ import type { KitchenSystem } from "./kitchen.ts";
 import { aptitude, freshPrisonerMind, gainSkill, generatePrisonerProfile, personality, skill } from "./profiles.ts";
 import { PrisonerSocialSystem } from "./social.ts";
 import { EscapeOperationsSystem } from "./escapeOperations.ts";
+import { WelfareSystem } from "./welfare.ts";
 import type { Task2Systems } from "./task2Systems.ts";
 import type { Task3Systems } from "./task3Systems.ts";
 
@@ -79,12 +80,23 @@ export class Agents {
   claimedCookers = new Map<number, number>();
   /** Use-slot occupancy: object anchor -> the agents using it right now. */
   useClaims = new Map<number, Set<number>>();
+  /** Briefly defer workman cargo whose route is currently blocked. */
+  private readonly cargoRetryAt = new Map<string, number>();
+  /** Avoid an endless queueing state when all serving counters are unavailable. */
+  readonly foodQueueRetryAt = new Map<number, number>();
+  /** Bed anchors promised to an intake escort but not yet occupied. */
+  readonly intakeBedClaims = new Map<number, number>();
   /** What each prisoner has hidden under his bunk, keyed by bed anchor. A guard
    *  who catches him only takes what's on him — the stash is why hiding pays. */
   readonly stashes = new Map<number, Stack[]>();
   /** How many guards the player has assigned to each patrol beat. */
   readonly routeGuards = new Map<number, number>();
   readonly mealTables = new Set<number>();
+  /** Number of served meals left at each table, including active diners. */
+  readonly mealTableMeals = new Map<number, number>();
+  /** Unclaimed table meals; active diners have per-agent mealUseClaims. */
+  readonly mealTableAvailable = new Map<number, number>();
+  readonly mealUseClaims = new Map<number, number>();
   readonly tunnels: Tunnel[] = [];
   readonly cutFences = new Set<number>(); // cut fence tiles (world holds truth)
   flaggedCuts = new Set<number>();
@@ -94,6 +106,7 @@ export class Agents {
   readonly regime: number[] = defaultRegime();
   readonly servingStock = new Map<number, number>(); // serving table -> meals
   servers = new Map<number, number>(); // serving table -> manning cook id
+  private readonly releasedAgents = new Set<number>();
   curHour = -1;
   curActivity: number = REG.Free;
   evictT = 0;
@@ -109,12 +122,16 @@ export class Agents {
   roadVehicleZ: number[] = [];
   readonly social = new PrisonerSocialSystem();
   readonly escapeOperations = new EscapeOperationsSystem();
+  private readonly welfare = new WelfareSystem();
+  /** Need-triggered plan handoffs are edges, not per-tick interrupts. */
+  private readonly planNeedRedirectLevel = new Map<number, number>();
   simTime = 0;
 
   takeMealsDirty(): boolean { const d = this.mealsDirty; this.mealsDirty = false; return d; }
   takeWorldDirty(): boolean { const d = this.worldDirty; this.worldDirty = false; return d; }
 
   sync(world: World) {
+    let clearedPersonMarkers = false;
     for (const kind of [Obj.Prisoner, Obj.Guard, Obj.Cook, Obj.Workman, Obj.Doctor,
       Obj.Investigator, Obj.DogHandler, Obj.ArmedGuard, Obj.SecurityDog,
       Obj.ChiefOfficer, Obj.Foreman, Obj.Accountant]) {
@@ -124,6 +141,7 @@ export class Agents {
         const baton = world.objMat[i] === 1;
         world.objKind[i] = Obj.None;
         world.objMat[i] = 0;
+        clearedPersonMarkers = true;
         const fresh = blankAgent(kind);
         if (kind === Obj.Prisoner) {
           fresh.profile = generatePrisonerProfile(this.nextId);
@@ -139,6 +157,7 @@ export class Agents {
         });
       }
     }
+    if (clearedPersonMarkers) world.invalidateObjectLookup();
   }
 
   eraseAt(x: number, z: number): boolean {
@@ -154,18 +173,41 @@ export class Agents {
   }
 
   removeAgent(ag: Agent) {
-    this.construction?.releaseWorker(ag.id);
-    if (ag.bedIdx >= 0) this.claimedBeds.delete(ag.bedIdx);
-    if (ag.cookerIdx >= 0) this.claimedCookers.delete(ag.cookerIdx);
-    releaseUse(this, ag);
-    if (ag.tunnel) ag.tunnel.occupied = false;
-    if (ag.job) ag.job.claimedBy = -1;
-    if (ag.kind === Obj.Cook && (ag.state === "toCooker" || ag.state === "cooking")) this.kitchen?.releaseMealSet();
+    this.releaseAgentResponsibilities(ag);
     this.social.removeAgent(ag.id);
     this.escapeOperations.removeAgent(ag.id);
     for (const [s, id] of this.servers) if (id === ag.id) this.servers.delete(s);
     const n = this.agents.indexOf(ag);
     if (n >= 0) this.agents.splice(n, 1);
+  }
+
+  private releaseAgentResponsibilities(agent: Agent): void {
+    if (this.releasedAgents.has(agent.id)) return;
+    this.releasedAgents.add(agent.id);
+    if (agent.kind === Obj.Prisoner) this.releasePrisonerClaims(agent);
+    this.task2?.security.releaseAgent(agent.id, this.agents);
+    this.construction?.releaseWorker(agent.id);
+    this.task2?.work.releaseAgent(agent, this.simTime);
+    if (agent.bedIdx >= 0 && this.claimedBeds.get(agent.bedIdx) === agent.id) this.claimedBeds.delete(agent.bedIdx);
+    if (agent.cookerIdx >= 0 && this.claimedCookers.get(agent.cookerIdx) === agent.id) this.claimedCookers.delete(agent.cookerIdx);
+    agent.cookerIdx = -1;
+    releaseUse(this, agent);
+    if (agent.tunnel) agent.tunnel.occupied = false;
+    if (agent.job) { agent.job.claimedBy = -1; agent.job = null; }
+    for (const job of this.repairJobs) if (job.claimedBy === agent.id) job.claimedBy = -1;
+    for (const task of this.doorTasks) if (task.claimedBy === agent.id) task.claimedBy = -1;
+    if (agent.kind === Obj.Cook) {
+      this.kitchen?.releaseMealSet(agent.id);
+      this.kitchen?.releaseWash(agent.id);
+      removeItem(agent.inv, Item.Tray);
+      for (const [table, serverId] of this.servers) if (serverId === agent.id) this.servers.delete(table);
+    }
+    for (const pkg of this.kitchen?.logistics.packages.values() ?? []) {
+      if (pkg.reservedBy !== `cook:${agent.id}` && pkg.reservedBy !== `workman:${agent.id}`) continue;
+      if (pkg.state === "carried") { pkg.x = agent.x; pkg.z = agent.z; }
+      pkg.reservedBy = null;
+      pkg.state = pkg.commodity === "book" || agent.kind === Obj.Cook ? "delivery" : "site";
+    }
   }
 
   /** Terminal used by vehicle, visitation, and transfer escapes. The planning
@@ -203,13 +245,44 @@ export class Agents {
   currentActivity(): number { return this.curActivity; }
 
   prisonerCount(): number {
-    return this.agents.filter((a) => a.kind === Obj.Prisoner).length;
+    return this.agents.filter((a) => this.isActivePrisoner(a)).length;
+  }
+
+  private isActivePrisoner(agent: Agent): boolean {
+    return agent.kind === Obj.Prisoner && !["dead", "morgue", "removed"].includes(agent.state) &&
+      this.task2?.health.state(agent.id)?.alive !== false;
+  }
+
+  /** Release live-service ownership while retaining the dead agent and its
+   * body record for discovery, evidence, and morgue transport. */
+  private releasePrisonerClaims(agent: Agent): void {
+    if (agent.bedIdx >= 0 && this.claimedBeds.get(agent.bedIdx) === agent.id)
+      this.claimedBeds.delete(agent.bedIdx);
+    agent.bedIdx = -1;
+    agent.cellRoom = -1;
+    agent.seatIdx = -1;
+    this.releaseIntakeBed(agent.id);
+    releaseUse(this, agent);
+    if (!removeItem(agent.inv, Item.Book)) return;
+    this.kitchen?.returnBook();
+    const items = this.task2?.items;
+    if (!items) return;
+    const containers = [`body:${agent.id}:loot`, ...["hands", "pockets", "worn", "equipment"].map((part) => `agent:${agent.id}:${part}`)];
+    for (const container of containers) {
+      const book = items.itemsIn(container).find((item) => item.defId === "book");
+      if (book) {
+        items.moveToContainer(book.id, "institution:library-stock", this.simTime, -1);
+        break;
+      }
+    }
   }
 
   update(dt: number, world: World, isNight: boolean, hour: number, worldTime?: number) {
     this.simTime = worldTime ?? (this.simTime + dt);
+    this.reconcileMealTables(world);
     this.social.tick(dt, this.simTime, world, this.agents);
     this.escapeOperations.tick(dt, this.simTime, this.agents, this.social);
+    this.syncAdvancedEscapeTools();
     // Top of the hour: compliance rolls + door choreography.
     const h = Math.floor(hour) % 24;
     if (h !== this.curHour) {
@@ -254,6 +327,7 @@ export class Agents {
 
     this.manTowers(world);
     this.assignGuards(world);
+    this.welfare.refresh(world, this.agents);
 
     // Full Lockdown is a physical operation. Prisoners first return to their
     // cells; only once every housed, conscious prisoner is inside do guards
@@ -273,21 +347,49 @@ export class Agents {
     for (let n = this.agents.length - 1; n >= 0; n--) {
       const ag = this.agents[n];
       const health = this.task2?.health.ensure(ag);
+      if (ag.kind === Obj.Prisoner && (health?.alive === false || ["dead", "morgue", "removed"].includes(ag.state)))
+        this.releaseAgentResponsibilities(ag);
+      else if (ag.kind !== Obj.Prisoner && health?.alive === false)
+        this.releaseAgentResponsibilities(ag);
       if (ag.state === "removed" || health?.alive === false) continue;
       if (health && (health.consciousness <= .08 || health.admitted)) {
         ag.path = null; ag.amp = 0;
         continue;
       }
+      // Escape assignments still occupy the prisoner's time and body. Run
+      // ordinary upkeep before handing movement to Task 3 so a long-running
+      // plan cannot freeze hunger, fatigue, stress, or use-slot ownership.
+      if (ag.kind === Obj.Prisoner) this.tickPrisonerNeeds(ag, dt, world);
       if (this.task2?.combat.isBusy(ag.id)) continue;
       const baseSpeed = ag.kind === Obj.Prisoner && ag.profile
         ? .9 + (ag.profile.aptitudes.agility + ag.profile.aptitudes.endurance) / 100 : 1;
       ag.speedMul = baseSpeed * (health?.mobility ?? 1);
-      if (ag.kind !== Obj.Prisoner && ag.kind !== Obj.SecurityDog &&
-          !(ag.kind === Obj.Doctor && this.task2?.health.treatmentJobs.some((j) => j.state === "waiting")) &&
-          this.task2?.security.updateStaff(ag, dt * this.staffPerformance, this.simTime, world, this.agents)) continue;
-      if (ag.kind !== Obj.Prisoner && ag.kind !== Obj.SecurityDog &&
-          this.task3?.updateStaff(ag, dt * this.staffPerformance, this.simTime, world,
-            !!this.task2?.combat.responseFor(ag))) continue;
+      const task2StaffHandled = ag.kind !== Obj.Prisoner && ag.kind !== Obj.SecurityDog &&
+        !(ag.kind === Obj.Doctor && this.task2?.health.treatmentJobs.some((j) => j.state === "waiting")) &&
+        !!this.task2?.security.updateStaff(ag, dt * this.staffPerformance, this.simTime, world, this.agents);
+      if (task2StaffHandled) {
+        this.syncStaffCargo(ag);
+        if (ag.kind === Obj.Cook && ag.state === "staffBreak") {
+          this.kitchen?.releaseMealSet(ag.id);
+          this.kitchen?.releaseWash(ag.id);
+          removeItem(ag.inv, Item.Tray);
+          this.releaseCooker(ag);
+        }
+        continue;
+      }
+      const task3StaffHandled = ag.kind !== Obj.Prisoner && ag.kind !== Obj.SecurityDog &&
+        !!this.task3?.updateStaff(ag, dt * this.staffPerformance, this.simTime, world,
+          !!this.task2?.combat.responseFor(ag));
+      if (task3StaffHandled) {
+        this.syncStaffCargo(ag);
+        if (ag.kind === Obj.Cook && ag.state === "staffBreak") {
+          this.kitchen?.releaseMealSet(ag.id);
+          this.kitchen?.releaseWash(ag.id);
+          removeItem(ag.inv, Item.Tray);
+          this.releaseCooker(ag);
+        }
+        continue;
+      }
       if (!ag.underground && world.inBounds(Math.floor(ag.x), Math.floor(ag.z))) {
         const here = world.idx(Math.floor(ag.x), Math.floor(ag.z));
         ag.elev = world.objKind[here] === Obj.SecureBridge ? 2.86 : ag.kind === Obj.Sniper ? ag.elev : 0;
@@ -299,7 +401,7 @@ export class Agents {
           continue; // wait safely for the moving vehicle to clear the crossing
         }
       }
-      if (ag.kind === Obj.Prisoner && this.task3?.updatePrisoner(ag, dt, this.simTime, world, this.agents)) { /* advanced escape task */ }
+      if (ag.kind === Obj.Prisoner && this.task3?.updatePrisoner(ag, dt, this.simTime, world, this.agents, this.curActivity)) { /* advanced escape task */ }
       else if (ag.kind === Obj.Prisoner && this.curActivity === REG.Work &&
           this.task2?.work.updateWorker(ag, dt, this.simTime, world)) { /* assigned prison work */ }
       else if (ag.kind === Obj.Prisoner) this.updatePrisoner(ag, dt, world, isNight);
@@ -320,28 +422,67 @@ export class Agents {
     }
   }
 
+  /** Keep any physical cargo attached to a worker while another staff duty
+   * temporarily owns their movement and state fields. */
+  private releaseCooker(agent: Agent): void {
+    if (agent.cookerIdx >= 0 && this.claimedCookers.get(agent.cookerIdx) === agent.id)
+      this.claimedCookers.delete(agent.cookerIdx);
+    agent.cookerIdx = -1;
+  }
+
+  private syncStaffCargo(agent: Agent): void {
+    const buildGroup = this.construction?.groups.get(agent.buildGroup);
+    const buildTarget = buildGroup?.targets.find((target) => target.id === agent.buildTarget);
+    if (buildGroup && buildTarget?.claimedBy === agent.id && buildTarget.state === "hauling") {
+      const owner = `build:${buildGroup.id}:${buildTarget.id}`;
+      const pkg = [...this.construction!.logistics.packages.values()].find((candidate) => candidate.reservedBy === owner);
+      if (pkg?.state === "carried") this.construction!.moveBundle(pkg.id, agent.x, agent.z);
+    }
+    if (this.kitchen) {
+      const owners = [`cook:${agent.id}`, `workman:${agent.id}`];
+      const pkg = [...this.kitchen.logistics.packages.values()].find((candidate) =>
+        owners.includes(candidate.reservedBy ?? "") && candidate.state === "carried");
+      if (pkg) this.kitchen.moveCarried(pkg.id, agent.x, agent.z);
+    }
+    this.task2?.work.syncCarried(agent.id, agent.x, agent.z);
+    const handContainer = this.task2?.items.containers.get(`agent:${agent.id}:hands`);
+    if (handContainer) {
+      handContainer.x = agent.x; handContainer.z = agent.z;
+      for (const itemId of handContainer.itemIds) {
+        const item = this.task2!.items.items.get(itemId);
+        if (item) { item.x = agent.x; item.z = agent.z; }
+      }
+    }
+  }
+
   private updateCombatResponse(guard: Agent, dt: number, world: World): boolean {
     const combat = this.task2?.combat, engagement = combat?.responseFor(guard);
     if (!combat || !engagement) return false;
     guard.state = "respondingFight";
-    const distance = Math.hypot(guard.x - engagement.x, guard.z - engagement.z);
-    if (distance > 1.8) {
-      if (!guard.path) {
-        const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(engagement.x))),
-          Math.max(0, Math.min(world.size - 1, Math.floor(engagement.z))));
-        pathAdjacent(guard, world, target, (i) => passable(world, i, true));
+    const targetAgent = combat.responseTarget(engagement, this.agents, guard);
+    if (targetAgent && Math.hypot(guard.x - targetAgent.x, guard.z - targetAgent.z) > 1.5) {
+      const tx = Math.max(0, Math.min(world.size - 1, Math.floor(targetAgent.x)));
+      const tz = Math.max(0, Math.min(world.size - 1, Math.floor(targetAgent.z)));
+      const targetTile = world.idx(tx, tz);
+      const routeEnd = guard.path?.at(-1) ?? -1;
+      const routeDrifted = routeEnd < 0 ||
+        Math.abs((routeEnd % world.size) - tx) + Math.abs(((routeEnd / world.size) | 0) - tz) > 1;
+      if (!guard.path || routeDrifted) {
+        guard.path = null;
+        pathAdjacent(guard, world, targetTile, (i) => passable(world, i, true));
       }
       if (guard.path) followPath(guard, dt, world, true);
       return true;
     }
-    combat.guardIntervene(guard, engagement, this.agents, this.simTime);
+    const stillActive = combat.guardIntervene(guard, engagement, this.agents, this.simTime);
+    if (!stillActive) { guard.state = "idle"; guard.path = null; return false; }
     guard.amp = .7;
     return true;
   }
 
   // --- Prisoner --------------------------------------------------------------
 
-  updatePrisoner(ag: Agent, dt: number, world: World, isNight: boolean) {
+  private tickPrisonerNeeds(ag: Agent, dt: number, world: World) {
     const n = ag.needs;
     // A use claim only lives as long as the using: a guard escort, a lock-up or
     // an erased object all pull him off it, and none of them route through
@@ -349,6 +490,15 @@ export class Agents {
     if (ag.useIdx >= 0 && ag.state !== "using") {
       releaseUse(this, ag);
       ag.pose = POSE_STAND;
+    }
+    if ((ag.cuffed || ag.state === "escorted") && ag.escortedBy >= 0) {
+      const escort = this.agents.find((guard) => guard.id === ag.escortedBy);
+      const stillAssigned = escort?.interact === ag.id &&
+        ["intakeGo", "intakeEscort", "escorting", "regimeGo", "regimeEscort"].includes(escort.state);
+      if (!escort || this.task2?.health.state(escort.id)?.alive === false || !stillAssigned) {
+        this.releaseIntakeBed(ag.id);
+        ag.escortedBy = -1;
+      }
     }
     if (ag.seatIdx >= 0 && ag.state !== "toUse") ag.seatIdx = -1;
     for (const need of NEEDS) {
@@ -365,6 +515,7 @@ export class Agents {
         ? Math.min(1, n.outdoors + RATES.outdoorsRefill * yard * dt)
         : Math.max(0, n.outdoors - RATES.outdoorsDecay * dt);
     }
+    this.welfare.tick(ag, dt, world);
 
     // Escape desire: slow average of misery; fear (post-capture) suppresses it.
     //
@@ -397,6 +548,53 @@ export class Agents {
     ag.escapeDesire = Math.min(1, ag.desire * (1 - ag.fear) * (1 + defiance * .16 + confidence * .08));
 
     if (ag.lastTX < 0) { ag.lastTX = Math.floor(ag.x); ag.lastTZ = Math.floor(ag.z); look(ag, world); }
+  }
+
+  private reconcileMealTables(world: World): void {
+    for (const [table, count] of this.mealTableMeals) {
+      if (world.objKind[table] === Obj.Table) continue;
+      this.mealTableMeals.delete(table);
+      this.mealTableAvailable.delete(table);
+      this.mealTables.delete(table);
+      for (const [agentId, anchor] of this.mealUseClaims) {
+        if (anchor !== table) continue;
+        this.mealUseClaims.delete(agentId);
+        const diner = this.agents.find((agent) => agent.id === agentId);
+        if (diner?.useIdx === table) { releaseUse(this, diner); diner.state = "idle"; diner.pose = POSE_STAND; }
+      }
+      for (let i = 0; i < count; i++) this.kitchen?.finishMeal(false);
+      this.mealsDirty = true;
+    }
+  }
+
+  updatePrisoner(ag: Agent, dt: number, world: World, isNight: boolean) {
+    const n = ag.needs;
+
+    // Do not finish a long trip to a lower-priority use object while food is
+    // critical. A meal route or active meal stays owned by the food need.
+    const useKind = ag.interact >= 0 && world.inBounds(ag.interact % world.size, (ag.interact / world.size) | 0)
+      ? world.objKind[ag.interact] : Obj.None;
+    const urgency = n.food < .08 ? 2 : n.food < .3 || n.sleep < .3 ? 1 : 0;
+    const priorUrgency = this.planNeedRedirectLevel.get(ag.id) ?? 0;
+    if (n.food >= .6 && n.sleep >= .6) this.planNeedRedirectLevel.delete(ag.id);
+    else if (ag.plan && urgency > priorUrgency) {
+      // Escape planning is background intent. Hand the movement slot to needs
+      // once when urgency rises, then leave ordinary food-search routes alone
+      // on later ticks. Otherwise starvation repeatedly cancels the route the
+      // prisoner just selected and turns every tick into another failed A*.
+      if (priorUrgency < 1 && urgency >= 1 &&
+          (ag.state === "exploring" || ag.state === "wandering")) {
+        ag.path = null; ag.pathI = 0; ag.state = "idle"; ag.decideT = 0;
+      }
+      if (priorUrgency < 2 && urgency >= 2 &&
+          (ag.state === "toUse" || ag.state === "using") &&
+          useKind !== Obj.ServingTable && useKind !== Obj.Table) {
+        if (ag.state === "using") releaseUse(this, ag);
+        ag.path = null; ag.pathI = 0; ag.interact = -1; ag.state = "idle";
+        ag.pose = POSE_STAND; ag.decideT = 0;
+      }
+      this.planNeedRedirectLevel.set(ag.id, urgency);
+    }
 
     if (this.task2?.security.emergency === "lockdown" && ag.state !== "escorted" && !ag.cuffed) {
       ag.compliant = true;
@@ -422,7 +620,12 @@ export class Agents {
     // Being marched home.
     if (ag.state === "escorted") {
       const guard = this.agents.find((a) => a.id === ag.escortedBy);
-      if (!guard) { ag.state = ag.cuffed ? "cuffed" : "idle"; ag.escortedBy = -1; return; }
+      const stillAssigned = guard?.interact === ag.id &&
+        ["escorting", "intakeEscort", "regimeEscort"].includes(guard.state);
+      if (!guard || this.task2?.health.state(guard.id)?.alive === false || !stillAssigned) {
+        ag.state = ag.cuffed ? "cuffed" : "idle"; ag.escortedBy = -1; ag.path = null;
+        return;
+      }
       const dx = guard.x - ag.x, dz = guard.z - ag.z;
       const d = Math.hypot(dx, dz);
       if (d > 0.9) {
@@ -534,7 +737,10 @@ export class Agents {
           if (useable(this, ag, world, ag.interact, Obj.ServingTable) &&
               isNextTo(ag, world, ag.interact)) {
             startUse(this, ag, world);
-          } else if (ag.needs.food > 0.6) ag.state = "idle";
+          } else {
+            this.foodQueueRetryAt.set(ag.id, this.simTime + 60);
+            ag.state = "idle"; ag.decideT = 0.1;
+          }
         }
         return;
       }
@@ -571,7 +777,7 @@ export class Agents {
     // Traveling.
     if (ag.path) {
       const before = ag.path;
-      const arrived = followPath(ag, dt, world, false);
+      const arrived = followPath(ag, dt, world, false, ag.state === "fleeing" || ag.state === "retreating");
       if (arrived) this.onArrive(ag, world);
       else if (!ag.path && before) this.onBlocked(ag, world);
       return;
@@ -601,7 +807,7 @@ export class Agents {
       case "toQueue": {
         // Reached the counter: use it if he can, otherwise wait his turn.
         if (useable(this, ag, world, ag.interact, Obj.ServingTable)) startUse(this, ag, world);
-        else { ag.state = "queueing"; ag.timer = 2; }
+        else { ag.state = "queueing"; ag.timer = 10; }
         return;
       }
       case "toShelf": {
@@ -869,6 +1075,10 @@ export class Agents {
   planTick(ag: Agent, world: World, isNight: boolean): boolean {
     // Critical needs always win.
     if (ag.needs.food < 0.08 || ag.needs.sleep < 0.08) return false;
+    // The legacy escape plan is background intent too. Let ordinary behavior
+    // follow the scheduled meal, sleep, and shower windows before continuing
+    // a breach route, including when the prisoner is noncompliant.
+    if ([REG.Eating, REG.Sleep, REG.Shower].includes(this.curActivity as never)) return false;
 
     const threshold = isNight ? 0.40 : 0.55;
     if (!ag.plan) {
@@ -928,6 +1138,55 @@ export class Agents {
     if (plan.stage === "flee") { this.fleeStep(ag, world); return true; }
     if (plan.stage === "retreat") { this.retreat(ag, world); return true; }
     return false;
+  }
+
+  /** Task 3 stages real items in member pockets, while the legacy breach
+   * executor uses compact inventory stacks. Mirror each staged asset so every
+   * legacy consumption has a physical receipt. */
+  private syncAdvancedEscapeTools(): void {
+    const items = this.task2?.items;
+    if (!items) return;
+    for (const op of this.escapeOperations.operations.values()) {
+      const acquisition = op.acquisition;
+      if (!op.advancedReady || !acquisition) continue;
+      const candidates = acquisition.itemIds?.length ? acquisition.itemIds : (acquisition.itemId >= 0 ? [acquisition.itemId] : []);
+      if (!candidates.length) continue;
+      const kind = op.method === "cut" ? Item.Cutter : op.method === "dig" ? Item.Spoon : -1;
+      if (kind < 0) continue;
+      const allowedDefs = kind === Item.Cutter ? ["cutter", "hacksaw-blade", "pruning-shears"] : ["spoon", "trowel", "shovel"];
+      const physicalIds = candidates.filter((id) => {
+        const physical = items.items.get(id);
+        return !!physical && physical.locationKind === "container" &&
+          physical.containerId === `agent:${acquisition.holderId}:pockets` && allowedDefs.includes(physical.defId);
+      });
+      if (acquisition.itemIds) acquisition.itemIds = physicalIds;
+      acquisition.itemId = physicalIds[0] ?? -1;
+      if (!physicalIds.length) continue;
+      const holder = this.agents.find((agent) => agent.id === acquisition.holderId);
+      if (!holder) continue;
+      while (countItem(holder.inv, kind) < physicalIds.length && stow(holder.inv, kind)) { /* mirror each owned asset */ }
+      acquisition.state = "acquired";
+    }
+  }
+
+  private consumeAdvancedEscapeTool(ag: Agent, kind: number): void {
+    const op = this.escapeOperations.operationFor(ag), acquisition = op?.acquisition;
+    if (!op || !acquisition || acquisition.state !== "acquired") return;
+    if ((kind === Item.Cutter && op.method !== "cut") || (kind === Item.Spoon && op.method !== "dig")) return;
+    const items = this.task2?.items;
+    if (!items) return;
+    const candidates = acquisition.itemIds?.length ? acquisition.itemIds : (acquisition.itemId >= 0 ? [acquisition.itemId] : []);
+    const allowedDefs = kind === Item.Cutter ? ["cutter", "hacksaw-blade", "pruning-shears"] : ["spoon", "trowel", "shovel"];
+    const usedId = candidates.find((id) => {
+      const item = items.items.get(id);
+      return !!item && item.locationKind === "container" &&
+        item.containerId === `agent:${acquisition.holderId}:pockets` && allowedDefs.includes(item.defId);
+    });
+    if (usedId === undefined) return;
+    items.destroy(usedId, this.simTime, ag.id, "legacy-escape-tool-consumed");
+    if (acquisition.itemIds) acquisition.itemIds = acquisition.itemIds.filter((id) => id !== usedId);
+    acquisition.itemId = acquisition.itemIds?.[0] ?? (acquisition.itemIds ? -1 : -1);
+    if (acquisition.itemIds?.length === 0 || (!acquisition.itemIds && acquisition.itemId < 0)) acquisition.state = "lost";
   }
 
   approachBreach(ag: Agent, world: World): boolean {
@@ -1019,7 +1278,7 @@ export class Agents {
       world.cutFenceAt(b);
       this.cutFences.add(b);
       this.worldDirty = true;
-      removeItem(ag.inv, Item.Cutter); // a set of cutters is spent on a fence
+      if (removeItem(ag.inv, Item.Cutter)) this.consumeAdvancedEscapeTool(ag, Item.Cutter); // a set of cutters is spent on a fence
       if (ag.known) record(ag, world, b);
       gainSkill(ag.profile, "toolcraft", 7);
     }
@@ -1228,7 +1487,7 @@ export class Agents {
         if (ag.timer > 0) return;
         const workRate = Math.max(.55, .68 + aptitude(ag.profile, "strength") * .018 + aptitude(ag.profile, "endurance") * .018 + aptitude(ag.profile, "technical") * .014 + skill(ag.profile, "digging") * .035);
         ag.timer = DIG_TILE_TIME / workRate;
-        removeItem(ag.inv, Item.Spoon); // a spoon wears out per tile of tunnel
+        if (removeItem(ag.inv, Item.Spoon)) this.consumeAdvancedEscapeTool(ag, Item.Spoon); // a spoon wears out per tile of tunnel
         gainSkill(ag.profile, "digging", 6);
         if (t.networkId >= 0 && ag.tunnelFace === "branch") {
           const connected = this.escapeOperations.digBranch(t.networkId, ag.tunnelEntry, ag, 1);
@@ -1307,42 +1566,54 @@ export class Agents {
       const room = world.rooms.get(ag.aux);
       if (!p || !p.cuffed || !room || !room.valid) {
         if (p && p.escortedBy === ag.id) p.escortedBy = -1;
+        this.releaseIntakeBed(ag.interact);
+        ag.chaseId = -1;
         ag.state = "patrol"; ag.path = null;
         return;
       }
       const done = ag.path ? followPath(ag, dt, world, true) : true;
       if (!done) return;
       // Attached: head for a free bed in the assigned cell/dorm.
-      const bed = this.freeBedInRoom(world, room);
+      const bed = this.intakeBedClaims.get(ag.chaseId) === p.id ? ag.chaseId : -1;
       if (bed < 0 || !pathAdjacent(ag, world, bed, (i) => passable(world, i, true))) {
         p.escortedBy = -1;
+        this.releaseIntakeBed(p.id);
+        ag.chaseId = -1;
         ag.state = "patrol";
         return;
       }
       p.state = "escorted";
       ag.state = "intakeEscort";
       ag.speedMul = 0.62; // cuffed men shuffle
-      ag.chaseId = bed; // remember the bed for the handover
       return;
     }
     if (ag.state === "intakeEscort") {
       const p = this.agents.find((a) => a.id === ag.interact);
-      if (!p) { ag.state = "patrol"; ag.speedMul = 1; ag.path = null; return; }
+      if (!p || p.escortedBy !== ag.id || this.intakeBedClaims.get(ag.chaseId) !== p.id) {
+        if (p?.escortedBy === ag.id) p.escortedBy = -1;
+        this.releaseIntakeBed(ag.interact); ag.chaseId = -1;
+        ag.state = "patrol"; ag.speedMul = 1; ag.path = null; return;
+      }
       const done = ag.path ? followPath(ag, dt, world, true) : true;
       if (!done) return;
       ag.speedMul = 1;
       const room = world.rooms.get(ag.aux);
       const bed = ag.chaseId;
       ag.chaseId = -1;
-      if (room && room.valid && bed >= 0 && world.objKind[bed] === Obj.Bed && !this.claimedBeds.has(bed)) {
+      if (room && room.valid && bed >= 0 && world.objKind[bed] === Obj.Bed &&
+          (!this.claimedBeds.has(bed) || this.claimedBeds.get(bed) === p.id)) {
         p.cuffed = false;
+        for (const [oldBed, owner] of this.claimedBeds) if (owner === p.id && oldBed !== bed) this.claimedBeds.delete(oldBed);
         p.cellRoom = room.id;
         p.bedIdx = bed;
         this.claimedBeds.set(bed, p.id);
+        this.intakeBedClaims.delete(bed);
         p.x = ag.x; p.z = ag.z;
       }
       p.state = p.cuffed ? "cuffed" : "idle";
       p.escortedBy = -1;
+      if (this.intakeBedClaims.get(bed) === p.id) this.intakeBedClaims.delete(bed);
+      ag.chaseId = -1;
       ag.state = "patrol";
       return;
     }
@@ -1565,13 +1836,24 @@ export class Agents {
         if (!ag.path) {
           for (const p of this.agents) {
             if (p.kind !== Obj.Prisoner || !p.cuffed || p.escortedBy >= 0) continue;
-            const room = this.findFreeCell(world, p);
-            if (!room) break; // no capacity anywhere
+            if (this.task2?.health.isUnavailable(p.id) || this.task2?.institution.punishments.some((order) =>
+              order.prisonerId === p.id && !["cancelled", "complete"].includes(order.state))) continue;
+            const assignedRoom = world.rooms.get(p.cellRoom);
+            const ownsBed = !!assignedRoom?.valid && [RoomType.Cell, RoomType.Dorm].includes(assignedRoom.type as never) &&
+              assignedRoom.tiles.has(p.bedIdx) && world.objKind[p.bedIdx] === Obj.Bed && this.claimedBeds.get(p.bedIdx) === p.id;
+            const room = ownsBed ? assignedRoom! : this.findFreeCell(world, p);
+            // A full prison still has beds for its existing residents. An
+            // unassigned arrival must not prevent returning one to his own bed.
+            if (!room) continue;
+            const bed = ownsBed ? p.bedIdx : this.freeBedInRoom(world, room);
+            if (bed < 0) continue;
             const pi = Math.floor(p.z) * size + Math.floor(p.x);
             if (!pathAdjacent(ag, world, pi, (i) => passable(world, i, true))) continue;
+            this.intakeBedClaims.set(bed, p.id);
             p.escortedBy = ag.id;
             ag.interact = p.id;
             ag.aux = room.id;
+            ag.chaseId = bed;
             ag.state = "intakeGo";
             return;
           }
@@ -1630,7 +1912,7 @@ export class Agents {
   freeBedInRoom(world: World, room: Room): number {
     for (const b of world.piecesOfKind(Obj.Bed)) {
       const anchor = world.idx(b.x, b.z);
-      if (!room.tiles.has(anchor) || this.claimedBeds.has(anchor)) continue;
+      if (!room.tiles.has(anchor) || this.claimedBeds.has(anchor) || this.intakeBedClaims.has(anchor)) continue;
       return anchor;
     }
     return -1;
@@ -1641,13 +1923,17 @@ export class Agents {
     let best: Room | null = null, bd = Infinity;
     for (const r of world.rooms.values()) {
       if (!r.valid || (r.type !== RoomType.Cell && r.type !== RoomType.Dorm)) continue;
-      if (r.type === RoomType.Cell && this.agents.some((a) => a.cellRoom === r.id)) continue;
+      if (r.type === RoomType.Cell && this.agents.some((a) => this.isActivePrisoner(a) && a.cellRoom === r.id)) continue;
       if (this.freeBedInRoom(world, r) < 0) continue;
       const t: number = r.tiles.values().next().value!;
       const d = Math.abs((t % world.size) - p.x) + Math.abs(((t / world.size) | 0) - p.z);
       if (d < bd) { bd = d; best = r; }
     }
     return best;
+  }
+
+  private releaseIntakeBed(prisonerId: number): void {
+    for (const [bed, owner] of this.intakeBedClaims) if (owner === prisonerId) this.intakeBedClaims.delete(bed);
   }
 
   /** Where a free guard wanders when he has nothing better to do.
@@ -1667,7 +1953,7 @@ export class Agents {
     // interior one, so even a modest chance of picking the fence would eat most
     // of a guard's day walking to and from it — which is exactly the problem the
     // sniper towers exist to solve.
-    const crowd = this.agents.filter((a) => a.kind === Obj.Prisoner && !a.underground);
+    const crowd = this.agents.filter((a) => this.isActivePrisoner(a) && !a.underground);
     if (crowd.length > 0) {
       // Weight by how unwatched each man is: the further from any guard, the
       // more he needs one. This spreads guards out instead of clumping them.
@@ -1909,10 +2195,23 @@ export class Agents {
   updateWorkman(ag: Agent, dt: number, world: World) {
     const size = world.size;
     if (this.task2?.work.updateHauler(ag, dt, this.simTime, world, false)) return;
+    if (!ag.path && (ag.state === "toBookCargo" || ag.state === "toExportCargo")) {
+      const pkg = this.kitchen?.logistics.packages.get(ag.interact);
+      if (pkg?.reservedBy === `workman:${ag.id}`) {
+        pkg.reservedBy = null;
+        pkg.state = ag.state === "toExportCargo" ? "site" : "delivery";
+      }
+      this.cargoRetryAt.set(`${ag.state === "toExportCargo" ? "export" : "book"}:${ag.interact}`, this.simTime + 30);
+      ag.state = "idle";
+    }
     if (ag.path) {
       if (ag.state === "deliverBuildCargo" && this.construction) this.construction.moveBundle(ag.interact, ag.x, ag.z);
       if ((ag.state === "deliverBookCargo" || ag.state === "deliverExportCargo") && this.kitchen) {
         this.kitchen.moveCarried(ag.interact, ag.x, ag.z);
+      }
+      if (ag.state === "staffBreak" && this.kitchen) {
+        const pkg = this.kitchen.logistics.packages.get(ag.interact);
+        if (pkg?.state === "carried" && pkg.reservedBy === `workman:${ag.id}`) this.kitchen.moveCarried(pkg.id, ag.x, ag.z);
       }
       const done = followPath(ag, dt, world, true);
       if (done && ag.job) { ag.state = "repairing"; ag.timer = REPAIR_TIME; }
@@ -1929,21 +2228,21 @@ export class Agents {
         this.construction.deliverBundle(ag.buildGroup, ag.buildTarget, ag.interact, ag.id);
         ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
       }
-      else if (done && ag.buildGroup >= 0 && this.construction) {
+      else if (done && (ag.state === "toBuild" || ag.state === "toBuildResume") && ag.buildGroup >= 0 && this.construction) {
         const group = this.construction.groups.get(ag.buildGroup);
         const target = group?.targets.find((t) => t.id === ag.buildTarget);
-        if (!target) {
+        if (!group || !target || target.claimedBy !== ag.id || target.state !== "working") {
           ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
         } else {
           ag.state = group!.operation === "demolish" ? "demolishing" : "constructing";
-          ag.timer = target.workSeconds;
+          if (ag.timer <= 0) ag.timer = target.workSeconds * (1 - target.progress);
         }
       } else if (done && ag.state === "toBookCargo" && this.kitchen) {
         const pkg = this.kitchen.logistics.packages.get(ag.interact);
         if (pkg && pkg.reservedBy === `workman:${ag.id}`) {
           pkg.state = "carried";
           if (pathAdjacent(ag, world, ag.aux, (i) => passable(world, i, true))) ag.state = "deliverBookCargo";
-          else { pkg.state = "delivery"; pkg.reservedBy = null; ag.state = "idle"; }
+          else { pkg.state = "delivery"; pkg.reservedBy = null; this.cargoRetryAt.set(`book:${pkg.id}`, this.simTime + 30); ag.state = "idle"; }
         } else ag.state = "idle";
       } else if (done && ag.state === "deliverBookCargo" && this.kitchen) {
         const pkg = this.kitchen.logistics.packages.get(ag.interact);
@@ -1954,7 +2253,7 @@ export class Agents {
         if (pkg && pkg.reservedBy === `workman:${ag.id}`) {
           pkg.state = "carried";
           if (pathAdjacent(ag, world, ag.aux, (i) => passable(world, i, true))) ag.state = "deliverExportCargo";
-          else { pkg.state = "site"; pkg.reservedBy = null; ag.state = "idle"; }
+          else { pkg.state = "site"; pkg.reservedBy = null; this.cargoRetryAt.set(`export:${pkg.id}`, this.simTime + 30); ag.state = "idle"; }
         } else ag.state = "idle";
       } else if (done && ag.state === "deliverExportCargo" && this.kitchen) {
         const pkg = this.kitchen.logistics.packages.get(ag.interact);
@@ -1962,6 +2261,74 @@ export class Agents {
         ag.state = "idle";
       }
       return;
+    }
+    if (ag.state === "staffBreak") {
+      if (this.task2?.security.staff.get(ag.id)?.onBreak) return;
+      const pkg = this.kitchen?.logistics.packages.get(ag.interact);
+      if (pkg?.reservedBy === `workman:${ag.id}` && (pkg.state === "carried" || pkg.state === "delivery" || pkg.state === "site")) {
+        const isBook = pkg.commodity === "book";
+        const room = isBook ? null : [...world.rooms.values()].find((candidate) => candidate.type === RoomType.Exports && candidate.valid);
+        const destination = isBook
+          ? (world.tilesOfKind(Obj.Bookshelf)[0] ?? world.tilesOfKind(Obj.BookshelfLarge)[0] ?? world.tilesOfKind(Obj.BookshelfTall)[0] ?? -1)
+          : room ? ([...room.tiles].find((tile) => world.objKind[tile] === Obj.LoadingPallet) ?? room.tiles.values().next().value ?? -1) : -1;
+        const tile = pkg.state === "carried" && destination >= 0 ? destination :
+          world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(pkg.x))), Math.max(0, Math.min(world.size - 1, Math.floor(pkg.z))));
+        if (destination >= 0 && pathAdjacent(ag, world, tile, (i) => passable(world, i, true))) {
+          ag.aux = destination;
+          ag.state = pkg.state === "carried"
+            ? (isBook ? "deliverBookCargo" : "deliverExportCargo")
+            : (isBook ? "toBookCargo" : "toExportCargo");
+          return;
+        }
+        pkg.reservedBy = null;
+        if (pkg.state === "carried") pkg.state = isBook ? "delivery" : "site";
+        this.cargoRetryAt.set(`${isBook ? "book" : "export"}:${pkg.id}`, this.simTime + 30);
+      }
+      ag.state = "idle";
+    }
+    if (ag.state === "staffBreak" && this.task2?.security.staff.get(ag.id)?.onBreak) return;
+    // Security duties can temporarily replace a workman's movement state and
+    // route (for example, a fatigue break while hauling a construction bundle).
+    // The construction claim remains authoritative, so resume that exact target
+    // before asking the order book for new work.
+    if (ag.buildGroup >= 0 && ag.buildTarget >= 0 &&
+        ag.state !== "constructing" && ag.state !== "demolishing") {
+      const group = this.construction?.groups.get(ag.buildGroup);
+      const target = group?.targets.find((t) => t.id === ag.buildTarget);
+      if (!group || !target || target.claimedBy !== ag.id) {
+        ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
+      } else if (target.state === "hauling") {
+        const owner = `build:${group.id}:${target.id}`;
+        const pkg = [...this.construction!.logistics.packages.values()].find((candidate) => candidate.reservedBy === owner);
+        if (!pkg) {
+          this.construction!.releaseClaim(group.id, target.id, ag.id, "Construction bundle is unavailable");
+          ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
+        } else {
+          ag.interact = pkg.id;
+          const carrying = pkg.state === "carried";
+          if (carrying) this.construction!.moveBundle(pkg.id, ag.x, ag.z);
+          const destination = carrying ? world.idx(target.x, target.z) :
+            world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(pkg.x))),
+              Math.max(0, Math.min(world.size - 1, Math.floor(pkg.z))));
+          if (pathAdjacent(ag, world, destination, (i) => passable(world, i, true))) {
+            ag.state = carrying ? "deliverBuildCargo" : "toBuildCargo";
+            return;
+          }
+          this.construction!.releaseClaim(group.id, target.id, ag.id, "Unreachable construction site");
+          ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
+        }
+      } else if (target.state === "working") {
+        if (pathAdjacent(ag, world, world.idx(target.x, target.z), (i) => passable(world, i, true))) {
+          ag.state = target.progress > 0 ? "toBuildResume" : "toBuild";
+          return;
+        } else {
+          this.construction!.releaseClaim(group.id, target.id, ag.id, "Unreachable construction site");
+          ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
+        }
+      } else {
+        this.construction!.releaseClaim(group.id, target.id, ag.id);
+        ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
+      }
     }
     if ((ag.state === "constructing" || ag.state === "demolishing") && ag.buildGroup >= 0 && this.construction) {
       ag.amp = Math.min(1, ag.amp + dt * 6);
@@ -2049,7 +2416,7 @@ export class Agents {
       // A blocked old target must not monopolize every workman. Try the next
       // candidates in the same decision after recording an unreachable site.
       for (let attempt = 0; attempt < 32; attempt++) {
-        const claim = this.construction.claimNext(ag.id, ag.x, ag.z, world);
+        const claim = this.construction.claimNext(ag.id, ag.x, ag.z, world, this.simTime);
         if (!claim) break;
         const pkg = claim.packageId >= 0 ? this.construction.logistics.packages.get(claim.packageId) : null;
         const idx = pkg
@@ -2072,19 +2439,21 @@ export class Agents {
       const shelf = world.tilesOfKind(Obj.Bookshelf)[0] ?? world.tilesOfKind(Obj.BookshelfLarge)[0] ?? world.tilesOfKind(Obj.BookshelfTall)[0] ?? -1;
       if (shelf >= 0) {
         const book = this.kitchen.logistics.packagesForHandler("workman")
-          .find((pkg) => pkg.commodity === "book" && pkg.state === "delivery" && !pkg.reservedBy);
+          .find((pkg) => pkg.commodity === "book" && pkg.state === "delivery" && !pkg.reservedBy &&
+            (this.cargoRetryAt.get(`book:${pkg.id}`) ?? 0) <= this.simTime);
         if (book) {
           const tile = world.idx(Math.floor(book.x), Math.floor(book.z));
           book.reservedBy = `workman:${ag.id}`;
           if (pathAdjacent(ag, world, tile, (i) => passable(world, i, true))) {
             ag.interact = book.id; ag.aux = shelf; ag.state = "toBookCargo"; return;
           }
-          book.reservedBy = null;
+          book.reservedBy = null; this.cargoRetryAt.set(`book:${book.id}`, this.simTime + 30);
         }
       }
       const exports = [...world.rooms.values()].find((room) => room.type === RoomType.Exports && room.valid);
       const salvage = this.kitchen.logistics.packagesForHandler("workman")
-        .find((pkg) => pkg.state === "site" && !pkg.reservedBy);
+        .find((pkg) => pkg.state === "site" && !pkg.reservedBy &&
+          (this.cargoRetryAt.get(`export:${pkg.id}`) ?? 0) <= this.simTime);
       if (exports && salvage) {
         const destination = [...exports.tiles].find((i) => world.objKind[i] === Obj.LoadingPallet) ?? exports.tiles.values().next().value ?? -1;
         const tile = world.idx(Math.floor(salvage.x), Math.floor(salvage.z));
@@ -2092,7 +2461,7 @@ export class Agents {
         if (destination >= 0 && pathAdjacent(ag, world, tile, (i) => passable(world, i, true))) {
           ag.interact = salvage.id; ag.aux = destination; ag.state = "toExportCargo"; return;
         }
-        salvage.reservedBy = null;
+        salvage.reservedBy = null; this.cargoRetryAt.set(`export:${salvage.id}`, this.simTime + 30);
       }
     }
     this.task2?.work.updateHauler(ag, dt, this.simTime, world, true);
@@ -2110,6 +2479,11 @@ export class Agents {
 
     if (ag.path) {
       if (ag.state === "deliverCargo" && this.kitchen) this.kitchen.moveCarried(ag.interact, ag.x, ag.z);
+      if (ag.state === "staffBreak" && this.kitchen) {
+        const pkg = [...this.kitchen.logistics.packages.values()].find((candidate) =>
+          candidate.reservedBy === `cook:${ag.id}` && candidate.state === "carried");
+        if (pkg) this.kitchen.moveCarried(pkg.id, ag.x, ag.z);
+      }
       const arrived = followPath(ag, dt, world, true);
       if (!arrived) return;
       if (ag.state === "toCooker") {
@@ -2121,13 +2495,17 @@ export class Agents {
         );
       } else if (ag.state === "delivering") {
         // Stock the serving table.
+        let stocked = false;
         if (world.objKind[ag.interact] === Obj.ServingTable) {
           const cur = this.servingStock.get(ag.interact) ?? 0;
           if (cur < SERVING_CAP) {
             this.servingStock.set(ag.interact, cur + 1);
             this.mealsDirty = true;
+            stocked = true;
           }
         }
+        if (stocked) this.kitchen?.commitMealSet(ag.id);
+        else this.kitchen?.releaseMealSet(ag.id);
         removeItem(ag.inv, Item.Tray);
         ag.state = "idle";
       } else if (ag.state === "toServeDuty") {
@@ -2155,11 +2533,108 @@ export class Agents {
       return;
     }
 
+    // A staff break can replace a cook's route and scratch fields while a
+    // kitchen delivery is in flight. The package reservation is authoritative:
+    // resume it after the break, or return it to delivery if its destination
+    // is no longer reachable.
+    if (ag.state === "staffBreak") {
+      if (this.task2?.security.staff.get(ag.id)?.onBreak) return;
+      const pkg = [...(this.kitchen?.logistics.packages.values() ?? [])].find((candidate) =>
+        candidate.reservedBy === `cook:${ag.id}` && ["delivery", "carried"].includes(candidate.state));
+      if (pkg && this.kitchen) {
+        const destination = pkg.commodity === "frozen-meal"
+          ? world.tilesOfKind(Obj.Freezer)[0] ?? -1
+          : world.tilesOfKind(Obj.ServingTable)[0] ?? world.tilesOfKind(Obj.Sink)[0] ?? -1;
+        const source = world.idx(Math.max(0, Math.min(size - 1, Math.floor(pkg.x))),
+          Math.max(0, Math.min(size - 1, Math.floor(pkg.z))));
+        const target = pkg.state === "carried" ? destination : source;
+        if (destination >= 0 && pathAdjacent(ag, world, target, (i) => passable(world, i, true))) {
+          ag.interact = pkg.id; ag.aux = destination;
+          ag.state = pkg.state === "carried" ? "deliverCargo" : "toCargo";
+          return;
+        }
+        pkg.reservedBy = null;
+        if (pkg.state === "carried") pkg.state = "delivery";
+      }
+      ag.state = "idle";
+    }
+
+    // Recover an interrupted/invalid cargo route even when the security
+    // controller did not explicitly assign a break state.
+    if ((ag.state === "toCargo" || ag.state === "deliverCargo") && this.kitchen) {
+      const pkg = [...this.kitchen.logistics.packages.values()].find((candidate) =>
+        candidate.reservedBy === `cook:${ag.id}`);
+      if (!pkg) ag.state = "idle";
+      else {
+        const destination = pkg.commodity === "frozen-meal"
+          ? world.tilesOfKind(Obj.Freezer)[0] ?? -1
+          : world.tilesOfKind(Obj.ServingTable)[0] ?? world.tilesOfKind(Obj.Sink)[0] ?? -1;
+        const source = world.idx(Math.max(0, Math.min(size - 1, Math.floor(pkg.x))),
+          Math.max(0, Math.min(size - 1, Math.floor(pkg.z))));
+        const target = pkg.state === "carried" ? destination : source;
+        if (destination >= 0 && pathAdjacent(ag, world, target, (i) => passable(world, i, true))) {
+          ag.interact = pkg.id; ag.aux = destination;
+          ag.state = pkg.state === "carried" ? "deliverCargo" : "toCargo";
+          return;
+        }
+        pkg.reservedBy = null;
+        if (pkg.state === "carried") pkg.state = "delivery";
+        ag.state = "idle";
+      }
+    }
+
     ag.amp = Math.max(0, ag.amp - dt * 8);
+
+    /** Serving a stocked counter is urgent on the schedule and for a starving
+     * inmate outside it; ordinary off-peak meals can be collected without a
+     * dedicated cook. */
+    const servingTables = () => world.tilesOfKind(Obj.ServingTable)
+      .filter((i) => world.roomTypeAt(i) === RoomType.Canteen);
+    const desperateDiner = this.agents.some((agent) => agent.kind === Obj.Prisoner && !agent.cuffed &&
+      !["dead", "morgue", "removed"].includes(agent.state) && !this.task2?.health.isUnavailable(agent.id) &&
+      agent.needs.food < .15);
+    const servingNow = this.curActivity === REG.Eating || desperateDiner;
+    const assignServingDuty = (): boolean => {
+      if (!servingNow) return false;
+      for (const table of servingTables()) {
+        if (this.servers.has(table) || (this.servingStock.get(table) ?? 0) <= 0) continue;
+        if (pathAdjacent(ag, world, table, (i) => passable(world, i, true))) {
+          this.kitchen?.releaseMealSet(ag.id);
+          this.servers.set(table, ag.id);
+          ag.interact = table;
+          ag.state = "toServeDuty";
+          removeItem(ag.inv, Item.Tray);
+          return true;
+        }
+      }
+      return false;
+    };
+    const startCooking = (): boolean => {
+      if (!this.kitchen || !servingTables().some((table) => (this.servingStock.get(table) ?? 0) < SERVING_CAP)) return false;
+      if (ag.cookerIdx < 0) {
+        let best = -1, distance = Infinity;
+        for (const cooker of world.tilesOfKind(Obj.Cooker)) {
+          if (this.claimedCookers.has(cooker) || world.roomTypeAt(cooker) !== RoomType.Kitchen) continue;
+          const d = Math.abs((cooker % size) - ag.x) + Math.abs(((cooker / size) | 0) - ag.z);
+          if (d < distance) { distance = d; best = cooker; }
+        }
+        if (best < 0) return false;
+        this.claimedCookers.set(best, ag.id);
+        ag.cookerIdx = best;
+      }
+      if (!this.kitchen.reserveMealSet(ag.id)) return false;
+      if (pathAdjacent(ag, world, ag.cookerIdx, (i) => passable(world, i, true))) {
+        ag.state = "toCooker";
+        return true;
+      }
+      this.kitchen.releaseMealSet(ag.id);
+      return false;
+    };
 
     // Manning the serving table during eating hours.
     if (ag.state === "manning") {
-      if (this.curActivity !== REG.Eating || this.servers.get(ag.interact) !== ag.id) {
+      if (!servingNow || this.servers.get(ag.interact) !== ag.id ||
+          (this.servingStock.get(ag.interact) ?? 0) <= 0) {
         this.servers.delete(ag.interact);
         ag.state = "idle";
       }
@@ -2172,26 +2647,10 @@ export class Agents {
       return;
     }
 
-    /** Serving tables in valid canteens. */
-    const servingTables = () => world.tilesOfKind(Obj.ServingTable)
-      .filter((i) => world.roomTypeAt(i) === RoomType.Canteen);
-
     switch (ag.state) {
       case "cooking": {
         // Serving duty trumps the stove during eating hours.
-        if (this.curActivity === REG.Eating) {
-          for (const s of servingTables()) {
-            if (this.servers.has(s) || (this.servingStock.get(s) ?? 0) <= 0) continue;
-            if (pathAdjacent(ag, world, s, (i) => passable(world, i, true))) {
-              this.kitchen?.releaseMealSet();
-              this.servers.set(s, ag.id);
-              ag.interact = s;
-              ag.state = "toServeDuty";
-              removeItem(ag.inv, Item.Tray);
-              return;
-            }
-          }
-        }
+        if (assignServingDuty()) return;
         ag.timer -= dt;
         if (ag.timer > 0) return;
         // Meal's up: carry it to the least-stocked serving table.
@@ -2211,59 +2670,50 @@ export class Agents {
         return;
       }
       default: {
+        // Keep meal preparation ahead of routine laundry and inbound top-up
+        // runs. A delivered meal sitting in the freezer does not help inmates
+        // through today's meal window until a cook carries it to a counter.
+        if (assignServingDuty()) return;
+        if (startCooking()) return;
+
         if (this.kitchen) {
-          const haul = this.kitchen.claimHaul(ag.id, world);
-          if (haul) {
-            const pkg = this.kitchen.logistics.packages.get(haul.packageId)!;
-            const packageTile = world.idx(Math.floor(pkg.x), Math.floor(pkg.z));
-            if (pathAdjacent(ag, world, packageTile, (i) => passable(world, i, true))) {
-              ag.interact = haul.packageId; ag.aux = haul.destination; ag.state = "toCargo";
-              return;
-            }
-            pkg.reservedBy = null;
-          }
+          const cutleryNeedsWashing =
+            (this.kitchen.cleanTrays <= 2 && this.kitchen.dirtyTrays > 0) ||
+            (this.kitchen.cleanSpoons <= 2 && this.kitchen.dirtySpoons > 0);
+          // Recycle already-owned cutlery before sending a cook on a long
+          // supply route. One clean setting may be the last one between an
+          // empty serving counter and a meal, while dirty settings need only
+          // a short sink trip to re-enter service.
           const sink = world.tilesOfKind(Obj.Sink)[0] ?? -1;
-          if (sink >= 0 && this.kitchen.claimWash(ag.id) > 0) {
+          if (cutleryNeedsWashing && sink >= 0 && this.kitchen.claimWash(ag.id) > 0) {
             if (pathAdjacent(ag, world, sink, (i) => passable(world, i, true))) {
               ag.interact = sink; ag.state = "toSink"; return;
             }
             this.kitchen.releaseWash(ag.id);
           }
-        }
-        // Eating hour: someone has to hand the trays out.
-        if (this.curActivity === REG.Eating) {
-          for (const s of servingTables()) {
-            if (this.servers.has(s)) continue;
-            if ((this.servingStock.get(s) ?? 0) <= 0) continue;
-            if (pathAdjacent(ag, world, s, (i) => passable(world, i, true))) {
-              this.servers.set(s, ag.id);
-              ag.interact = s;
-              ag.state = "toServeDuty";
-              return;
+
+          const stockNeedsRestock = this.kitchen.frozenMeals <= 6 ||
+            this.kitchen.cleanTrays <= 2 || this.kitchen.cleanSpoons <= 2;
+          if (stockNeedsRestock) {
+            const neededStock: string[] = [];
+            if (this.kitchen.cleanTrays <= 2) neededStock.push("tray");
+            if (this.kitchen.cleanSpoons <= 2) neededStock.push("spoon");
+            if (this.kitchen.frozenMeals <= 6) neededStock.push("frozen-meal");
+            const haul = this.kitchen.claimHaul(ag.id, world, neededStock);
+            if (haul) {
+              const pkg = this.kitchen.logistics.packages.get(haul.packageId)!;
+              const packageTile = world.idx(Math.floor(pkg.x), Math.floor(pkg.z));
+              if (pathAdjacent(ag, world, packageTile, (i) => passable(world, i, true))) {
+                ag.interact = haul.packageId; ag.aux = haul.destination; ag.state = "toCargo";
+                return;
+              }
+              pkg.reservedBy = null;
             }
           }
         }
         // Strict chain: no serving table in a canteen -> nothing to cook for.
         if (servingTables().length === 0) return;
-        if (ag.cookerIdx < 0) {
-          let best = -1, bd = Infinity;
-          for (const i of world.tilesOfKind(Obj.Cooker)) {
-            if (this.claimedCookers.has(i)) continue;
-            // Strict chain: only cookers inside a valid Kitchen are used.
-            if (world.roomTypeAt(i) !== RoomType.Kitchen) continue;
-            const d = Math.abs((i % size) - ag.x) + Math.abs(((i / size) | 0) - ag.z);
-            if (d < bd) { bd = d; best = i; }
-          }
-          if (best < 0) return;
-          this.claimedCookers.set(best, ag.id);
-          ag.cookerIdx = best;
-        }
-        if (this.kitchen && !this.kitchen.reserveMealSet()) return;
-        if (pathAdjacent(ag, world, ag.cookerIdx, (i) => passable(world, i, true))) {
-          ag.state = "toCooker";
-        } else if (this.kitchen) {
-          this.kitchen.releaseMealSet();
-        }
+        startCooking();
         return;
       }
     }
@@ -2315,10 +2765,10 @@ export class Agents {
     let lowFood = 0, lowSleep = 0, lowOutdoors = 0, lowComfort = 0, lowHygiene = 0;
     let avgFood = 0, avgSleep = 0, avgOutdoors = 0, avgComfort = 0, avgHygiene = 0;
     let sneaking = 0, avgRisk = 0;
-    const prisoners = this.agents.filter((a) => a.kind === Obj.Prisoner);
+    const prisoners = this.agents.filter((a) => this.isActivePrisoner(a));
     for (const ag of this.agents) {
       states[ag.state] = (states[ag.state] ?? 0) + 1;
-      if (ag.kind === Obj.Prisoner) kinds.prisoners++;
+      if (this.isActivePrisoner(ag)) kinds.prisoners++;
       else if (ag.kind === Obj.Guard) kinds.guards++;
       else if (ag.kind === Obj.Cook) kinds.cooks++;
       else if (ag.kind === Obj.Workman) kinds.workmen++;
@@ -2407,6 +2857,9 @@ export class Agents {
         bed, items: items.map((i) => ({ ...i })),
       })),
       mealTables: [...this.mealTables],
+      mealTableMeals: [...this.mealTableMeals],
+      mealTableAvailable: [...this.mealTableMeals.keys()].map((table) => [table,
+        (this.mealTableAvailable.get(table) ?? 0) + [...this.mealUseClaims.values()].filter((anchor) => anchor === table).length]),
       servingStock: [...this.servingStock.entries()],
       tunnels: this.tunnels.map((t) => ({ ...t })),
       cutFences: [...this.cutFences],
@@ -2433,12 +2886,16 @@ export class Agents {
 
   loadData(data: ReturnType<Agents["saveData"]> & LegacyAgentSave) {
     this.agents.length = 0;
+    this.releasedAgents.clear();
     this.claimedBeds.clear();
     this.claimedCookers.clear();
     this.useClaims.clear();
     this.stashes.clear();
     this.routeGuards.clear();
     this.mealTables.clear();
+    this.mealTableMeals.clear();
+    this.mealTableAvailable.clear();
+    this.mealUseClaims.clear();
     this.tunnels.length = 0;
     this.cutFences.clear();
     this.repairJobs.length = 0;
@@ -2457,6 +2914,19 @@ export class Agents {
       this.stashes.set(bed, items.map((i) => ({ ...i })));
     }
     for (const i of data.mealTables ?? []) this.mealTables.add(i);
+    if (data.mealTableMeals) {
+      for (const [table, count] of data.mealTableMeals) if (count > 0 && this.mealTables.has(table)) this.mealTableMeals.set(table, count);
+    } else {
+      // Older saves only recorded whether a table had any meal at all.
+      for (const table of this.mealTables) this.mealTableMeals.set(table, 1);
+    }
+    if (data.mealTableAvailable) {
+      for (const [table, count] of data.mealTableAvailable) if (count > 0 && this.mealTableMeals.has(table)) this.mealTableAvailable.set(table, count);
+    } else {
+      // Loaded agents do not retain transient use claims, so all saved table
+      // meals become available leftovers after a reload.
+      for (const [table, count] of this.mealTableMeals) this.mealTableAvailable.set(table, count);
+    }
     for (const [i, n] of data.servingStock ?? []) this.servingStock.set(i, n);
     for (const t of data.tunnels ?? []) this.tunnels.push({ ...t, networkId: t.networkId ?? -1 });
     for (const i of data.cutFences ?? []) this.cutFences.add(i);
@@ -2531,10 +3001,13 @@ export class Agents {
         disguise: raw.disguise ?? 0,
         protectiveCustody: raw.protectiveCustody ?? false,
       } as Agent;
+      if (ag.kind === Obj.Prisoner && ["dead", "morgue", "removed"].includes(ag.state)) {
+        ag.bedIdx = -1;
+        ag.cellRoom = -1;
+      }
       if (ag.state === "using" || ag.state === "toUse") ag.state = "idle";
       if (["toBuild", "constructing", "demolishing", "toCargo", "deliverCargo",
-        "toBookCargo", "deliverBookCargo", "toExportCargo", "deliverExportCargo",
-        "toSink", "washing"].includes(ag.state)) ag.state = "idle";
+        "toBookCargo", "deliverBookCargo", "toExportCargo", "deliverExportCargo"].includes(ag.state)) ag.state = "idle";
       this.agents.push(ag);
       if (ag.bedIdx >= 0) this.claimedBeds.set(ag.bedIdx, ag.id);
       if (ag.cookerIdx >= 0) this.claimedCookers.set(ag.cookerIdx, ag.id);

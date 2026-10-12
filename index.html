@@ -18,6 +18,7 @@
       body { font: 13px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       button { border:0; font:inherit; color:inherit; }
       button:focus-visible { outline:2px solid #d7e890; outline-offset:2px; }
+      .sr-only { position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
       #app, #gfx { display:block; width:100vw; height:100vh; }
       #roomOverlay { position:fixed; inset:0; z-index:5; pointer-events:none; }
       #hud { display:none; }
@@ -71,29 +72,43 @@
       /* Construction console ------------------------------------------------- */
       #build { position:fixed; z-index:14; inset:auto 0 0; height:180px; display:grid; grid-template-columns:218px minmax(0, 1fr); color:var(--text); background:linear-gradient(115deg, rgba(10,24,32,.985), rgba(11,26,34,.98)); border-top:1px solid rgba(178,199,201,.18); box-shadow:0 -16px 40px rgba(0,0,0,.32); opacity:0; visibility:hidden; transform:translateY(16px); pointer-events:none; transition:opacity .18s ease, transform .18s ease, visibility .18s; }
       #build.open { opacity:1; visibility:visible; transform:translateY(0); pointer-events:auto; }
-      #catalogSide { grid-row:1; padding:14px 12px; overflow:hidden; border-right:1px solid var(--line); }
+      #catalogSide { grid-row:1; min-height:0; padding:14px 12px; overflow-y:auto; overflow-x:hidden; border-right:1px solid var(--line); scrollbar-color:#536b4a transparent; }
       .console-eyebrow { margin:0 0 8px 8px; color:var(--lime); font-size:10px; font-weight:900; letter-spacing:.055em; text-transform:uppercase; }
       #cats { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:3px; }
-      .build-cat { width:100%; min-height:27px; padding:5px 8px; border-radius:4px; color:#9caeb2; background:transparent; cursor:pointer; text-align:left; font-size:10px; font-weight:800; letter-spacing:.025em; text-transform:uppercase; transition:.14s; }
+      .build-cat { width:100%; min-height:30px; display:flex; align-items:center; justify-content:space-between; gap:5px; padding:5px 8px; border-radius:4px; color:#9caeb2; background:transparent; cursor:pointer; text-align:left; font-size:10px; font-weight:800; letter-spacing:.025em; text-transform:uppercase; transition:.14s; }
       .build-cat:hover { color:#eef4e9; background:rgba(160,185,98,.16); } .build-cat.on { color:#eef3de; background:linear-gradient(95deg,#627846,#4e6138); }
+      .category-count { min-width:19px; padding:1px 4px; border-radius:8px; color:#b1c0be; background:rgba(220,236,228,.08); font-size:9px; text-align:center; }
+      .build-cat.on .category-count { color:#eef3de; background:rgba(255,255,255,.16); }
       #catalogMain { display:grid; grid-template-columns:minmax(0, 1fr) 338px; min-width:0; }
       #catalogList { min-width:0; padding:10px 18px 8px; overflow:hidden; }
-      #build-head { display:flex; align-items:center; gap:9px; min-height:22px; }
+      #build-head { display:flex; align-items:center; gap:9px; min-height:26px; }
       #catalogIcon { display:grid; place-items:center; width:23px; height:23px; border:1px solid var(--line-bright); border-radius:4px; color:#bdc9c5; font-size:13px; }
       #toolName { color:#eff2ec; font-size:13px; font-weight:900; letter-spacing:.035em; text-transform:uppercase; }
       #toolHint { color:var(--muted); font-size:11px; }
       #catalogSearch { margin-left:auto; width:min(260px,28vw); padding:7px 10px; color:#eef3ef; background:#0b1820; border:1px solid rgba(166,190,190,.22); border-radius:5px; outline:none; }
       #catalogSearch:focus { border-color:#9fb56c; box-shadow:0 0 0 2px rgba(159,181,108,.16); }
+      #catalogResults { flex:0 0 auto; color:#9aa9aa; font-size:10px; }
+      .catalog-help { margin-left:3px; color:#829397; font-size:10px; white-space:nowrap; }
+      .catalog-empty { align-self:center; margin:0; color:#b4c0bd; font-size:12px; }
       #palette { display:flex; gap:8px; height:130px; margin-top:7px; padding:2px 1px 5px; overflow-x:auto; overflow-y:hidden; scrollbar-color:#536b4a transparent; }
       .build-item { flex:0 0 108px; height:123px; padding:6px; border:1px solid rgba(165,190,193,.12); border-radius:5px; color:#dbe3e2; background:linear-gradient(145deg,#152731,#102029); cursor:pointer; text-align:left; transition:border-color .14s,transform .14s,background .14s; }
       .build-item:hover { border-color:rgba(191,215,175,.52); transform:translateY(-2px); background:#1a2c35; } .build-item.on { border-color:#bbc878; box-shadow:inset 0 0 0 1px rgba(187,200,120,.25); }
       .item-swatch { display:block; width:100%; height:65px; border-radius:3px; border:1px solid rgba(255,255,255,.09); box-shadow:inset 0 0 18px rgba(0,0,0,.24); }
       .item-title { display:block; margin-top:5px; color:#e8eeec; font-size:10px; font-weight:850; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .item-group { display:block; margin-top:1px; color:#b6c984; font-size:8px; font-weight:800; letter-spacing:.04em; text-transform:uppercase; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
       .item-meta { display:block; margin-top:2px; color:#94a7a7; font-size:9px; font-weight:650; }
       #itemDetail { padding:16px 20px; border-left:1px solid var(--line); background:linear-gradient(120deg,rgba(10,22,28,.55),rgba(15,29,37,.28)); }
       #detailType { color:#a8b76a; font-size:11px; font-weight:900; letter-spacing:.045em; text-transform:uppercase; } #detailName { margin-top:10px; color:#edf1ed; font-size:15px; font-weight:900; } #detailCopy { max-width:235px; margin:7px 0 14px; color:#aebcbd; font-size:12px; line-height:1.45; }
       #detailCost { display:block; padding-top:10px; border-top:1px solid var(--line); color:#aebcbd; font-size:10px; font-weight:800; text-transform:uppercase; } #detailCost strong { display:block; margin-top:4px; color:#bfd376; font-size:10px; line-height:1.35; text-transform:none; }
-      #utility { display:none; }
+      #utility { position:fixed; z-index:18; left:88px; top:58px; display:flex; align-items:center; gap:6px; padding:5px; border:1px solid var(--line); border-radius:5px; background:rgba(8,19,25,.93); box-shadow:0 5px 18px rgba(0,0,0,.22); }
+      #utility button { min-height:31px; padding:0 9px; border:1px solid rgba(173,194,202,.16); border-radius:4px; color:#dce6e0; background:#152831; cursor:pointer; font-size:10px; font-weight:850; }
+      #utility button:hover { border-color:#aabd71; background:#263c35; }
+      #utility button:disabled { color:#bac4c0; background:#243036; cursor:help; opacity:1; }
+      #roofBtn { font-size:0 !important; }
+      #roofBtn::before { content:"⌂"; margin-right:6px; font-size:16px; }
+      #roofBtn::after { content:"Roof: Solid"; font-size:10px; }
+      #roofBtn.off::after { content:"Roof: Transparent"; }
+      #qualBtn::after { content:" texture"; color:#aebdb9; font-size:9px; font-weight:700; }
       #logisticsDashboard { position:fixed; z-index:15; right:16px; top:94px; bottom:18px; display:none; width:min(820px,calc(100vw - 110px)); overflow:auto; padding:14px; border:1px solid var(--line-bright); border-radius:8px; background:rgba(8,19,25,.97); box-shadow:var(--shadow); }
       #logisticsDashboard.show { display:block; }
       #financialsDashboard, #policyDashboard { position:fixed; z-index:15; right:16px; top:94px; bottom:18px; display:none; width:min(980px,calc(100vw - 110px)); overflow:auto; padding:16px; border:1px solid var(--line-bright); border-radius:8px; background:rgba(8,19,25,.98); box-shadow:var(--shadow); }
@@ -108,6 +123,7 @@
       .toggle-grid label { display:flex; align-items:center; gap:4px; }
       .policy-row { display:grid; grid-template-columns:1.45fr repeat(3,.8fr) .52fr repeat(5,.48fr); gap:5px; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); font-size:10px; }
       .policy-row select,.policy-row input[type=number],.work-select { min-width:0; padding:5px; color:#dfe8e5; border:1px solid var(--line); border-radius:3px; background:#10242d; }
+      #emergencyToggleBtn { display:none; }
       #emergencyBar { position:fixed; z-index:17; left:50%; top:58px; transform:translateX(-50%); display:flex; gap:4px; padding:5px; border:1px solid rgba(219,108,99,.28); border-radius:6px; background:rgba(19,24,27,.92); }
       .emergency-btn { padding:6px 9px; border:1px solid rgba(232,126,116,.32); border-radius:4px; color:#ffd8d3; background:#692d2d; cursor:pointer; font-size:9px; font-weight:900; text-transform:uppercase; }
       .emergency-btn.cancel { color:#cbd5d2; background:#29363b; }
@@ -119,9 +135,13 @@
       .log-ledger { margin-top:10px; color:#aebcbd; font:10px/1.55 ui-monospace,monospace; }
       #intelligenceDashboard { position:fixed; z-index:15; right:16px; top:94px; bottom:18px; display:none; width:min(760px,calc(100vw - 110px)); overflow:hidden; border:1px solid var(--line-bright); border-radius:8px; background:rgba(8,19,25,.98); box-shadow:var(--shadow); }
       #intelligenceDashboard.show { display:grid; grid-template-columns:250px 1fr; }
-      .intel-roster { min-width:0; padding:13px; overflow:auto; border-right:1px solid var(--line); }
-      .intel-roster-head { position:sticky; top:-13px; z-index:2; margin:-13px -13px 9px; padding:13px; background:#0a1a22; }
+      .intel-roster { min-width:0; min-height:0; display:flex; flex-direction:column; padding:13px; overflow:hidden; border-right:1px solid var(--line); }
+      .intel-roster-head { flex:0 0 auto; z-index:2; margin:-13px -13px 9px; padding:13px; background:#0a1a22; }
+      .intel-title-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+      .intel-title-row .log-title { min-width:0; font-size:11px; }
+      .intel-title-row .tiny-btn { flex:0 0 auto; padding:4px 7px; font-size:9px; }
       .intel-roster-head input { width:100%; margin-top:8px; padding:7px 9px; border:1px solid var(--line); border-radius:4px; color:#e7eeea; background:#10242d; }
+      #intelRoster { min-height:0; overflow:auto; }
       .intel-person { width:100%; margin-bottom:4px; padding:8px; border:1px solid transparent; border-radius:4px; color:#dbe5e1; background:#10222b; cursor:pointer; text-align:left; }
       .intel-person:hover,.intel-person.on { border-color:#aabd71; background:#18303a; }
       .intel-person strong,.intel-person small { display:block; } .intel-person small { margin-top:2px; color:var(--muted); }
@@ -142,8 +162,19 @@
 
       /* Contextual world overlays ------------------------------------------- */
       #inspector { position:fixed; z-index:13; left:230px; top:112px; width:290px; display:none; padding:16px; border:1px solid var(--line-bright); border-radius:7px; background:rgba(9,21,27,.94); box-shadow:var(--shadow); pointer-events:none; } #inspector.show { display:block; }
+      .inspector-head { display:flex; align-items:center; justify-content:space-between; gap:8px; } #inspectClose { padding:4px 7px; border:1px solid var(--line); border-radius:4px; color:#cbd6d1; background:rgba(255,255,255,.04); font-size:9px; font-weight:800; cursor:pointer; pointer-events:auto; }
       .inspector-kicker { color:#b2c879; font-size:10px; font-weight:900; letter-spacing:.12em; text-transform:uppercase; } #inspectName { margin:4px 0 3px; font-size:18px; font-weight:900; } #inspectState { color:var(--muted); } #inspectStats { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:13px; } .inspect-stat { padding:8px; border:1px solid var(--line); border-radius:4px; background:rgba(255,255,255,.035); } .inspect-stat small { display:block; color:var(--muted); font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; } .inspect-stat strong { display:block; margin-top:2px; font-size:12px; }
       #inspectProfile { margin-top:10px; color:#aebcbd; font:10px/1.55 ui-monospace,monospace; white-space:pre-wrap; }
+      .resident-care { margin-top:10px; min-width:0; color:#dce6e1; }
+      .resident-care-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; min-width:0; }
+      .resident-care-item { min-width:0; padding:6px 7px; border:1px solid var(--line); border-radius:4px; background:rgba(255,255,255,.035); }
+      .resident-care-item small { display:block; color:var(--muted); font-size:8px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; }
+      .resident-care-item strong { display:block; margin-top:2px; overflow-wrap:anywhere; font-size:10px; line-height:1.35; }
+      .resident-care-warnings { display:grid; gap:4px; margin:6px 0 0; padding:0; list-style:none; }
+      .resident-care-warnings li { min-width:0; padding:5px 7px; border-left:2px solid #dda454; color:#f0d5a4; background:rgba(143,90,27,.14); overflow-wrap:anywhere; font-size:9px; line-height:1.4; }
+      .resident-care-actions { display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }
+      .resident-care-actions button { max-width:100%; min-height:28px; padding:4px 7px; border:1px solid rgba(184,203,115,.35); border-radius:4px; color:#e1eabf; background:#1b3029; cursor:pointer; pointer-events:auto; overflow-wrap:anywhere; font-size:9px; font-weight:800; }
+      .resident-care-actions button:hover,.resident-care-actions button:focus-visible { border-color:#b8cc78; background:#31452f; }
       .room-label { position:absolute; transform:translate(-50%,-50%); padding:5px 9px; border:1px solid rgba(211,225,209,.26); border-radius:3px; color:#e5ebdf; background:rgba(10,22,27,.78); box-shadow:0 2px 9px rgba(0,0,0,.35); font-size:10px; font-weight:900; letter-spacing:.08em; text-shadow:0 1px 2px #000; text-transform:uppercase; white-space:nowrap; }
       .warn-mark { position:absolute; transform:translate(-50%,-50%); display:grid; place-items:center; width:24px; height:24px; border:2px solid #ffe7ac; border-radius:50%; color:#302202; background:#e0b94b; box-shadow:0 3px 12px rgba(0,0,0,.45); font-weight:900; pointer-events:auto; cursor:pointer; }
       .build-preview { position:absolute; border:1px solid rgba(105,190,255,.92); background:rgba(55,137,225,.28); box-shadow:0 0 13px rgba(70,156,255,.42); pointer-events:none; } .build-preview.invalid { border-color:rgba(255,112,105,.95); background:rgba(210,48,48,.30); box-shadow:0 0 13px rgba(255,70,70,.42); } .build-preview.persistent { background:rgba(55,137,225,.20); border-style:dashed; } .build-preview-arrow { position:absolute; height:3px; transform-origin:0 50%; background:#b9ddff; box-shadow:0 0 8px rgba(75,166,255,.7); pointer-events:none; } .build-preview-arrow::after { content:""; position:absolute; right:-1px; top:-5px; border-top:6px solid transparent; border-bottom:6px solid transparent; border-left:9px solid #b9ddff; }
@@ -152,6 +183,28 @@
       #problemButton.has-critical { color:#fff0e8; border-color:#d66d55; background:#55291f; }
       #problemsPanel { position:fixed; z-index:45; display:none; top:126px; right:18px; width:min(440px,calc(100vw - 36px)); max-height:calc(100vh - 160px); overflow:auto; padding:14px; color:#e7eeea; background:rgba(8,20,27,.98); border:1px solid rgba(173,194,189,.2); border-radius:8px; box-shadow:0 18px 60px #000a; }
       #problemsPanel.show { display:block; }
+      #guideBtn { position:fixed; z-index:36; left:88px; top:12px; display:flex; align-items:center; gap:8px; min-height:38px; padding:0 12px; border:1px solid rgba(191,211,142,.26); border-radius:5px; color:#e9f0df; background:rgba(17,34,39,.94); cursor:pointer; font-size:11px; font-weight:850; }
+      #guideBtn:hover,#guideBtn[aria-expanded="true"] { border-color:#b8cc78; background:#31452f; }
+      #guidePanel { position:fixed; z-index:48; left:86px; top:62px; bottom:196px; width:min(465px,calc(100vw - 104px)); display:none; overflow:auto; padding:16px; color:#e6eeea; border:1px solid var(--line-bright); border-radius:8px; background:rgba(8,20,27,.98); box-shadow:0 18px 60px #000a; }
+      #guidePanel.show { display:block; }
+      .guide-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:12px; }
+      .guide-head h2 { margin:0; color:#edf2e8; font-size:17px; }
+      .guide-head p { margin:4px 0 0; color:#a7b5b1; font-size:11px; }
+      #guideClose { width:30px; height:30px; flex:0 0 auto; border:1px solid var(--line); border-radius:4px; color:#dbe5df; background:#152831; cursor:pointer; font-size:17px; }
+      .guide-steps { margin:0; padding:0; list-style:none; counter-reset:guide; }
+      .guide-step { position:relative; margin:0; padding:12px 0 12px 36px; border-top:1px solid var(--line); counter-increment:guide; }
+      .guide-step::before { content:counter(guide); position:absolute; top:12px; left:0; display:grid; place-items:center; width:24px; height:24px; border:1px solid rgba(184,204,120,.42); border-radius:50%; color:#d8e49e; background:rgba(132,154,83,.12); font-size:11px; font-weight:900; }
+      .guide-step strong { display:block; color:#e7eddf; font-size:12px; }
+      .guide-step p { margin:3px 0 0; color:#aab9b6; font-size:11px; line-height:1.45; }
+      .guide-links { display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }
+      .guide-links button { padding:5px 7px; border:1px solid rgba(173,194,202,.2); border-radius:4px; color:#dce7cf; background:#192c32; cursor:pointer; font-size:10px; font-weight:800; }
+      .guide-links button:hover { border-color:#aabd71; background:#334834; }
+      #guideStatus { margin:12px 0 2px; padding:10px; border:1px solid var(--line); border-radius:5px; background:rgba(255,255,255,.025); }
+      #guideStatus h3 { margin:0 0 7px; color:#d6e49c; font-size:10px; letter-spacing:.08em; text-transform:uppercase; }
+      .guide-status-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; }
+      .guide-status-row { display:flex; justify-content:space-between; gap:7px; padding:5px 7px; border-radius:3px; background:#11242c; color:#aebcbd; font-size:10px; }
+      .guide-status-row strong { color:#e1e9df; text-align:right; }
+      .guide-status-row strong.missing { color:#e18d7f; }
       .problem-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; font-size:16px; font-weight:900; }
       .problem-row { margin:7px 0; padding:9px 10px; background:#11242c; border-left:3px solid #81935a; border-radius:4px; }
       .problem-row.critical { border-left-color:#d66d55; } .problem-row.warning { border-left-color:#d2a84f; }
@@ -163,9 +216,10 @@
       .queue-row header { display:flex; justify-content:space-between; gap:8px; } .queue-row p { margin:5px 0; color:#aab8b6; font-size:11px; }
       #notice { position:fixed; z-index:90; left:50%; bottom:26px; display:none; transform:translateX(-50%); max-width:min(560px,90vw); padding:10px 14px; color:#f5f7f2; background:rgba(39,25,20,.96); border:1px solid #b47b55; border-radius:6px; box-shadow:0 10px 34px #0009; }
       #notice.show { display:block; }
-      #saveStatus { position:fixed; z-index:35; right:18px; bottom:18px; color:#91a19f; font-size:11px; }
-      #saveControls { position:fixed; z-index:35; right:18px; bottom:38px; display:flex; gap:5px; }
+      #saveStatus { position:fixed; z-index:35; right:18px; bottom:184px; color:#91a19f; font-size:11px; }
+      #saveControls { position:fixed; z-index:35; right:18px; bottom:194px; display:flex; gap:5px; }
       #saveControls button { padding:5px 8px; color:#cad5d0; background:#14252c; border:1px solid #33484d; border-radius:4px; cursor:pointer; font-size:10px; }
+      #intelligenceDashboard.show ~ #saveStatus, #intelligenceDashboard.show ~ #saveControls { display:none; }
       #startMenu { position:fixed; z-index:120; inset:0; display:none; place-items:center; background:rgba(3,9,12,.82); }
       #startMenu.show { display:grid; }
       .start-card { width:min(520px,calc(100vw - 32px)); padding:24px; color:#eaf0ea; background:#0c1c24; border:1px solid #53666a; border-radius:10px; box-shadow:0 24px 80px #000c; }
@@ -173,7 +227,33 @@
       .start-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; }
       .start-actions button { padding:9px 12px; color:#eef3ec; background:#435b36; border:1px solid #72845d; border-radius:5px; cursor:pointer; }
       @media (max-width:1050px) { #sideRail { width:70px; } #sideRail:hover, #sideRail:focus-within { width:250px; } #status { width:480px; max-width:calc(100vw - 320px); } #build { grid-template-columns:184px minmax(0,1fr); } #itemDetail { display:none; } #catalogMain { grid-template-columns:1fr; } }
-      @media (max-width:720px) { #sideRail { display:none; } #status { left:10px; transform:none; width:calc(100vw - 185px); grid-template-columns:repeat(3,1fr); padding:4px; } .status-card,#cap { padding:7px; } .status-card::before,#cap::before { display:none; } .status-value { font-size:14px; } #clockbox { width:168px; } #clock { gap:7px; padding:0 9px; } .clock-day { font-size:12px; } .clock-time { font-size:17px; } .clock-sun { display:none; } #speeds { gap:3px; padding:6px; } #regimeBtn { padding:0 9px; font-size:10px; } #build { height:166px; grid-template-columns:112px 1fr; } #catalogSide { padding:11px 7px; } .console-eyebrow { margin-left:7px; font-size:10px; } .build-cat { padding:5px; font-size:9px; } #catalogList { padding:10px; } #palette { height:123px; } .build-item { flex-basis:102px; height:116px; } .item-swatch { height:58px; } #inspector { left:10px; top:105px; } }
+      @media (max-width:720px) { #sideRail { display:block; width:calc(100vw - 16px); left:8px; top:104px; } #sideRail:hover, #sideRail:focus-within { width:calc(100vw - 16px); } #brand { display:none; } #modeNav,#sideRail:hover #modeNav,#sideRail:focus-within #modeNav { width:100%; display:flex; gap:3px; padding:4px; overflow-x:auto; border:1px solid var(--line); border-radius:5px; background:rgba(8,19,25,.96); } .mode-btn,#sideRail:hover .mode-btn,#sideRail:focus-within .mode-btn { width:auto; min-width:47px; min-height:38px; flex:0 0 auto; justify-content:flex-start; padding:0 8px; border:1px solid transparent; font-size:9px; } .mode-label,#sideRail:hover .mode-label,#sideRail:focus-within .mode-label { max-width:92px; margin-left:5px; opacity:1; font-size:9px; } #guideBtn { left:10px; top:151px; min-height:34px; } #utility { left:8px; top:192px; } #guidePanel { left:8px; right:8px; top:192px; bottom:calc(clamp(190px, 30vh, 244px) + 10px); width:auto; } #status { left:10px; transform:none; width:calc(100vw - 185px); max-width:none; grid-template-columns:repeat(3,1fr); padding:4px; } .status-card,#cap { padding:7px; } .status-card::before,#cap::before { display:none; } .status-value { font-size:14px; } #clockbox { width:168px; } #clock { gap:7px; padding:0 9px; } .clock-day { font-size:12px; } .clock-time { font-size:17px; } .clock-sun { display:none; } #speeds { gap:3px; padding:6px; } #regimeBtn { padding:0 9px; font-size:10px; } #build { height:clamp(190px, 30vh, 244px); grid-template-columns:108px minmax(0,1fr); } #catalogSide { padding:9px 6px; } #cats { grid-template-columns:1fr; } .console-eyebrow { margin-left:7px; font-size:10px; } .build-cat { min-height:29px; padding:5px; font-size:9px; } #catalogList { padding:9px 8px; } #build-head { flex-wrap:wrap; gap:5px 7px; } #toolHint { display:none; } #catalogSearch { order:5; width:100%; margin-left:0; } #catalogResults { margin-left:auto; } #palette { height:130px; } .build-item { flex-basis:102px; height:116px; } .item-swatch { height:58px; } #saveControls { right:8px; bottom:calc(clamp(190px, 30vh, 244px) + 28px); } #saveStatus { right:8px; bottom:calc(clamp(190px, 30vh, 244px) + 8px); } #inspector { left:10px; top:105px; width:min(290px,calc(100vw - 20px)); } }
+      @media (max-width:1050px) { #itemDetail { position:fixed; z-index:16; top:auto; right:12px; bottom:234px; width:min(300px,calc(100vw - 24px)); max-height:min(31vh,220px); overflow:auto; padding:12px; border:1px solid var(--line-bright); border-radius:7px; background:rgba(9,21,27,.97); box-shadow:var(--shadow); } #itemDetail.has-selection { display:block; } }
+      @media (max-width:720px) {
+        #itemDetail.has-selection { left:8px; right:8px; top:236px; bottom:auto; width:auto; max-height:calc(100vh - clamp(190px, 30vh, 244px) - 252px); }
+        #inspector { z-index:14; left:8px; right:8px; top:236px; width:auto; max-height:calc(100vh - clamp(190px, 30vh, 244px) - 252px); overflow:auto; padding:12px; pointer-events:auto; }
+        #problemButton { top:156px; right:8px; }
+        #clock { width:168px; height:38px; min-height:38px; margin-left:0; grid-template-columns:1fr auto; gap:5px; padding:0 7px; }
+        #speeds { gap:2px; padding:2px 5px; }
+        .spd { height:22px; padding:0; font-size:8px; }
+        #regimeBtn { min-height:28px; gap:4px; padding:0 6px; font-size:8px; }
+        #regimeBtn::before { font-size:13px; }
+        #status { grid-template-columns:repeat(3,minmax(0,1fr)); max-height:80px; }
+        .status-card,#cap { min-height:40px; gap:0; padding:2px; }
+        .status-label { font-size:7px; letter-spacing:0; }
+        .status-value { font-size:clamp(9px, 2.8vw, 11px); letter-spacing:0; }
+        #emergencyToggleBtn { position:fixed; z-index:19; top:192px; right:8px; display:flex; align-items:center; gap:7px; max-width:calc(100vw - 150px); min-height:31px; padding:4px 8px; border:1px solid rgba(219,108,99,.36); border-radius:5px; color:#ffd8d3; background:rgba(19,24,27,.96); cursor:pointer; font-size:9px; font-weight:900; text-transform:uppercase; }
+        #emergencyCurrentStatus { overflow:hidden; color:#ffe9b8; font-size:8px; font-weight:750; text-overflow:ellipsis; white-space:nowrap; }
+        #emergencyBar { display:none; left:auto; right:8px; top:230px; transform:none; width:min(340px,calc(100vw - 16px)); padding:7px; }
+        #emergencyBar.open { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; }
+        #emergencyBar .emergency-btn { min-width:0; padding:7px 4px; font-size:8px; }
+        #intelligenceDashboard { left:8px; right:8px; top:232px; bottom:8px; width:auto; }
+        #intelligenceDashboard.show { grid-template-columns:minmax(0, 1fr); grid-template-rows:minmax(180px, 40%) minmax(0, 1fr); }
+        .intel-roster { min-height:0; border-right:0; border-bottom:1px solid var(--line); }
+        .intel-profile { min-height:0; padding:12px; }
+      }
+      @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior:auto !important; transition-duration:.01ms !important; animation-duration:.01ms !important; } }
+      @media (max-width:340px) { .status-label { font-size:6px; letter-spacing:-.04em; } }
     </style>
   </head>
   <body>
@@ -194,25 +274,53 @@
         <button class="mode-btn" data-mode="admin"><span class="mode-icon">&#9881;</span><span class="mode-label">Admin</span></button>
       </nav>
     </aside>
+    <button id="guideBtn" type="button" aria-controls="guidePanel" aria-expanded="false"><span aria-hidden="true">?</span> Getting started</button>
+    <aside id="guidePanel" aria-label="Getting started guide">
+      <header class="guide-head"><div><h2>Build a working intake block</h2><p>Follow these steps to connect construction, intake, housing, meals, and staffing. With no tool selected, click a room or fixture to inspect its status and requirements.</p></div><button id="guideClose" type="button" aria-label="Close guide">&times;</button></header>
+      <ol class="guide-steps">
+        <li class="guide-step"><strong>Pause while laying out the prison.</strong><p>Keep the clock paused during setup so arrivals and needs do not advance before the basics are ready.</p></li>
+        <li class="guide-step"><strong>Hire a Workman first.</strong><p>Workmen carry materials and complete construction orders. Staff fees are charged when hired and wages continue each hour.</p><div class="guide-links"><button type="button" data-open-guide-catalog="staff|staff:people">Open staff</button></div></li>
+        <li class="guide-step"><strong>Make a road-connected Delivery Yard.</strong><p>Mark at least 6&times;6 outdoor tiles, add a road gate on its edge, then place a Loading Pallet inside. The room stays invalid until all three are in place.</p><div class="guide-links"><button type="button" data-open-guide-catalog="logistics|rooms:logistics">Delivery rooms</button><button type="button" data-open-guide-catalog="logistics|objects:logistics">Pallets and intake fixtures</button><button type="button" data-open-guide-catalog="build|objects:doors">Doors and gates</button></div></li>
+        <li class="guide-step"><strong>Set up Reception for arriving prisoners.</strong><p>Mark a Reception room with a Search Table, Uniform Rack, and at least one seat or bench. Place those fixtures inside the room.</p><div class="guide-links"><button type="button" data-open-guide-catalog="rooms|rooms:staff">Staff rooms</button><button type="button" data-open-guide-catalog="logistics|objects:logistics">Search and uniform fixtures</button><button type="button" data-open-guide-catalog="objects|objects:seating">Seating</button></div></li>
+        <li class="guide-step"><strong>Build secure housing.</strong><p>Enclose each Cell or Dormitory, put a Jail Door in its boundary, and place a Bed and Toilet inside. Use the room tool to designate the finished space.</p><div class="guide-links"><button type="button" data-open-guide-catalog="build|build:walls">Walls</button><button type="button" data-open-guide-catalog="build|build:floors">Floors</button><button type="button" data-open-guide-catalog="rooms|rooms:prisoner">Prisoner rooms</button><button type="button" data-open-guide-catalog="objects|objects:cells">Beds and toilets</button><button type="button" data-open-guide-catalog="build|objects:doors">Jail doors</button></div></li>
+        <li class="guide-step"><strong>Prepare meals and cover the prison.</strong><p>Kitchen needs a Cooker, Freezer, and Sink. Canteen needs a Table and Bench; add a Serving Table for meal service. Hire a Cook and Guards for daily operations.</p><div class="guide-links"><button type="button" data-open-guide-catalog="rooms|rooms:staff">Kitchen</button><button type="button" data-open-guide-catalog="rooms|rooms:prisoner">Canteen</button><button type="button" data-open-guide-catalog="objects|objects:dining">Kitchen and dining fixtures</button><button type="button" data-open-guide-catalog="staff|staff:people">Staff</button><button type="button" data-open-guide-dashboard="logistics|work">Work assignments</button><button type="button" data-open-guide-dashboard="logistics|deployment">Guard deployment</button><button type="button" data-open-guide-dashboard="policy">Policy</button></div></li>
+        <li class="guide-step"><strong>Plan guard patrols.</strong><p>Draw a route across tiles, then assign an available guard to the beat. Blue and purple routes can cross without merging.</p><div class="guide-links"><button type="button" data-open-guide-catalog="staff|security:patrol">Patrol tools</button><button type="button" data-open-guide-catalog="staff|staff:deploy">Assign guards</button></div></li>
+        <li class="guide-step"><strong>Check room warnings, then resume.</strong><p>Open Problems to find missing room requirements or blocked construction. Once delivery, reception, housing, meals, and staff are ready, unpause the clock.</p></li>
+      </ol>
+      <section id="guideStatus" aria-label="Live prison setup status" aria-live="polite">
+        <h3>Setup snapshot</h3>
+        <div class="guide-status-grid">
+          <div class="guide-status-row"><span>Workmen</span><strong data-guide-count="workmen">Waiting for update</strong></div>
+          <div class="guide-status-row"><span>Delivery yards</span><strong data-guide-count="delivery">Waiting for update</strong></div>
+          <div class="guide-status-row"><span>Reception</span><strong data-guide-count="reception">Waiting for update</strong></div>
+          <div class="guide-status-row"><span>Bed capacity</span><strong data-guide-count="beds">Waiting for update</strong></div>
+          <div class="guide-status-row"><span>Kitchen</span><strong data-guide-count="kitchen">Waiting for update</strong></div>
+          <div class="guide-status-row"><span>Canteen</span><strong data-guide-count="canteen">Waiting for update</strong></div>
+          <div class="guide-status-row"><span>Cooks</span><strong data-guide-count="cooks">Waiting for update</strong></div>
+          <div class="guide-status-row"><span>Guards</span><strong data-guide-count="guards">Waiting for update</strong></div>
+        </div>
+      </section>
+    </aside>
 
     <section id="status"><div id="cap"><span><span class="status-label">Population</span><span class="status-value">0 / 0</span></span></div><div class="status-card"><span><span class="status-label">Cash</span><span id="cash" class="status-value">$20,000</span></span></div><div class="status-card"><span><span class="status-label">Net / hour</span><span id="netHourly" class="status-value">$0</span></span></div><div class="status-card"><span><span class="status-label">Escaped</span><span id="escaped" class="status-value">0</span></span></div><div class="status-card"><span><span class="status-label">Recaptured</span><span id="caught" class="status-value">0</span></span></div></section>
     <aside id="clockbox"><div id="clock">08:00</div><div id="speeds"></div><button id="regimeBtn">Regime: Free time</button></aside>
     <button id="problemButton" type="button" aria-expanded="false">Problems <span id="problemCount">0</span></button>
     <aside id="problemsPanel" aria-label="Problems and construction queue"></aside>
     <div id="regimePanel"></div>
-    <div id="emergencyBar"><button class="emergency-btn" data-emergency="alarm">Alarm</button><button class="emergency-btn" data-emergency="lockdown">Full Lockdown</button><button class="emergency-btn" data-emergency="shakedown">Full Shakedown</button><button class="emergency-btn" data-emergency="armed-response">Armed Response</button><button class="emergency-btn cancel" data-emergency="none">Cancel</button></div>
-    <aside id="inspector"><div class="inspector-kicker">Selected resident</div><div id="inspectName">No selection</div><div id="inspectState">Click a person to inspect</div><div id="inspectStats"></div><div id="inspectProfile"></div></aside>
+    <button id="emergencyToggleBtn" type="button" aria-controls="emergencyBar" aria-expanded="false"><span>Emergency</span><span id="emergencyCurrentStatus">No active response</span></button>
+    <div id="emergencyBar" role="group" aria-label="Emergency response commands"><button class="emergency-btn" data-emergency="alarm">Alarm</button><button class="emergency-btn" data-emergency="lockdown">Full Lockdown</button><button class="emergency-btn" data-emergency="shakedown">Full Shakedown</button><button class="emergency-btn" data-emergency="armed-response">Armed Response</button><button class="emergency-btn cancel" data-emergency="none">Cancel</button></div>
+    <aside id="inspector"><header class="inspector-head"><div class="inspector-kicker">Selected resident</div><button id="inspectClose" type="button" aria-label="Close resident details">Close</button></header><div id="inspectName">No selection</div><div id="inspectState">Click a person to inspect</div><div id="inspectStats"></div><div id="inspectCare"></div><div id="inspectProfile"></div></aside>
     <div id="tip"></div>
 
     <section id="build" aria-label="Construction catalog">
       <aside id="catalogSide"><div class="console-eyebrow">Categories</div><nav id="cats" aria-label="Build categories"></nav></aside>
-      <div id="catalogMain"><div id="catalogList"><div id="build-head"><span id="catalogIcon">&#9874;</span><span id="toolName">Floors</span><span id="toolHint">Choose a construction material</span><input id="catalogSearch" type="search" aria-label="Search every object, room, and staff type" placeholder="Search all facilities"></div><div id="palette"></div></div><aside id="itemDetail"><div id="detailType">Construction</div><div id="detailName">Choose an item</div><p id="detailCopy">Select an item from the catalog to enter placement mode.</p><div id="detailCost"><span>Build cost</span><strong>Ready</strong></div></aside></div>
+      <div id="catalogMain"><div id="catalogList"><div id="build-head"><span id="catalogIcon" aria-hidden="true">&#9874;</span><span id="toolName">Floors</span><span id="toolHint">Choose a construction material</span><span id="catalogResults" role="status" aria-live="polite"></span><span class="catalog-help">R rotate · Esc clear</span><input id="catalogSearch" type="search" aria-label="Search all building materials, objects, rooms, people, and tools" placeholder="Search everything"><span id="orientationStatus" class="sr-only" aria-live="polite">Direction 1 of 4</span></div><div id="palette" aria-label="Catalog items"></div></div><aside id="itemDetail" aria-live="polite"><div id="detailType">Construction</div><div id="detailName">Choose an item</div><p id="detailCopy">Select an item from the catalog to enter placement mode.</p><div id="detailCost"><span>Placement</span><strong>Select an item to see its controls.</strong></div></aside></div>
     </section>
-    <div id="utility" aria-hidden="true"><button id="qualBtn"></button><button id="roofBtn"></button></div>
+    <div id="utility" role="toolbar" aria-label="View controls"><button id="qualBtn" type="button" aria-label="Texture quality: High (4K)" title="Texture quality: High (4K)">HQ</button><button id="roofBtn" type="button" aria-label="Roof: Solid. Click to make transparent." aria-pressed="false" title="Roof: Solid">Roof: Solid</button></div>
     <aside id="logisticsDashboard" aria-label="Logistics dashboard"></aside>
     <aside id="financialsDashboard" aria-label="Financials dashboard"></aside>
     <aside id="policyDashboard" aria-label="Policy dashboard"></aside>
-    <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="log-title">Prisoner intelligence</div><input id="intelSearch" aria-label="Search inmates" placeholder="Search official records or known cases"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and evidence-backed assessments are visible here.</div></section></aside>
+    <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="intel-title-row"><div class="log-title">Prisoner intelligence</div><button type="button" class="tiny-btn" data-close-dashboard aria-label="Close intelligence">Close</button></div><input id="intelSearch" aria-label="Search inmates" placeholder="Search official records or known cases"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and evidence-backed assessments are visible here.</div></section></aside>
     <div id="notice" role="status" aria-live="polite"></div><div id="saveStatus" aria-live="polite">Not saved</div>
     <div id="saveControls"><button id="saveNowBtn" type="button">Save now</button><button id="exportSaveBtn" type="button">Export</button><button id="importSaveBtn" type="button">Import</button><button id="newGameBtn" type="button">New game</button><input id="importSaveFile" type="file" accept="application/json" hidden></div>
     <div id="startMenu"><div class="start-card"><h1>Fresh v6 prison required</h1><p>This release rebuilds construction, logistics, intake, and persistence. Version-5 saves are intentionally not migrated. You can download the old save before starting fresh.</p><div class="start-actions"><button id="freshStartBtn" type="button">Start fresh</button><button id="downloadOldBtn" type="button">Download old save</button></div></div></div>

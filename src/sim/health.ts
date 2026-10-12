@@ -2,6 +2,8 @@ import { POSE_LIE_FLOOR, POSE_STAND, type Agent } from "./agent.ts";
 import { Obj, RoomType } from "./objects.ts";
 import type { ItemSystem } from "./itemSystem.ts";
 import type { World } from "./world.ts";
+import { passable, roleAllowed } from "./nav.ts";
+import { followPath, pathAdjacent } from "./move.ts";
 
 export type BodyRegion = "head" | "chest" | "abdomen" | "left-arm" | "right-arm" |
   "left-hand" | "right-hand" | "left-leg" | "right-leg" | "left-foot" | "right-foot";
@@ -79,6 +81,7 @@ export interface TreatmentJob {
   patientId: number;
   priority: number;
   claimedBy: number;
+  transportGuardId?: number;
   state: "waiting" | "transported" | "treating" | "stable";
 }
 
@@ -93,6 +96,7 @@ export class HealthSystem {
   private nextTreatmentId = 1;
   private lastHearseDay = -1;
   private rngState = 0x9127a33d;
+  private readonly doctorPathRetry = new Map<number, number>();
 
   ensure(agent: Agent): HealthState {
     let state = this.states.get(agent.id);
@@ -127,8 +131,19 @@ export class HealthSystem {
     const h = this.ensure(patient); if (!h.alive || bed < 0) return false;
     h.admitted = true; h.treatmentBed = bed; patient.path = null; patient.pose = POSE_LIE_FLOOR; patient.state = "inTreatment";
     const job = this.treatmentJobs.find((row) => row.patientId === patient.id && row.state === "waiting");
-    if (job) job.state = "transported";
+    if (job) { job.state = "transported"; job.transportGuardId = undefined; }
     return true;
+  }
+
+  setTransportGuard(patientId: number, guardId: number): void {
+    const job = this.treatmentJobs.find((row) => row.patientId === patientId && row.state === "waiting");
+    if (job) job.transportGuardId = guardId;
+  }
+
+  clearTransportGuard(patientId: number, guardId?: number): void {
+    const job = this.treatmentJobs.find((row) => row.patientId === patientId && row.state === "waiting");
+    if (!job || (guardId !== undefined && job.transportGuardId !== guardId)) return;
+    job.transportGuardId = undefined;
   }
 
   effectiveMobility(agentId: number): number { return this.states.get(agentId)?.mobility ?? 1; }
@@ -186,6 +201,38 @@ export class HealthSystem {
       else if (h.consciousness < .12) { agent.pose = POSE_LIE_FLOOR; agent.path = null; agent.state = "incapacitated"; }
       this.recompute(h);
     }
+    for (const agent of agents) {
+      const h = this.states.get(agent.id);
+      if (!h?.admitted) continue;
+      const bed = h.treatmentBed;
+      const roomId = bed >= 0 && bed < world.roomId.length ? world.roomId[bed] : -1;
+      const room = roomId >= 0 ? world.rooms.get(roomId) : undefined;
+      if (bed >= 0 && world.objKind[bed] === Obj.MedicalBed && room?.valid && room.type === RoomType.Infirmary) continue;
+      h.admitted = false; h.treatmentBed = -1;
+      agent.state = h.consciousness < .12 ? "incapacitated" : "idle";
+      agent.pose = agent.state === "incapacitated" ? POSE_LIE_FLOOR : POSE_STAND;
+      agent.path = null;
+      const job = this.treatmentJobs.find((row) => row.patientId === agent.id && row.state !== "stable");
+      if (job) { job.state = "waiting"; job.claimedBy = -1; job.transportGuardId = undefined; }
+    }
+    for (const job of this.treatmentJobs) {
+      if (job.claimedBy >= 0) {
+        const doctor = agents.find((agent) => agent.id === job.claimedBy);
+        if (!doctor || this.states.get(doctor.id)?.alive === false) job.claimedBy = -1;
+      }
+      if (job.state !== "waiting" || job.transportGuardId === undefined) continue;
+      const guard = agents.find((agent) => agent.id === job.transportGuardId);
+      const guardHealth = guard && this.states.get(guard.id);
+      if (guard && guardHealth?.alive !== false && ["toCasualty", "movingCasualty", "casualtyWaiting"].includes(guard.state)) continue;
+      const patient = agents.find((agent) => agent.id === job.patientId);
+      if (patient?.state === "beingTransported") {
+        const state = this.states.get(patient.id);
+        patient.state = state && state.consciousness < .12 ? "incapacitated" : "idle";
+        patient.pose = patient.state === "incapacitated" ? POSE_LIE_FLOOR : POSE_STAND;
+        patient.path = null;
+      }
+      job.transportGuardId = undefined;
+    }
     for (const body of this.bodies.values()) {
       if (body.removed) continue;
       const loot = items.ensureContainer({ id: `body:${body.agentId}:loot`, name: `Body ${body.agentId}`, x: body.x, z: body.z,
@@ -221,16 +268,38 @@ export class HealthSystem {
     }
     const patient = agents.find((a) => a.id === job!.patientId), h = patient && this.states.get(patient.id);
     if (!patient || !h || !h.alive) { job.state = "stable"; return false; }
-    const bed = this.findFreeMedicalBed(world, agents, patient.id);
+    const bed = h.admitted ? h.treatmentBed : this.findFreeMedicalBed(world, agents, patient.id);
     if (bed < 0) { doctor.state = "doctorWaiting"; return true; }
     if (!h.admitted) { doctor.state = "waitingForPatientTransport"; job.claimedBy = -1; return true; }
-    const dx = patient.x - doctor.x, dz = patient.z - doctor.z;
-    if (Math.hypot(dx, dz) > 1.7) {
-      doctor.x += Math.sign(dx) * Math.min(Math.abs(dx), dt * 2.2);
-      doctor.z += Math.sign(dz) * Math.min(Math.abs(dz), dt * 2.2);
-      doctor.heading = Math.atan2(dz, dx); doctor.state = "toPatient";
+    if (!this.doctorPathRetry.has(doctor.id)) this.doctorPathRetry.set(doctor.id, 0);
+    const retry = this.doctorPathRetry.get(doctor.id) ?? 0;
+    if (retry > 0) {
+      this.doctorPathRetry.set(doctor.id, Math.max(0, retry - dt));
+      doctor.state = "doctorWaiting";
       return true;
     }
+    const patientTile = world.inBounds(Math.floor(patient.x), Math.floor(patient.z))
+      ? world.idx(Math.floor(patient.x), Math.floor(patient.z)) : -1;
+    if (patientTile < 0) { doctor.state = "doctorWaiting"; return true; }
+    if (Math.hypot(patient.x - doctor.x, patient.z - doctor.z) > 1.7) {
+      const routeEndsNearPatient = doctor.path && doctor.path.length > 0 &&
+        Math.abs(doctor.path.at(-1)! % world.size - patientTile % world.size) +
+        Math.abs(((doctor.path.at(-1)! / world.size) | 0) - ((patientTile / world.size) | 0)) <= 1;
+      if (!doctor.path || !routeEndsNearPatient) {
+        doctor.path = null; doctor.pathI = 0;
+        if (!pathAdjacent(doctor, world, patientTile, (tile) => passable(world, tile, true, doctor.accessKeys) &&
+            roleAllowed(world, tile, "doctor"))) {
+          this.warnings.add(`Doctor ${doctor.id} cannot reach patient ${patient.id}; retrying`);
+          this.doctorPathRetry.set(doctor.id, 4);
+          doctor.state = "doctorWaiting";
+          return true;
+        }
+      }
+      doctor.state = "toPatient";
+      if (doctor.path && !followPath(doctor, dt, world, true)) return true;
+      if (Math.hypot(patient.x - doctor.x, patient.z - doctor.z) > 1.7) return true;
+    }
+    doctor.path = null; this.doctorPathRetry.delete(doctor.id);
     doctor.state = "treating"; doctor.pose = POSE_STAND; doctor.amp = .4;
     doctor.timer -= dt;
     if (doctor.timer > 0) return true;

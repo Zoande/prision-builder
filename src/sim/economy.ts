@@ -31,7 +31,7 @@ export class EconomySystem {
   readonly ledger: LedgerEntry[] = [];
   private lastWageHour = -1;
   private lastInterestDay = -1;
-  private processedPrisoners = 0;
+  private livePrisoners = 0;
 
   get performanceMultiplier(): number {
     if (this.cash >= 0) return 1;
@@ -57,7 +57,11 @@ export class EconomySystem {
     return fee === 0 || this.post(time, "hire", -fee, `Hired ${staffName(kind)}`);
   }
 
-  markPrisonerProcessed(): void { this.processedPrisoners++; }
+  /** Compatibility hook for legacy intake callers before the live simulation recounts population. */
+  markPrisonerProcessed(): void { this.livePrisoners++; }
+
+  /** Set the current living prisoner population in custody. Death and escape remove grant eligibility. */
+  setPrisonerCount(count: number): void { this.livePrisoners = Math.max(0, Math.floor(Number.isFinite(count) ? count : 0)); }
 
   tick(worldTime: number, staffCounts: ReadonlyMap<number, number>): void {
     const hourStamp = Math.floor(worldTime / HOUR_SECONDS);
@@ -66,8 +70,8 @@ export class EconomySystem {
       let wages = 0;
       for (const [kind, rate] of WAGES) wages += rate * (staffCounts.get(kind) ?? 0);
       if (wages > 0) this.post(worldTime, "wage", -wages, "Hourly staff payroll", true);
-      if (this.processedPrisoners > 0) {
-        this.post(worldTime, "grant", this.processedPrisoners * 12, "Prisoner housing grant", true);
+      if (this.livePrisoners > 0) {
+        this.post(worldTime, "grant", this.livePrisoners * 12, "Prisoner housing grant", true);
       }
     }
     const day = dayOf(worldTime);
@@ -87,17 +91,19 @@ export class EconomySystem {
 
   netHourly(): number {
     const wages = [...WAGES].reduce((sum, [kind, rate]) => sum + rate * (this.lastStaffCounts.get(kind) ?? 0), 0);
-    return this.processedPrisoners * 12 - wages;
+    return this.livePrisoners * 12 - wages;
   }
 
   private lastStaffCounts = new Map<number, number>();
-  setStaffCounts(counts: ReadonlyMap<number, number>): void { this.lastStaffCounts = new Map(counts); }
+  setStaffCounts(counts: ReadonlyMap<number, number>): void {
+    this.lastStaffCounts = new Map([...counts].map(([kind, count]) => [kind, Math.max(0, Math.floor(Number.isFinite(count) ? count : 0))]));
+  }
 
   saveData() {
     return {
       cash: this.cash, nextLedgerId: this.nextLedgerId, ledger: this.ledger,
       lastWageHour: this.lastWageHour, lastInterestDay: this.lastInterestDay,
-      processedPrisoners: this.processedPrisoners,
+      prisonerCount: this.livePrisoners, processedPrisoners: this.livePrisoners,
     };
   }
 
@@ -108,7 +114,7 @@ export class EconomySystem {
     this.ledger.push(...(data.ledger ?? []));
     this.lastWageHour = data.lastWageHour ?? -1;
     this.lastInterestDay = data.lastInterestDay ?? -1;
-    this.processedPrisoners = data.processedPrisoners ?? 0;
+    this.livePrisoners = data.prisonerCount ?? data.processedPrisoners ?? 0;
   }
 }
 

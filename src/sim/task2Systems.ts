@@ -101,8 +101,11 @@ export class Task2Systems {
     this.health.ensure(agent);
     if (agent.kind === Obj.Prisoner) {
       const carried = [...this.items.itemsIn(`agent:${agent.id}:hands`), ...this.items.itemsIn(`agent:${agent.id}:pockets`), ...this.items.itemsIn(`agent:${agent.id}:worn`)];
-      agent.accessKeys = carried.some((i) => i.defId === "guard-key" || i.defId === "duplicate-guard-key") ? 2 :
-        carried.some((i) => i.defId === "staff-key" || i.defId === "duplicate-staff-key") ? 1 : 0;
+      // Forged duplicate keys are time-limited credentials, so Task 3 owns
+      // their access tier. Task 2 recognizes only unrestricted physical keys;
+      // otherwise a stale copy would restore privileges before expiry checks.
+      agent.accessKeys = carried.some((i) => i.defId === "guard-key") ? 2 :
+        carried.some((i) => i.defId === "staff-key") ? 1 : 0;
       agent.disguise = carried.some((i) => i.defId === "staff-uniform")
         ? Math.min(.9, .25 + (agent.profile?.skills.deception.level ?? 0) * .055) : 0;
     }

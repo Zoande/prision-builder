@@ -42,10 +42,26 @@ export class CombatSystem {
       if (engagement.state !== "active") continue;
       const incident = this.institution.incidents.get(engagement.incidentId);
       if (!incident || incident.state === "unreported") continue;
+      const activeSides = new Set(engagement.participants.filter((p) => !p.surrendered && this.healthAvailable(p.agentId)).map((p) => p.side));
+      if (activeSides.size < 2) continue;
       const d = Math.hypot(agent.x - engagement.x, agent.z - engagement.z);
       if (d < distance) { best = engagement; distance = d; }
     }
     return best;
+  }
+
+  /** The live prisoner a responder should approach, rather than an old fight
+   * midpoint. The optional responder makes several guards converge on the
+   * nearest active threat while excluding surrendered or medically unavailable
+   * participants. */
+  responseTarget(engagement: CombatEngagement, agents: readonly Agent[], responder?: Agent): Agent | null {
+    if (engagement.state !== "active") return null;
+    const prisoners = this.activeParticipants(engagement, agents).filter((row) => row.a.kind === Obj.Prisoner);
+    return prisoners.sort((a, b) => {
+      const da = responder ? Math.hypot(a.a.x - responder.x, a.a.z - responder.z) : Math.hypot(a.a.x - engagement.x, a.a.z - engagement.z);
+      const db = responder ? Math.hypot(b.a.x - responder.x, b.a.z - responder.z) : Math.hypot(b.a.x - engagement.x, b.a.z - engagement.z);
+      return da - db;
+    })[0]?.a ?? null;
   }
 
   start(attacker: Agent, defender: Agent, time: number, plannedDistraction = false): CombatEngagement | null {
@@ -75,10 +91,12 @@ export class CombatSystem {
     const e = this.engagements.get(engagementId); if (!e) return;
     e.state = "contained";
     for (const p of e.participants) {
+      p.surrendered = true;
       const agent = agents.find((a) => a.id === p.agentId);
-      if (agent && this.health.state(agent.id)?.alive !== false) {
-        agent.state = agent.kind === Obj.Prisoner ? "restrained" : "idle";
-        if (agent.kind === Obj.Prisoner) agent.cuffed = true;
+      if (agent && this.isAvailableCombatant(agent)) {
+        agent.path = null;
+        if (agent.kind === Obj.Prisoner) { agent.state = "restrained"; agent.cuffed = true; }
+        else agent.state = "idle";
       }
     }
     const incident = this.institution.incidents.get(e.incidentId); if (incident && incident.state === "unreported") incident.state = "reported";
@@ -89,9 +107,14 @@ export class CombatSystem {
     if (this.scanTimer <= 0) { this.scanTimer = 1.5; this.emotionalScan(agents, time); }
     for (const e of this.engagements.values()) {
       if (e.state !== "active") continue;
-      const active = e.participants.filter((p) => !p.surrendered).map((p) => ({ p, a: agents.find((a) => a.id === p.agentId) })).filter((x): x is { p: CombatParticipant; a: Agent } => !!x.a);
-      const livingSides = new Set(active.filter((x) => this.health.state(x.a.id)?.alive !== false).map((x) => x.p.side));
-      if (livingSides.size < 2 || time - e.lastActionAt > 20) { this.end(e, agents); continue; }
+      this.retireUnavailableParticipants(e, agents);
+      const active = this.activeParticipants(e, agents);
+      if (new Set(active.map((x) => x.p.side)).size < 2 || time - e.lastActionAt > 20) {
+        if (active.some((row) => row.a.kind === Obj.Prisoner)) this.contain(e.id, agents);
+        else this.end(e, agents);
+        continue;
+      }
+      this.updateLocation(e, active);
       for (const actor of active) {
         actor.p.stamina = Math.min(1, (actor.p.stamina ?? 1) + dt * .045);
         if (actor.p.nextAction > time) continue;
@@ -119,7 +142,22 @@ export class CombatSystem {
         e.lastActionAt = time; e.x = (actor.a.x + target.x) / 2; e.z = (actor.a.z + target.z) / 2;
       }
       this.recruitAllies(e, agents);
+      this.retireUnavailableParticipants(e, agents);
+      const remaining = this.activeParticipants(e, agents);
+      if (new Set(remaining.map((row) => row.p.side)).size < 2) {
+        if (remaining.some((row) => row.a.kind === Obj.Prisoner)) this.contain(e.id, agents);
+        else this.end(e, agents);
+        continue;
+      }
+      this.updateLocation(e, remaining);
       this.observe(e, agents, world, time);
+    }
+    // Response state is a transient movement duty, not a permanent staff job.
+    // Clear it in the same tick that its engagement retires so idle guards can
+    // resume their ordinary post, patrol, and intake work.
+    for (const agent of agents) if (agent.state === "respondingFight" && !this.responseFor(agent)) {
+      agent.state = "idle";
+      agent.path = null;
     }
   }
 
@@ -170,8 +208,14 @@ export class CombatSystem {
     if (engagement.state !== "active") return false;
     const incident = this.institution.incidents.get(engagement.incidentId);
     const rule = this.institution.ruleFor(incident?.category ?? "assault-inmate", incident?.itemDefId ?? "");
-    const active = engagement.participants.filter((p) => !p.surrendered).map((p) => ({ p, a: agents.find((a) => a.id === p.agentId) }))
-      .filter((row): row is { p: CombatParticipant; a: Agent } => !!row.a && this.health.ensure(row.a).alive);
+    this.retireUnavailableParticipants(engagement, agents);
+    const active = this.activeParticipants(engagement, agents);
+    if (new Set(active.map((row) => row.p.side)).size < 2) {
+      if (active.some((row) => row.a.kind === Obj.Prisoner)) this.contain(engagement.id, agents);
+      else this.end(engagement, agents);
+      return false;
+    }
+    this.updateLocation(engagement, active);
     const prisoners = active.filter((row) => row.a.kind === Obj.Prisoner);
     if (!prisoners.length) { this.contain(engagement.id, agents); return false; }
     const target = prisoners.sort((a, b) => (a.p.surrendered ? 1 : 0) - (b.p.surrendered ? 1 : 0))[0];
@@ -182,9 +226,9 @@ export class CombatSystem {
       return true;
     }
     const responders = agents.filter((a) => [Obj.Guard, Obj.ArmedGuard, Obj.DogHandler].includes(a.kind as never) &&
-      Math.hypot(a.x - engagement.x, a.z - engagement.z) <= 2.5).length;
+      this.isAvailableCombatant(a) && Math.hypot(a.x - engagement.x, a.z - engagement.z) <= 2.5).length;
     const needed = Math.max(1, Math.ceil(prisoners.filter((p) => !p.p.surrendered).length / 2));
-    if (responders >= needed && forceRank(rule.force) >= forceRank("restraint") && (elapsed < 6 || this.random() < .25)) {
+    if (responders >= needed && forceRank(rule.force) >= forceRank("restraint")) {
       this.contain(engagement.id, agents); return false;
     }
     const lethalThreat = prisoners.some((row) => {
@@ -267,9 +311,54 @@ export class CombatSystem {
   private end(e: CombatEngagement, agents: readonly Agent[]): void {
     e.state = "ended";
     for (const p of e.participants) {
+      p.surrendered = true;
       const a = agents.find((x) => x.id === p.agentId);
-      if (a && this.health.ensure(a).alive && this.health.ensure(a).consciousness > .12) { a.state = "idle"; a.amp = 0; }
+      if (a && this.isAvailableCombatant(a)) {
+        if (["fighting", "surrendered", "respondingFight"].includes(a.state)) a.state = "idle";
+        a.amp = 0;
+      }
     }
+  }
+
+  private healthAvailable(agentId: number): boolean {
+    const state = this.health.state(agentId);
+    return !state || (state.alive && state.consciousness > .15 && !state.admitted);
+  }
+
+  private isAvailableCombatant(agent: Agent): boolean {
+    const state = this.health.state(agent.id);
+    return !agent.cuffed && !["restrained", "cuffed", "inTreatment", "beingTransported", "incapacitated", "knockedOut", "dead", "morgue", "removed"].includes(agent.state) &&
+      (!state || (state.alive && state.consciousness > .15 && !state.admitted));
+  }
+
+  private activeParticipants(engagement: CombatEngagement, agents: readonly Agent[]): Array<{ p: CombatParticipant; a: Agent }> {
+    const rows: Array<{ p: CombatParticipant; a: Agent }> = [];
+    for (const p of engagement.participants) {
+      if (p.surrendered) continue;
+      const agent = agents.find((row) => row.id === p.agentId);
+      if (agent && this.isAvailableCombatant(agent)) rows.push({ p, a: agent });
+    }
+    return rows;
+  }
+
+  private retireUnavailableParticipants(engagement: CombatEngagement, agents: readonly Agent[]): void {
+    for (const participant of engagement.participants) {
+      if (participant.surrendered) continue;
+      const agent = agents.find((row) => row.id === participant.agentId);
+      if (!agent || !this.isAvailableCombatant(agent)) participant.surrendered = true;
+    }
+  }
+
+  private engagementLocation(participants: readonly { a: Agent }[]): { x: number; z: number } {
+    return participants.reduce((location, row) => ({ x: location.x + row.a.x / participants.length,
+      z: location.z + row.a.z / participants.length }), { x: 0, z: 0 });
+  }
+
+  private updateLocation(engagement: CombatEngagement, participants: readonly { a: Agent }[]): void {
+    if (!participants.length) return;
+    const location = this.engagementLocation(participants);
+    engagement.x = location.x;
+    engagement.z = location.z;
   }
 
   private pickRegion(skillLevel: number, bias?: string): BodyRegion {

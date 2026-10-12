@@ -55,7 +55,7 @@ function setup() {
 function saveAndGatehouseChecks(): void {
   assert.equal(SAVE_VERSION, 6);
   for (const version of [1, 2, 3, 4, 5]) assert.equal(isSaveV6({ version, world: {}, agents: {}, task2: {}, task3: {} }), false);
-  assert.equal(isSaveV6({ version: 6, world: {}, agents: {}, task2: {}, task3: {} }), true);
+  assert.equal(isSaveV6({ version: 6, world: {}, agents: {}, task2: {}, task3: {} }), false, "incomplete envelopes must not be imported");
   const { world, task3 } = setup();
   assert.equal(world.placePiece(100, 100, Obj.Gatehouse, 0), false, "Gatehouse must not be placeable away from the road");
   assert.equal(world.placePiece(370, 100, Obj.Gatehouse, 1), false, "Gatehouse orientation is fixed");
@@ -73,8 +73,9 @@ function managementCredentialAndCorruptionChecks(): void {
   const prisoner = inmate(1), guard = staff(2, Obj.Guard), cook = staff(3, Obj.Cook);
   const chief = staff(4, Obj.ChiefOfficer), foreman = staff(5, Obj.Foreman), accountant = staff(6, Obj.Accountant);
   const agents = [prisoner, guard, cook, chief, foreman, accountant];
+  const operations = new EscapeOperationsSystem();
   for (const agent of agents) task2.ensureAgent(agent, 0);
-  task3.tick(.1, 1, world, agents, new PrisonerSocialSystem(), new EscapeOperationsSystem(), []);
+  task3.tick(.1, 1, world, agents, new PrisonerSocialSystem(), operations, []);
   assert.equal(task3.canHire(Obj.ChiefOfficer, agents), false); assert.equal(task3.canHire(Obj.Foreman, agents), false); assert.equal(task3.canHire(Obj.Accountant, agents), false);
   assert.equal(task3.management.assignments.size, 3, "each unique manager should claim one office");
   assert(task3.credentials.carried(guard.id, 1).some((credential) => credential.kind === "staff-id"));
@@ -83,11 +84,41 @@ function managementCredentialAndCorruptionChecks(): void {
   task3.management.activateProcedure("spoon-count", 2, 24);
   assert.equal(task3.staffEfficiency(cook, 3), 1, "compromised cook bypasses count instead of losing throughput");
   assert.equal(task3.mayTakeSpoon(prisoner.id, 3), false, "the beneficiary heeds the cook's warning");
+  const copyKey = task2.items.create("duplicate-staff-key", 1, { ownerId: prisoner.id });
+  task2.items.moveToContainer(copyKey.id, `agent:${prisoner.id}:pockets`, 1, prisoner.id, true);
+  task3.credentials.register(copyKey.id, "staff-key", prisoner.id, true, .6, 1, 2);
+  task3.tick(.1, 2, world, agents, new PrisonerSocialSystem(), operations, []);
+  assert.equal(prisoner.accessKeys, 1, "a valid physical duplicate key grants its credential tier");
+  task3.tick(.1, 3, world, agents, new PrisonerSocialSystem(), operations, []);
+  assert.equal(prisoner.accessKeys, 0, "an expired physical duplicate key must revoke its door tier");
   const saved = JSON.parse(JSON.stringify(task3.saveData()));
   const economy2 = new EconomySystem(), logistics2 = new LogisticsSystem(economy2), task22 = new Task2Systems(world.size, economy2, logistics2), restored = new Task3Systems(task22, economy2, logistics2);
   task22.loadData(JSON.parse(JSON.stringify(task2.saveData())), world); restored.loadData(saved, world);
   assert.equal(restored.staff.profiles.size, task3.staff.profiles.size); assert.equal(restored.credentials.credentials.size, task3.credentials.credentials.size);
   assert.equal(restored.management.procedures.size, 1);
+
+  assert(task3.management.activateProcedure("dual-evidence", 4), "a staffed Chief can start chief procedures");
+  chief.state = "dead";
+  assert.equal(task3.canHire(Obj.ChiefOfficer, agents), true, "dead executives do not block a replacement hire");
+  task3.tick(.1, 5, world, agents, new PrisonerSocialSystem(), operations, []);
+  assert.equal(task3.management.assignments.has(chief.id), false, "dead executives lose their office");
+  assert.equal(task3.management.canActivateProcedure("dual-evidence"), false, "a dead Chief cannot retain procedure authority");
+  assert.equal(task3.management.procedure("dual-evidence", 5), null, "chief procedures end when the last living Chief dies");
+  const replacement = staff(7, Obj.ChiefOfficer);
+  agents.push(replacement);
+  task3.tick(.1, 6, world, agents, new PrisonerSocialSystem(), operations, []);
+  assert.equal(task3.management.assignments.get(replacement.id)?.kind, "chief", "replacement Chief takes an available management office");
+
+  assert.equal(world.placePiece(370, 100, Obj.Gatehouse, 0), true);
+  task3.rebuildWorld(world);
+  const gate = [...task3.facility.gatehouses.values()][0];
+  gate.guardId = guard.id;
+  guard.state = "intakeEscort";
+  const oldPath = guard.path;
+  assert.equal(task3.facility.updateGuard(guard, .1, world, false), false, "gatehouse duty yields to a paired intake escort");
+  assert.equal(guard.state, "intakeEscort"); assert.equal(guard.path, oldPath);
+  guard.state = "idle";
+  assert.equal(task3.facility.updateGuard(guard, .1, world, false), true, "gatehouse resumes when the paired escort finishes");
 }
 
 function planGraphChecks(): void {
@@ -106,12 +137,49 @@ function planGraphChecks(): void {
     const scheme = task3.escape.createSchemeForOperation(operation, [agent], world, social, mode, 10);
     assert(scheme.nodes.some((node) => node.action === required[mode]), `${mode} graph lacks its physical exit action`);
     assert(scheme.nodes.every((node) => node.dependencies.every((dep) => scheme.nodes.some((candidate) => candidate.id === dep))));
+    const nodeById = new Map(scheme.nodes.map((node) => [node.id, node]));
+    const visiting = new Set<number>(), visited = new Set<number>();
+    const visit = (nodeId: number): void => {
+      if (visited.has(nodeId)) return;
+      assert(!visiting.has(nodeId), `${mode} plan dependency graph contains a cycle at node ${nodeId}`);
+      visiting.add(nodeId);
+      for (const dependency of nodeById.get(nodeId)!.dependencies) visit(dependency);
+      visiting.delete(nodeId); visited.add(nodeId);
+    };
+    for (const node of scheme.nodes) {
+      visit(node.id);
+      assert(node.optional || node.actors.some((actorId) => scheme.memberIds.includes(actorId)),
+        `${mode} required node ${node.action} must be assigned to an operation member`);
+    }
     if (["vehicle", "visitation"].includes(mode)) assert(scheme.nodes.some((node) => node.alternatives.length > 0), `${mode} should have a corruption contingency`);
     const known = task3.escape.knownNodes(agent.id, scheme.id);
     assert(known.length > 0); assert(known.length <= scheme.nodes.length);
   }
   const copy = JSON.parse(JSON.stringify(task3.escape.saveData()));
   task3.escape.loadData(copy); assert.equal(task3.escape.schemes.size, 7);
+}
+
+function outsideArrivalChecks(): void {
+  const { world, task2, task3 } = setup();
+  const social = new PrisonerSocialSystem(), operations = new EscapeOperationsSystem();
+  const agent = inmate(901); task2.ensureAgent(agent, 0);
+  const plan = { method: "climb" as const, breaches: [world.idx(40, 40)], exitTile: world.idx(1, 40), needed: 1,
+    stage: "prepare" as const, legI: 0, toiletIdx: -1, watchdog: 0 };
+  const operation = operations.adoptSoloPlan(agent, plan, 0);
+  const scheme = task3.escape.createSchemeForOperation(operation, [agent], world, social, "visitation", 0);
+  const prep = scheme.nodes.find((node) => node.action === "contact-outsider")!; prep.state = "complete";
+  const wait = scheme.nodes.find((node) => node.action === "wait-external")!; wait.state = "active";
+  const vehicleId = 1_500_001;
+  task3.escape.commitments.set(1, { id: 1, schemeId: scheme.id, type: "visitor", contactId: 1, cost: 12,
+    trust: .8, arrangedAt: 0, dueAt: 1, state: "arrived", vehicleId, evidenceRisk: .2 });
+  task3.escape.externalVehicles.set(vehicleId, { id: vehicleId, kind: "visitor", state: "arriving", x: 374.5,
+    z: 100, timer: 8, warning: "", passengerIds: [] });
+  task3.escape.tick(.1, 2, world, [agent], social, operations);
+  assert.equal(wait.state, "active", "a scheduled contact must not satisfy wait before its vehicle reaches the prison");
+  task3.escape.externalVehicles.get(vehicleId)!.z = 374.9;
+  task3.escape.tick(.1, 3, world, [agent], social, operations);
+  assert.equal(task3.escape.commitments.get(1)!.state, "fulfilled", "vehicle arrival should fulfill its contact commitment");
+  assert.equal(wait.state, "complete", "physical arrival should release the external-assistance dependency");
 }
 
 function scaleCheck(): void {
@@ -143,4 +211,5 @@ managementCredentialAndCorruptionChecks();
 planGraphChecks();
 scaleCheck();
 deterministicCheck();
+outsideArrivalChecks();
 console.log("Task 3 Gatehouse/management/credentials/corruption/plans/save/scale checks passed");

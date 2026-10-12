@@ -3,19 +3,23 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": { "node": ">=22.18.0" },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "runtime-textures": "node scripts/prepare-runtime-textures.mjs",
     "textures": "node scripts/compress-textures.mjs",
-    "check": "node scripts/check-roofs.ts && node scripts/check-stability.ts && node scripts/check-assets.mjs && node scripts/check-logistics.ts && node scripts/check-prisoners.ts && node scripts/check-task2.ts && node scripts/check-task3.ts",
-    "sim-check": "node scripts/sim-golden.ts"
+    "check": "node scripts/check-roofs.ts && node scripts/check-stability.ts && node scripts/check-assets.mjs && node scripts/check-logistics.ts && node scripts/check-prisoners.ts && node scripts/check-task2.ts && node scripts/check-task3.ts && node scripts/check-systems.ts && node scripts/check-behavior.ts && node scripts/check-welfare.ts && node scripts/check-escape-integration.ts && node scripts/check-escape-paths.ts && node scripts/check-persistence.ts",
+    "sim-check": "node scripts/sim-golden.ts",
+    "check:browser": "node scripts/check-browser.mjs",
+    "check:playthrough": "node scripts/check-playthrough.ts"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.40",
+    "basis_universal": "^1.16.4-1",
+    "playwright": "^1.64.0",
     "typescript": "^5.4.0",
-    "vite": "^5.2.0",
-    "basis_universal": "^1.16.4-1"
+    "vite": "^5.2.0"
   }
 }

@@ -29,9 +29,10 @@ export class BrowserSaveRepository implements SaveRepository {
   }
 
   async save(value: unknown): Promise<void> {
+    const snapshot = structuredClone(value);
     let browserSaved = false;
     try {
-      await this.writeBrowserSlot(value);
+      await this.writeBrowserSlot(snapshot);
       browserSaved = true;
     } catch {
       browserSaved = false;
@@ -40,7 +41,7 @@ export class BrowserSaveRepository implements SaveRepository {
       const response = await fetch("/api/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(value),
+        body: JSON.stringify(snapshot),
       });
       if (!response.ok && !browserSaved) throw new Error(`Save endpoint returned ${response.status}`);
     } catch (error) {
