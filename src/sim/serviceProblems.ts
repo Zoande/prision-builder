@@ -1,4 +1,4 @@
-import { catalogSnapshot, type CatalogSectionId } from "../editor.ts";
+import type { CatalogSectionId } from "../editor.ts";
 import type { BuildOrderGroup } from "./construction.ts";
 import { commodityDef } from "./commodities.ts";
 import type { Problem, ProblemAction, ProblemSeverity } from "./problems.ts";
@@ -23,10 +23,7 @@ export interface ServiceProblemInput {
   stock?: ProblemStockView;
 }
 
-const catalogSections = new Set<CatalogSectionId>(catalogSnapshot().map((item) => item.section));
-
 function catalog(label: string, mode: string, section: CatalogSectionId): ProblemAction {
-  if (!catalogSections.has(section)) throw new Error(`Unknown catalog section for problem action: ${section}`);
   return { kind: "catalog", label, mode, section };
 }
 
@@ -185,8 +182,8 @@ function constructionProblems(groups: Iterable<BuildOrderGroup>, stock?: Problem
 }
 
 /** Convert service warnings and material-starved construction groups to
- * actionable, deduplicated problem rows. Catalog destinations are verified
- * against the editor's current live registry when actions are created. */
+ * actionable, deduplicated problem rows. Catalog destinations are typed and
+ * checked against the editor registry by the service-problems regression. */
 export function collectServiceProblems(input: ServiceProblemInput): Problem[] {
   const rows = new Map<string, Problem>();
   const warningSources: Array<[Problem["source"], Iterable<string> | undefined]> = [

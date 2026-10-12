@@ -33,6 +33,7 @@ npm run dev      # vite dev server
 | `npm run sim-check` | Compare deterministic simulation behavior against its reviewed golden snapshot. |
 | `npm run check:playthrough` | Play two seeded prisons for four days each, checking live services, needs, population, and ownership. |
 | `npm run check:browser` | Use Chromium with real WebGPU to test canvas construction, catalogs, controls, saving, and responsive UI. |
+| `npm run check:production` | After `npm run build`, verify bundled WebGPU rendering and catalog controls in Chromium. |
 
 ## Controls
 

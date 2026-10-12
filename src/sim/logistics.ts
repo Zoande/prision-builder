@@ -150,12 +150,15 @@ export class LogisticsSystem {
     return true;
   }
 
-  reserveBundle(recipe: Recipe, owner: string): CargoPackage | null {
+  reserveBundle(recipe: Recipe, owner: string, near?: { x: number; z: number }): CargoPackage | null {
     for (const [commodity, amount] of Object.entries(recipe)) {
       if (amount <= 0) continue;
-      const pkg = [...this.packages.values()].find((candidate) =>
+      const candidates = [...this.packages.values()].filter((candidate) =>
         candidate.commodity === commodity && !candidate.reservedBy &&
         (candidate.state === "delivery" || candidate.state === "site"));
+      if (near) candidates.sort((a, b) =>
+        Math.abs(a.x - near.x) + Math.abs(a.z - near.z) - Math.abs(b.x - near.x) - Math.abs(b.z - near.z) || a.id - b.id);
+      const pkg = candidates[0];
       if (!pkg) continue;
       const take = Math.min(amount, commodityDef(commodity).packageSize, pkg.quantity);
       if (take < pkg.quantity) {
@@ -181,6 +184,20 @@ export class LogisticsSystem {
     const pkg = this.packages.get(packageId);
     if (!pkg || pkg.reservedBy !== owner) return null;
     pkg.state = "site"; pkg.x = x; pkg.z = z;
+    return pkg;
+  }
+
+  /** Keep a target's exact recipe reserved and leave the rest of a physically
+   * delivered bulk package available for nearby work. */
+  retainAtSite(packageId: number, owner: string, quantity: number): CargoPackage | null {
+    const pkg = this.packages.get(packageId);
+    if (!pkg || pkg.reservedBy !== owner || pkg.state !== "site" || quantity <= 0) return null;
+    const retained = Math.min(quantity, pkg.quantity);
+    if (pkg.quantity > retained) {
+      const remainder: CargoPackage = { ...pkg, id: this.nextPackageId++, quantity: pkg.quantity - retained, reservedBy: null };
+      this.packages.set(remainder.id, remainder);
+      pkg.quantity = retained;
+    }
     return pkg;
   }
 
