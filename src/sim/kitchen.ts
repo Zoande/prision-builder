@@ -1,4 +1,4 @@
-import { dayOf, hourOf } from "./time.ts";
+import { dayOf } from "./time.ts";
 import { LogisticsSystem, type CargoPackage } from "./logistics.ts";
 import { Obj, SHELF_KINDS, World } from "./world.ts";
 import type { ItemSystem } from "./itemSystem.ts";
@@ -11,6 +11,11 @@ export interface KitchenSave {
   dirtySpoons: number;
   books: number;
   preparedSettings: number;
+  borrowedBooks?: number;
+  eatingSettings?: number;
+  anonymousMealSetClaims?: number;
+  mealSetClaims?: number[];
+  spoonWashClaims?: [number, number][];
   knownFreezers: number[];
   knownServing: number[];
   knownShelves: number[];
@@ -32,11 +37,16 @@ export class KitchenSystem {
   dirtyTrays = 0;
   dirtySpoons = 0;
   books = 0;
+  borrowedBooks = 0;
   preparedSettings = 0;
+  eatingSettings = 0;
   private readonly knownFreezers = new Set<number>();
   private readonly knownServing = new Set<number>();
   private readonly knownShelves = new Map<number, number>();
   private readonly washClaims = new Map<number, number>();
+  private readonly spoonWashClaims = new Map<number, number>();
+  private readonly mealSetClaims = new Set<number>();
+  private anonymousMealSetClaims = 0;
   private lastReconcileDay = -1;
   private cutleryLossReportedDay = -1;
   private sinkCapacity = 0;
@@ -59,15 +69,22 @@ export class KitchenSystem {
 
   tick(worldTime: number, world: World): void {
     this.warnings.clear();
-    this.discoverObjects(world, worldTime);
+    this.discoverObjects(world);
     const day = dayOf(worldTime);
-    if (Math.floor(hourOf(worldTime)) === 23 && day !== this.lastReconcileDay) {
-      this.lastReconcileDay = day;
-      this.logistics.request({ "frozen-meal": Math.max(0, this.freezerCapacity - this.frozenMeals) }, worldTime, true, "daily-food");
-      this.logistics.request({ tray: Math.max(0, this.placeSettingTarget - this.totalTrays()) }, worldTime, true, "tray-replacement");
-      this.logistics.request({ spoon: Math.max(0, this.placeSettingTarget - this.totalSpoons()) }, worldTime, true, "spoon-replacement");
-      this.logistics.request({ book: Math.max(0, this.bookTarget - this.books) }, worldTime, true, "book-replacement");
-    }
+    // Restock in useful batches rather than ordering a one-meal truck after
+    // every cook. At an empty kitchen the request still fills the full target;
+    // ongoing replenishment waits until one quarter of a store is missing.
+    const batchDeficit = (target: number, stock: number, incoming: number): number => {
+      const missing = Math.max(0, target - stock - incoming);
+      const minimumBatch = Math.min(target, Math.max(3, Math.ceil(target * .25)));
+      return missing >= minimumBatch ? missing : 0;
+    };
+    this.logistics.request({
+      "frozen-meal": batchDeficit(this.freezerCapacity, this.frozenMeals, this.kitchenPipeline("frozen-meal")),
+      tray: batchDeficit(this.placeSettingTarget, this.totalTrays(), this.kitchenPipeline("tray")),
+      spoon: batchDeficit(this.placeSettingTarget, this.totalSpoons(), this.kitchenPipeline("spoon")),
+      book: batchDeficit(this.bookTarget, this.books + this.borrowedBooks, this.kitchenPipeline("book")),
+    }, worldTime, true, "kitchen:restock");
     if (this.freezerCapacity === 0 && this.knownServing.size > 0) this.warnings.add("Food shortage: no freezer");
     if (this.frozenMeals <= 0 && this.knownServing.size > 0) this.warnings.add("Food shortage: no frozen meals");
     if (this.cleanTrays <= 0 && this.knownServing.size > 0) this.warnings.add("Meal service needs clean trays");
@@ -83,10 +100,13 @@ export class KitchenSystem {
     }
   }
 
-  reserveMealSet(): boolean {
+  reserveMealSet(cookId?: number): boolean {
+    if (cookId !== undefined && this.mealSetClaims.has(cookId)) return true;
     if (this.frozenMeals <= 0 || this.cleanTrays <= 0 || this.cleanSpoons <= 0) return false;
     this.frozenMeals--; this.cleanTrays--; this.cleanSpoons--;
     this.preparedSettings++;
+    if (cookId === undefined) this.anonymousMealSetClaims++;
+    else this.mealSetClaims.add(cookId);
     this.movePhysical("tray", "institution:kitchen-clean", "institution:kitchen-in-use", 1);
     this.movePhysical("spoon", "institution:kitchen-clean", "institution:kitchen-in-use", 1);
     const frozen = this.physicalItems?.itemsIn("institution:kitchen-clean").find((i) => i.defId === "frozen-meal");
@@ -94,15 +114,28 @@ export class KitchenSystem {
     return true;
   }
 
-  releaseMealSet(): void {
+  hasMealSetClaim(cookId: number): boolean { return this.mealSetClaims.has(cookId); }
+
+  releaseMealSet(cookId?: number): void {
+    if (cookId !== undefined) {
+      if (!this.mealSetClaims.delete(cookId)) return;
+    } else if (this.anonymousMealSetClaims > 0) this.anonymousMealSetClaims--;
     this.frozenMeals++; this.cleanTrays++; this.cleanSpoons++; this.preparedSettings = Math.max(0, this.preparedSettings - 1);
     this.movePhysical("tray", "institution:kitchen-in-use", "institution:kitchen-clean", 1);
     this.movePhysical("spoon", "institution:kitchen-in-use", "institution:kitchen-clean", 1);
   }
 
-  mealTaken(): void { this.preparedSettings = Math.max(0, this.preparedSettings - 1); }
+  /** Keep a setting counted as in use after the cook delivers it to a serving table. */
+  commitMealSet(cookId: number): void { this.mealSetClaims.delete(cookId); }
+
+  mealTaken(): void {
+    if (this.preparedSettings <= 0) return;
+    this.preparedSettings--;
+    this.eatingSettings++;
+  }
 
   finishMeal(spoonStolen: boolean, prisonerId = -1): boolean {
+    this.eatingSettings = Math.max(0, this.eatingSettings - 1);
     this.dirtyTrays++;
     if (!spoonStolen) this.dirtySpoons++;
     this.movePhysical("tray", "institution:kitchen-in-use", "institution:kitchen-dirty", 1);
@@ -116,32 +149,46 @@ export class KitchenSystem {
   }
 
   claimWash(cookId: number): number {
-    if (this.washClaims.has(cookId)) return this.washClaims.get(cookId)!;
-    const occupied = [...this.washClaims.values()].reduce((sum, amount) => sum + amount, 0);
-    const amount = Math.min(3, this.dirtyTrays, this.dirtySpoons, Math.max(0, this.sinkCapacity - occupied));
-    if (amount <= 0) return 0;
-    this.dirtyTrays -= amount; this.dirtySpoons -= amount;
-    this.washClaims.set(cookId, amount);
-    return amount;
+    if (this.washClaims.has(cookId) || this.spoonWashClaims.has(cookId))
+      return Math.max(this.washClaims.get(cookId) ?? 0, this.spoonWashClaims.get(cookId) ?? 0);
+    const occupiedTrays = [...this.washClaims.values()].reduce((sum, amount) => sum + amount, 0);
+    const occupiedSpoons = [...this.spoonWashClaims.values()].reduce((sum, amount) => sum + amount, 0);
+    const trays = Math.min(3, this.dirtyTrays, Math.max(0, this.sinkCapacity - occupiedTrays));
+    const spoons = Math.min(3, this.dirtySpoons, Math.max(0, this.sinkCapacity - occupiedSpoons));
+    if (trays <= 0 && spoons <= 0) return 0;
+    this.dirtyTrays -= trays; this.dirtySpoons -= spoons;
+    if (trays > 0) this.washClaims.set(cookId, trays);
+    if (spoons > 0) this.spoonWashClaims.set(cookId, spoons);
+    return Math.max(trays, spoons);
   }
 
+  hasWashClaim(cookId: number): boolean { return this.washClaims.has(cookId) || this.spoonWashClaims.has(cookId); }
+
   finishWash(cookId: number): number {
-    const amount = this.washClaims.get(cookId) ?? 0;
+    const trays = this.washClaims.get(cookId) ?? 0;
+    const spoons = this.spoonWashClaims.get(cookId) ?? 0;
     this.washClaims.delete(cookId);
-    this.cleanTrays += amount; this.cleanSpoons += amount;
-    this.movePhysical("tray", "institution:kitchen-dirty", "institution:kitchen-clean", amount);
-    this.movePhysical("spoon", "institution:kitchen-dirty", "institution:kitchen-clean", amount);
-    return amount;
+    this.spoonWashClaims.delete(cookId);
+    this.cleanTrays += trays; this.cleanSpoons += spoons;
+    this.movePhysical("tray", "institution:kitchen-dirty", "institution:kitchen-clean", trays);
+    this.movePhysical("spoon", "institution:kitchen-dirty", "institution:kitchen-clean", spoons);
+    return Math.max(trays, spoons);
   }
 
   releaseWash(cookId: number): void {
-    const amount = this.washClaims.get(cookId) ?? 0;
+    const trays = this.washClaims.get(cookId) ?? 0;
+    const spoons = this.spoonWashClaims.get(cookId) ?? 0;
     this.washClaims.delete(cookId);
-    this.dirtyTrays += amount; this.dirtySpoons += amount;
+    this.spoonWashClaims.delete(cookId);
+    this.dirtyTrays += trays; this.dirtySpoons += spoons;
   }
 
-  claimHaul(cookId: number, world: World): CookHaul | null {
-    for (const pkg of this.logistics.packagesForHandler("cook")) {
+  claimHaul(cookId: number, world: World, preferredCommodities?: readonly string[]): CookHaul | null {
+    const preference = preferredCommodities && new Map(preferredCommodities.map((commodity, index) => [commodity, index]));
+    const packages = this.logistics.packagesForHandler("cook")
+      .filter((pkg) => !preference || preference.has(pkg.commodity))
+      .sort((a, b) => (preference?.get(a.commodity) ?? 0) - (preference?.get(b.commodity) ?? 0) || a.id - b.id);
+    for (const pkg of packages) {
       if (pkg.state !== "delivery" || pkg.reservedBy) continue;
       const destination = this.destination(pkg, world);
       if (destination < 0) continue;
@@ -179,43 +226,58 @@ export class KitchenSystem {
   borrowBook(): boolean {
     if (this.books <= 0) return false;
     this.books--;
+    this.borrowedBooks++;
     return true;
   }
 
-  returnBook(): void { this.books = Math.min(this.bookTarget, this.books + 1); }
+  returnBook(): void {
+    if (this.borrowedBooks <= 0) return;
+    this.borrowedBooks--;
+    this.books = Math.min(Math.max(0, this.bookTarget - this.borrowedBooks), this.books + 1);
+  }
 
   acceptBookPackage(pkg: CargoPackage): boolean {
-    if (pkg.commodity !== "book" || this.bookTarget <= this.books) return false;
-    this.books = Math.min(this.bookTarget, this.books + pkg.quantity);
-    if (this.physicalItems) for (const id of this.physicalItems.createMany("book", pkg.quantity, 0))
+    if (pkg.commodity !== "book") return false;
+    const accepted = Math.min(pkg.quantity, Math.max(0, this.bookTarget - this.books - this.borrowedBooks));
+    this.books += accepted;
+    if (this.physicalItems) for (const id of this.physicalItems.createMany("book", accepted, 0))
       this.physicalItems.moveToContainer(id, "institution:library-stock", 0);
-    this.logistics.packages.delete(pkg.id);
+    // Keep excess stock in the export pipeline instead of leaving it reserved
+    // in a workman's hands after the shelf fills during a haul.
+    if (accepted < pkg.quantity) {
+      pkg.quantity -= accepted;
+      pkg.reservedBy = null;
+      this.logistics.moveToExports(pkg.id, pkg.x, pkg.z);
+    } else this.logistics.packages.delete(pkg.id);
     return true;
   }
 
-  totalTrays(): number { return this.cleanTrays + this.dirtyTrays + this.preparedSettings; }
-  totalSpoons(): number { return this.cleanSpoons + this.dirtySpoons + this.preparedSettings; }
+  totalTrays(): number { return this.cleanTrays + this.dirtyTrays + this.preparedSettings + this.eatingSettings + [...this.washClaims.values()].reduce((a, b) => a + b, 0); }
+  totalSpoons(): number { return this.cleanSpoons + this.dirtySpoons + this.preparedSettings + this.eatingSettings + [...this.spoonWashClaims.values()].reduce((a, b) => a + b, 0); }
 
-  private discoverObjects(world: World, worldTime: number): void {
+  private discoverObjects(world: World): void {
     this.sinkCapacity = new Set(world.tilesOfKind(Obj.Sink).map((i) => world.anchorOf(i))).size * 12;
     const freezers = new Set(world.tilesOfKind(Obj.Freezer).map((i) => world.anchorOf(i)));
     this.knownFreezers.clear(); for (const anchor of freezers) this.knownFreezers.add(anchor);
     const serving = new Set(world.tilesOfKind(Obj.ServingTable).map((i) => world.anchorOf(i)));
-    for (const i of world.tilesOfKind(Obj.ServingTable)) {
-      const anchor = world.anchorOf(i);
-      if (this.knownServing.has(anchor)) continue;
-      this.logistics.request({ tray: 6, spoon: 6 }, worldTime, true, `serving-table:${anchor}`);
-    }
     this.knownServing.clear(); for (const anchor of serving) this.knownServing.add(anchor);
     const shelves = new Map<number, number>();
     for (const kind of SHELF_KINDS) for (const i of world.tilesOfKind(kind)) {
       const anchor = world.anchorOf(i);
       shelves.set(anchor, kind);
-      if (this.knownShelves.has(anchor)) continue;
-      const capacity = kind === Obj.Bookshelf ? 8 : kind === Obj.BookshelfLarge ? 16 : 24;
-      this.logistics.request({ book: capacity }, worldTime, true, `bookshelf:${anchor}`);
     }
     this.knownShelves.clear(); for (const [anchor, kind] of shelves) this.knownShelves.set(anchor, kind);
+  }
+
+  private kitchenPipeline(commodity: string): number {
+    let total = 0;
+    for (const pkg of this.logistics.packages.values()) {
+      if (pkg.commodity !== commodity) continue;
+      if (pkg.state === "ordered" || pkg.state === "in-transit") total += pkg.quantity;
+      else if ((pkg.state === "delivery" || pkg.state === "carried" || pkg.state === "reserved") &&
+          (!pkg.reservedBy || pkg.reservedBy.startsWith("cook:") || (commodity === "book" && pkg.reservedBy.startsWith("workman:")))) total += pkg.quantity;
+    }
+    return total;
   }
 
   private destination(pkg: CargoPackage, world: World): number {
@@ -239,10 +301,11 @@ export class KitchenSystem {
     return {
       frozenMeals: this.frozenMeals, cleanTrays: this.cleanTrays, cleanSpoons: this.cleanSpoons,
       dirtyTrays: this.dirtyTrays, dirtySpoons: this.dirtySpoons, books: this.books,
-      preparedSettings: this.preparedSettings,
+      preparedSettings: this.preparedSettings, eatingSettings: this.eatingSettings, borrowedBooks: this.borrowedBooks,
+      anonymousMealSetClaims: this.anonymousMealSetClaims, mealSetClaims: [...this.mealSetClaims],
       knownFreezers: [...this.knownFreezers], knownServing: [...this.knownServing],
       knownShelves: [...this.knownShelves].flat(), lastReconcileDay: this.lastReconcileDay,
-      washClaims: [...this.washClaims],
+      washClaims: [...this.washClaims], spoonWashClaims: [...this.spoonWashClaims],
       cutleryLossReportedDay: this.cutleryLossReportedDay,
     };
   }
@@ -252,6 +315,8 @@ export class KitchenSystem {
     this.cleanSpoons = data.cleanSpoons ?? 0; this.dirtyTrays = data.dirtyTrays ?? 0;
     this.dirtySpoons = data.dirtySpoons ?? 0; this.books = data.books ?? 0;
     this.preparedSettings = data.preparedSettings ?? 0;
+    this.eatingSettings = data.eatingSettings ?? 0;
+    this.borrowedBooks = data.borrowedBooks ?? 0;
     this.knownFreezers.clear(); for (const i of data.knownFreezers ?? []) this.knownFreezers.add(i);
     this.knownServing.clear(); for (const i of data.knownServing ?? []) this.knownServing.add(i);
     this.knownShelves.clear();
@@ -259,9 +324,13 @@ export class KitchenSystem {
     for (let i = 0; i + 1 < shelves.length; i += 2) this.knownShelves.set(shelves[i], shelves[i + 1]);
     this.lastReconcileDay = data.lastReconcileDay ?? -1;
     this.cutleryLossReportedDay = data.cutleryLossReportedDay ?? -1;
-    this.washClaims.clear();
-    for (const [, amount] of data.washClaims ?? []) {
-      this.dirtyTrays += amount; this.dirtySpoons += amount;
-    }
+    this.washClaims.clear(); for (const [id, amount] of data.washClaims ?? []) this.washClaims.set(id, amount);
+    this.spoonWashClaims.clear();
+    if (data.spoonWashClaims === undefined) {
+      // Pre-split saves stored one paired amount for trays and spoons.
+      for (const [id, amount] of data.washClaims ?? []) this.spoonWashClaims.set(id, amount);
+    } else for (const [id, amount] of data.spoonWashClaims) this.spoonWashClaims.set(id, amount);
+    this.mealSetClaims.clear(); for (const id of data.mealSetClaims ?? []) this.mealSetClaims.add(id);
+    this.anonymousMealSetClaims = data.anonymousMealSetClaims ?? 0;
   }
 }

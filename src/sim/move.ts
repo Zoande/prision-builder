@@ -16,7 +16,7 @@ import {
 } from "./agent.ts";
 
 
-export function followPath(ag: Agent, dt: number, world: World, staff: boolean): boolean {
+export function followPath(ag: Agent, dt: number, world: World, staff: boolean, allowTrespass = false): boolean {
   if (!ag.path || ag.pathI >= ag.path.length) return true;
   const size = world.size;
   let ti = ag.path[ag.pathI];
@@ -27,9 +27,9 @@ export function followPath(ag: Agent, dt: number, world: World, staff: boolean):
     ti = ag.path[ag.pathI];
   }
   const custody = ag.protectiveCustody ? "protective" : ag.profile?.custody;
-  const areaAllowed = staff
+  const areaAllowed = allowTrespass || (staff
     ? roleAllowed(world, ti, accessRoleForAgent(ag))
-    : roleAllowed(world, ti, "prisoner", custody);
+    : roleAllowed(world, ti, "prisoner", custody));
   if (!passable(world, ti, staff, ag.accessKeys) || !areaAllowed) {
     if (ag.known) record(ag, world, ti);
     ag.path = null;

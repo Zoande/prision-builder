@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { blankAgent, ESCAPE_MARGIN, type Agent } from "../src/sim/agent.ts";
+import { Agents } from "../src/sim/agents.ts";
 import { AreaSystem } from "../src/sim/areas.ts";
 import { CombatSystem } from "../src/sim/combat.ts";
 import { EconomySystem } from "../src/sim/economy.ts";
@@ -90,6 +91,82 @@ function healthCombatPolicyChecks(): void {
   assert.equal(roundTrip.bodies.size, health.bodies.size);
 }
 
+function combatResponseLifecycleChecks(): void {
+  const world = new World(32), items = new ItemSystem(), institution = new InstitutionSystem(), health = new HealthSystem();
+  const combat = new CombatSystem(health, institution, items);
+  const attacker = inmate(30, 10.5, 10.5), defender = inmate(31, 11.4, 10.5);
+  const guards = Array.from({ length: 6 }, (_, i) => staff(40 + i, Obj.Guard, 10.5, 10.5));
+  const fight = combat.start(attacker, defender, 0)!;
+  institution.incidents.get(fight.incidentId)!.state = "reported";
+  assert.equal(combat.guardIntervene(guards[0], fight, [attacker, defender, ...guards], 3), false,
+    "a sufficient unarmed guard response should contain a two-prisoner fight");
+  assert.equal(fight.state, "contained");
+  assert(attacker.cuffed && defender.cuffed, "both prisoners are restrained when guards contain the fight");
+
+  const admitted = inmate(32, 12.5, 10.5), remaining = inmate(33, 13.4, 10.5);
+  const admittedFight = combat.start(admitted, remaining, 4)!;
+  institution.incidents.get(admittedFight.incidentId)!.state = "reported";
+  const admittedHealth = health.ensure(admitted); admittedHealth.admitted = true; admitted.state = "inTreatment";
+  const staleResponder = guards[1]; staleResponder.state = "respondingFight"; staleResponder.path = [world.idx(15, 15)];
+  combat.tick(.1, 5, world, [admitted, remaining, ...guards]);
+  assert.equal(admittedFight.state, "contained", "admission removes a participant from active combat");
+  assert.equal(admitted.state, "inTreatment", "combat cleanup preserves medical admission state");
+  assert.equal(remaining.cuffed, true, "the remaining active inmate is restrained after the opponent is admitted");
+  assert.equal(staleResponder.state, "idle", "guards leave response state when their fight has ended");
+  assert.equal(staleResponder.path, null, "retiring a response also clears its stale route");
+  assert.equal(combat.responseFor(staleResponder), null, "retired engagements no longer create response jobs");
+
+  const movedA = inmate(34, 5.5, 6.5), movedB = inmate(35, 6.5, 6.5), observer = staff(46, Obj.Guard, 21.5, 20.5);
+  const movingFight = combat.start(movedA, movedB, 10)!;
+  institution.incidents.get(movingFight.incidentId)!.state = "reported";
+  movedA.x = 20.5; movedA.z = 20.5; movedB.x = 22.5; movedB.z = 20.5;
+  movingFight.participants.forEach((participant) => { participant.nextAction = 100; });
+  combat.tick(.1, 11, world, [movedA, movedB, observer]);
+  assert.equal(movingFight.x, 21.5, "response location follows the live participants");
+  assert.equal(movingFight.z, 20.5);
+  assert.equal(combat.responseFor(observer), movingFight, "guards select the engagement at its updated location");
+}
+
+function combatResponseSimulationChecks(): void {
+  const world = new World(28), economy = new EconomySystem(), logistics = new LogisticsSystem(economy);
+  const task2 = new Task2Systems(world.size, economy, logistics), sim = new Agents();
+  const roomTiles = new Set<number>();
+  for (let x = 2; x <= 7; x++) for (let z = 2; z <= 7; z++) {
+    const tile = world.idx(x, z); roomTiles.add(tile); world.roomId[tile] = 1;
+  }
+  world.rooms.set(1, { id: 1, type: RoomType.Cell, access: 0, tiles: roomTiles, valid: true, ambience: 0, guards: 0 });
+  world.placePiece(3, 3, Obj.Bed, 0);
+  task2.installNewGame(world); sim.task2 = task2; sim.regime.fill(1);
+  world.rooms.get(1)!.valid = true;
+  const fighters = [inmate(50, 14.5, 14.5), inmate(51, 15.4, 14.5)];
+  const guards = Array.from({ length: 6 }, (_, i) => staff(60 + i, Obj.Guard, 4.5 + (i % 3) * 2, 12.5 + ((i / 3) | 0) * 2));
+  sim.agents.push(...fighters, ...guards);
+  const fight = task2.combat.start(fighters[0], fighters[1], 0)!;
+  task2.institution.incidents.get(fight.incidentId)!.state = "reported";
+  let time = 0;
+  for (let tick = 0; tick < 600 && fight.state === "active"; tick++) {
+    time += .1;
+    task2.tick(.1, time, world, sim.agents, false, false);
+    sim.update(.1, world, false, 12, time);
+  }
+  assert.equal(fight.state, "contained", "six unarmed guards physically contain the inmate fight");
+  assert(fighters.every((fighter) => fighter.cuffed), "the resolved fight leaves both inmates restrained");
+  assert(guards.some((guard) => Math.hypot(guard.x - fighters[0].x, guard.z - fighters[0].z) <= 2.5),
+    "at least one guard follows the moving fighters to a usable response distance");
+  assert(guards.some((guard) => guard.state !== "respondingFight"), "responders leave fight duty after containment");
+
+  const arrival = inmate(52, 9.5, 9.5); arrival.cuffed = true; arrival.state = "cuffed";
+  sim.agents.push(arrival); task2.ensureAgent(arrival, time);
+  let assignedIntake = false;
+  for (let tick = 0; tick < 30 && !assignedIntake; tick++) {
+    time += .1;
+    task2.tick(.1, time, world, sim.agents, false, false);
+    sim.update(.1, world, false, 12, time);
+    assignedIntake = guards.some((guard) => guard.state === "intakeGo" || guard.state === "intakeEscort");
+  }
+  assert(assignedIntake, "a guard released from fight response returns to ordinary intake duty");
+}
+
 function workCashGangEscapeChecks(): void {
   const economy = new EconomySystem(), logistics = new LogisticsSystem(economy), items = new ItemSystem();
   const health = new HealthSystem(), institution = new InstitutionSystem(), work = new WorkSystem(items, economy, logistics);
@@ -108,6 +185,30 @@ function workCashGangEscapeChecks(): void {
   for (let n = 0; n < 80; n++) work.updateWorker(worker, 1, n, world);
   assert(items.itemsIn(place.outputContainer).some((item) => item.defId === "wood-goods"));
   assert.equal(items.itemsIn(place.stockContainer).filter((item) => item.defId === "wood-scrap").length, 0);
+  assert(items.itemsIn(`agent:${worker.id}:hands`).some((item) => item.defId === "hammer"), "active worker should hold the controlled tool");
+  logistics.cancelSource(`work:${roomId}`);
+  work.refresh(world, 80);
+  assert.deepEqual(logistics.saveData().requests.filter((row) => row.commodity === "hammer").map((row) => row.quantity), [1],
+    "a tool issued to a worker counts toward workplace stock, leaving only the second station's tool to order");
+  const confiscated = items.itemsIn(`agent:${worker.id}:hands`).find((item) => item.defId === "hammer")!;
+  items.moveToContainer(confiscated.id, `agent:${worker.id}:pockets`, 80, -1, true);
+  const replacement = items.create("hammer", 80);
+  items.moveToContainer(replacement.id, place.stockContainer, 80);
+  place.blocked = "";
+  work.updateWorker(worker, 1, 80, world);
+  assert(items.itemsIn(`agent:${worker.id}:hands`).some((item) => item.id === replacement.id),
+    "a worker must replace an issued tool after confiscation instead of working against a stale lease");
+  work.unassign(worker.id);
+  assert(items.itemsIn(`agent:${worker.id}:pockets`).some((item) => item.id === confiscated.id),
+    "unassign must not return a confiscated tool to controlled stock");
+  assert(items.itemsIn(place.stockContainer).some((item) => item.defId === "hammer"), "unassign returns controlled tools to the original workplace");
+  assert.equal(items.itemsIn(`agent:${worker.id}:hands`).some((item) => item.defId === "hammer"), false, "unassign must not strand a job tool in worker hands");
+  assert.equal(work.assign(worker.id, roomId), true, "a worker may be assigned again after returning their tool");
+  work.updateWorker(worker, 1, 80, world);
+  world.rooms.delete(roomId);
+  work.refresh(world, 81);
+  assert(items.itemsIn(place.stockContainer).some((item) => item.defId === "hammer"), "removing a workplace returns tools before clearing assignments");
+  assert.equal(work.assignments.has(worker.id), false, "workers cannot retain assignments to demolished workplaces");
   const market = new MarketSystem(items, health, institution, economy, work), other = inmate(21, 8.7, 8.5);
   for (const suffix of ["hands", "pockets", "worn", "equipment"])
     items.ensureContainer({ id: `agent:${other.id}:${suffix}`, name: suffix, x: other.x, z: other.z, capacity: 20,
@@ -153,6 +254,46 @@ function securityMedicalEmergencyAndTillChecks(): void {
   health.applyInjury(patient, "cut", "left-leg", .7, 50, -1);
   for (let n = 50; n < 120 && !health.state(patient.id)!.admitted; n++) security.updateStaff(guard, 1, n, world, [guard, patient]);
   assert.equal(health.state(patient.id)!.admitted, true, "guard should physically admit a casualty before treatment");
+  const doctor = staff(92, Obj.Doctor, 18.5, 8.5), blockedTile = world.idx(19, 8);
+  world.setWall(19, 8, 1);
+  assert.equal(world.objKind[blockedTile], Obj.Wall);
+  items.create("bandage", 120);
+  let treated = false;
+  for (let n = 0; n < 120 && health.state(patient.id)!.admitted; n++) {
+    const before = { x: doctor.x, z: doctor.z };
+    health.updateDoctor(doctor, .5, world, [guard, patient, doctor], items);
+    const crossedBlockedRow = (before.x - 19.5) * (doctor.x - 19.5) <= 0 &&
+      Math.abs(before.z - 8.5) < .01 && Math.abs(doctor.z - 8.5) < .01;
+    assert.equal(crossedBlockedRow, false, "a doctor must route around a wall instead of walking through it");
+    if (health.state(patient.id)!.injuries.every((injury) => injury.treated)) treated = true;
+  }
+  assert(treated, "doctor should reach the admitted patient and treat the physical injury");
+  assert.equal(health.state(patient.id)!.admitted, false, "medical treatment releases the bed and patient");
+  assert(doctor.x !== 18.5 || doctor.z !== 8.5, "doctor physically walks along an accessible route to the patient");
+  const secondPatient = inmate(93, 12.5, 8.5);
+  health.applyInjury(secondPatient, "cut", "left-leg", .7, 130);
+  const transportJob = health.treatmentJobs.find((job) => job.patientId === secondPatient.id)!;
+  const lostEscort = staff(94, Obj.Guard, 12, 8.5), replacementEscort = staff(95, Obj.Guard, 10.5, 8.5);
+  assert(security.updateStaff(lostEscort, .1, 130, world, [patient, doctor, secondPatient, lostEscort]));
+  assert.equal(secondPatient.state, "beingTransported");
+  assert.equal(transportJob.transportGuardId, lostEscort.id);
+  health.tick(.1, 131, world, [patient, doctor, secondPatient, replacementEscort], items); // escort guard was removed
+  assert.equal(transportJob.state, "waiting", "a removed escort leaves the casualty job available to another guard");
+  assert.equal(transportJob.transportGuardId, undefined);
+  assert.notEqual(secondPatient.state, "beingTransported", "patients cannot remain tied to a missing escort");
+  let reclaimed = false;
+  for (let n = 0; n < 120 && !health.state(secondPatient.id)!.admitted; n++) {
+    security.updateStaff(replacementEscort, .1, 132 + n * .1, world, [patient, doctor, secondPatient, replacementEscort]);
+    if (transportJob.transportGuardId === replacementEscort.id) reclaimed = true;
+  }
+  assert(reclaimed, "a second living guard reclaims the casualty after the original escort is removed");
+  assert.equal(health.state(secondPatient.id)!.admitted, true, "the reassigned escort completes physical admission");
+  world.rooms.get(2)!.valid = false;
+  health.tick(.1, 150, world, [patient, doctor, secondPatient, replacementEscort], items);
+  assert.equal(health.state(secondPatient.id)!.admitted, false, "closing the Infirmary releases an unusable treatment bed");
+  assert.equal(health.state(secondPatient.id)!.treatmentBed, -1);
+  assert.equal(transportJob.state, "waiting", "casualty remains eligible for transfer to another valid Infirmary");
+  world.rooms.get(2)!.valid = true;
   const lostKey = items.create("guard-key", 120, { issuedTo: guard.id }); items.issue(lostKey.id, guard.id, 120); items.moveToWorld(lostKey.id, 30, 30, 121, patient.id);
   security.tick(.1, 122, world, [guard, patient], false);
   assert.equal(security.emergency, "lockdown");
@@ -204,6 +345,8 @@ function hiddenUiChecks(): void {
 itemAndSaveChecks();
 areaAndDoorChecks();
 healthCombatPolicyChecks();
+combatResponseLifecycleChecks();
+combatResponseSimulationChecks();
 workCashGangEscapeChecks();
 securityMedicalEmergencyAndTillChecks();
 task2RoundTripAndScale();

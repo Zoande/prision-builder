@@ -93,11 +93,19 @@ const ROOM_GROUPS: RoomGroup[] = [
 ];
 
 function roomCats(): Cat[] {
-  return ROOM_GROUPS.map((group) => ({
+  const groupedTypes = new Set(ROOM_GROUPS.flatMap((group) => group.types));
+  const cats: Cat[] = ROOM_GROUPS.map((group) => ({
     key: `rooms:${group.key}` as CatalogSectionId,
     label: group.label,
     items: group.types.map((type) => roomItem(type)),
   }));
+  const ungrouped = ROOM_DEFS.filter((room) => !groupedTypes.has(room.type));
+  if (ungrouped.length) cats.push({
+    key: "rooms:other",
+    label: "Other rooms",
+    items: ungrouped.map((room) => roomItem(room.type)),
+  });
+  return cats;
 }
 
 const CATS: Cat[] = [
@@ -118,10 +126,9 @@ const CATS: Cat[] = [
   {
     key: "staff:people", label: "People",
     items: [
-      personItem(Obj.Guard), personItem(Obj.Cook), personItem(Obj.Workman), personItem(Obj.Doctor),
-      personItem(Obj.Investigator), personItem(Obj.DogHandler), personItem(Obj.ArmedGuard),
-      personItem(Obj.ChiefOfficer), personItem(Obj.Foreman), personItem(Obj.Accountant),
-      personItem(Obj.SecurityDog),
+      // Keep every player-placeable person in the registry represented here.
+      // This also makes future staff roles appear without another UI-only list.
+      ...OBJ_DEFS.filter((d) => d.place === "person" && d.palette && d.kind !== Obj.Prisoner).map((d) => personItem(d.kind)),
       { label: "Baton", swatch: "#202024", tool: { cat: "baton", mat: 0 } },
     ],
   },
@@ -160,7 +167,7 @@ const MODE_SECTIONS: Record<string, CatalogSectionId[]> = {
   build: ["build:floors", "build:walls", "objects:doors", "objects:lights"],
   rooms: ROOM_SECTION_IDS,
   objects: OBJECT_SECTION_IDS,
-  staff: ["staff:people", "staff:deploy"],
+  staff: ["staff:people", "staff:deploy", "security:patrol"],
   logistics: ["objects:logistics", "rooms:logistics", "rooms:access"],
   intelligence: ["rooms:access", "security:patrol"],
   admin: ["admin:erase"],
@@ -175,17 +182,27 @@ export class Editor {
   routeDrag = 0;
   onChange?: () => void; // called when a tool is (de)selected, to update build mode
 
+  /** The catalog item whose details are shown, distinct from placement state. */
+  get detailTool(): Tool | null {
+    return this.candidate?.tool ?? null;
+  }
+
   private palette: HTMLElement;
   private cats: HTMLElement;
   private activeCat = CATS[0];
   private visibleCats: Cat[] = CATS;
   private currentMode = "build";
   private searchQuery = "";
+  private searchFilterCat: CatalogSectionId | null = null;
+  private preSearchCat: CatalogSectionId | null = null;
   private itemButtons: HTMLButtonElement[] = [];
   private candidate: Item | null = null;
   private detailType: HTMLElement;
   private detailName: HTMLElement;
   private detailCopy: HTMLElement;
+  private resultsStatus: HTMLElement | null;
+  private orientationStatus: HTMLElement | null;
+  private allResultsButton: HTMLButtonElement | null = null;
 
   private readonly categoryHelp: Record<string, string> = {
     "build:floors": "Choose a surface finish for paths, interiors, and yards.",
@@ -208,29 +225,105 @@ export class Editor {
     this.detailType = document.getElementById("detailType")!;
     this.detailName = document.getElementById("detailName")!;
     this.detailCopy = document.getElementById("detailCopy")!;
+    // A fixed-position child of the animated build tray is positioned against
+    // the tray's transform box on phones. Portal it to body at that breakpoint
+    // so the details card can use the viewport coordinates its CSS specifies.
+    const detail = document.getElementById("itemDetail")!;
+    const catalogMain = document.getElementById("catalogMain")!;
+    const mobile = matchMedia("(max-width: 720px)");
+    const placeDetail = () => {
+      if (mobile.matches && detail.parentElement !== document.body) document.body.appendChild(detail);
+      else if (!mobile.matches && detail.parentElement !== catalogMain) catalogMain.appendChild(detail);
+    };
+    placeDetail();
+    mobile.addEventListener("change", placeDetail);
+    this.resultsStatus = document.getElementById("catalogResults");
+    this.orientationStatus = document.getElementById("orientationStatus");
     const search = document.getElementById("catalogSearch") as HTMLInputElement | null;
     if (search) search.addEventListener("input", () => {
-      this.searchQuery = search.value.trim().toLowerCase();
+      const query = search.value.trim().toLowerCase();
+      if (!this.searchQuery && query) this.preSearchCat = this.activeCat.key;
+      if (query !== this.searchQuery) this.searchFilterCat = null;
+      this.searchQuery = query;
       this.applyVisibleSections(false);
     });
 
     this.setMode("build", false);
 
     addEventListener("keydown", (e) => {
-      if (e.key === "Escape") this.clear();
-      if (e.key === "r" || e.key === "R") this.orient = (this.orient + 1) % 4;
+      const target = e.target;
+      const typing = target instanceof HTMLElement &&
+        (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+      if (e.key === "Escape") {
+        if (search && search.value) {
+          search.value = "";
+          this.searchQuery = "";
+          this.searchFilterCat = null;
+          this.applyVisibleSections(false);
+        } else this.clear();
+      }
+      if (!typing && !e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "r" || e.key === "R")) {
+        this.orient = (this.orient + 1) % 4;
+        this.announceOrientation();
+      }
     });
   }
 
   private renderCategories() {
     this.cats.innerHTML = "";
+    this.allResultsButton = null;
+    if (this.searchQuery) {
+      const b = document.createElement("button");
+      b.className = "build-cat search-all";
+      b.type = "button";
+      const label = document.createElement("span");
+      label.textContent = "All results";
+      const count = document.createElement("small");
+      count.className = "category-count";
+      count.textContent = String(this.allSearchItems().length);
+      count.setAttribute("aria-hidden", "true");
+      b.append(label, count);
+      b.onclick = () => {
+        this.searchFilterCat = null;
+        this.renderCategories();
+        this.renderPalette();
+      };
+      this.cats.appendChild(b);
+      this.allResultsButton = b;
+    }
     this.visibleCats.forEach((cat) => {
       const b = document.createElement("button");
       b.className = "build-cat";
-      b.textContent = cat.label;
-      b.onclick = () => this.selectCat(cat, b, true);
+      b.type = "button";
+      b.setAttribute("aria-pressed", "false");
+      const countValue = this.searchQuery ? this.searchItems(cat).length : cat.items.length;
+      b.title = this.categoryHelp[cat.key] ?? `${countValue} catalog items`;
+      b.dataset.section = cat.key;
+      const label = document.createElement("span");
+      label.textContent = cat.label;
+      const count = document.createElement("small");
+      count.className = "category-count";
+      count.textContent = String(countValue);
+      count.setAttribute("aria-hidden", "true");
+      b.append(label, count);
+      b.onclick = () => {
+        if (this.searchQuery) this.searchFilterCat = cat.key;
+        this.selectCat(cat, true);
+      };
       this.cats.appendChild(b);
       (cat as Cat & { el?: HTMLButtonElement }).el = b;
+    });
+    this.updateCategorySelection();
+  }
+
+  private updateCategorySelection() {
+    const selectedKey = this.searchQuery ? this.searchFilterCat : this.activeCat.key;
+    this.cats.querySelectorAll<HTMLButtonElement>(".build-cat").forEach((button) => {
+      const isAllResults = button === this.allResultsButton;
+      const selected = isAllResults ? !!this.searchQuery && !selectedKey
+        : (button as HTMLButtonElement).dataset.section === selectedKey;
+      button.classList.toggle("on", selected);
+      button.setAttribute("aria-pressed", String(selected));
     });
   }
 
@@ -245,32 +338,60 @@ export class Editor {
   private applyVisibleSections(clearTool: boolean) {
     const keys = MODE_SECTIONS[this.currentMode] ?? MODE_SECTIONS.build;
     this.visibleCats = this.searchQuery
-      ? CATS.filter((cat) =>
-          cat.label.toLowerCase().includes(this.searchQuery) ||
-          cat.items.some((item) => item.label.toLowerCase().includes(this.searchQuery)))
+      ? CATS.filter((cat) => this.searchItems(cat).length > 0)
       : CATS.filter((cat) => keys.includes(cat.key));
     this.renderCategories();
-    const first = this.visibleCats[0] ?? CATS[0];
-    this.selectCat(first, (first as Cat & { el?: HTMLButtonElement }).el!, clearTool);
+    const preferred = this.searchQuery ? this.visibleCats[0]
+      : this.visibleCats.find((cat) => cat.key === this.preSearchCat) ?? this.visibleCats[0];
+    const first = preferred ?? CATS[0];
+    if (!this.searchQuery) this.preSearchCat = null;
+    this.selectCat(first, clearTool);
   }
 
   selectCategory(key: string) {
     const normalized = key.toLowerCase();
     const cat = CATS.find((x) => x.key === key || x.label.toLowerCase() === normalized) ?? CATS[0];
+    if (this.searchQuery) this.searchFilterCat = cat.key;
     if (!this.visibleCats.includes(cat)) {
       this.visibleCats = [cat];
       this.renderCategories();
     }
-    this.selectCat(cat, (cat as Cat & { el?: HTMLButtonElement }).el!, true);
+    this.selectCat(cat, true);
   }
 
-  private selectCat(cat: Cat, btn: HTMLButtonElement, clearTool: boolean) {
+  /** Select a catalog tool by its registry-backed identity. Useful for direct
+   * actions from inspectors, so those actions never need to locate a button by
+   * its display label. */
+  selectTool(tool: Tool): boolean {
+    const cat = CATS.find((section) => section.items.some((item) => sameTool(item.tool, tool)));
+    const item = cat?.items.find((candidate) => sameTool(candidate.tool, tool));
+    if (!cat || !item) return false;
+
+    const search = document.getElementById("catalogSearch") as HTMLInputElement | null;
+    if (search) search.value = "";
+    this.searchQuery = "";
+    this.searchFilterCat = null;
+    this.preSearchCat = null;
+    const mode = cat.key.startsWith("rooms:") ? "rooms"
+      : cat.key.startsWith("objects:") ? "objects"
+      : cat.key.startsWith("staff:") || cat.key.startsWith("security:") ? "staff"
+      : cat.key.startsWith("admin:") ? "admin" : "build";
+    this.setMode(mode, false);
+    this.selectCategory(cat.key);
+    const index = cat.items.indexOf(item);
+    const button = this.itemButtons[index];
+    if (!button) return false;
+    this.selectItem(item, button, cat);
+    return true;
+  }
+
+  private selectCat(cat: Cat, clearTool: boolean) {
     this.activeCat = cat;
-    this.cats.querySelectorAll(".build-cat").forEach((e) => e.classList.remove("on"));
-    btn.classList.add("on");
+    this.updateCategorySelection();
     if (clearTool) {
       this.tool = null;
       this.candidate = null;
+      document.getElementById("itemDetail")?.classList.remove("has-selection");
       this.onChange?.();
     }
     this.updateCatalogHeading();
@@ -296,27 +417,84 @@ export class Editor {
   private renderPalette() {
     this.palette.innerHTML = "";
     this.itemButtons = [];
-    const items = this.searchQuery && !this.activeCat.label.toLowerCase().includes(this.searchQuery)
-      ? this.activeCat.items.filter((item) => item.label.toLowerCase().includes(this.searchQuery))
-      : this.activeCat.items;
-    items.forEach((item) => {
+    const rows = this.searchQuery
+      ? this.allSearchItems().filter(({ cat }) => !this.searchFilterCat || cat.key === this.searchFilterCat)
+      : this.activeCat.items.map((item) => ({ cat: this.activeCat, item }));
+    rows.forEach(({ cat, item }) => {
       const b = document.createElement("button");
       b.className = "build-item";
+      b.type = "button";
+      b.setAttribute("aria-pressed", "false");
       const swatch = document.createElement("span");
       swatch.className = "item-swatch";
       swatch.style.background = `linear-gradient(135deg, rgba(255,255,255,.15), transparent 52%), ${item.swatch}`;
       const title = document.createElement("span");
       title.className = "item-title";
       title.textContent = item.label;
+      title.title = item.label;
+      const group = document.createElement("span");
+      group.className = "item-group";
+      group.textContent = cat.label;
       const meta = document.createElement("span");
       meta.className = "item-meta";
       meta.textContent = this.itemMeta(item);
-      b.append(swatch, title, meta);
-      b.onclick = () => this.selectItem(item, b);
-      if (this.candidate && sameTool(this.candidate.tool, item.tool)) b.classList.add("on");
+      b.setAttribute("aria-label", `${item.label}. ${cat.label} category. ${meta.textContent}. ${this.itemDescription(item)}`);
+      b.append(swatch, title, group, meta);
+      b.onclick = () => this.selectItem(item, b, cat);
+      if (this.candidate && sameTool(this.candidate.tool, item.tool)) {
+        b.classList.add("on");
+        b.setAttribute("aria-pressed", "true");
+      }
       this.palette.appendChild(b);
       this.itemButtons.push(b);
     });
+    if (this.resultsStatus) {
+      const count = rows.length;
+      const categoryCount = new Set(rows.map(({ cat }) => cat.key)).size;
+      this.resultsStatus.textContent = this.searchQuery
+        ? `${count} ${count === 1 ? "result" : "results"}${this.searchFilterCat ? ` in ${this.activeCat.label}` : ` across ${categoryCount} categories`}`
+        : `${count} ${count === 1 ? "item" : "items"}`;
+    }
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "catalog-empty";
+      empty.textContent = "No items match this search. Try another name or clear the search.";
+      this.palette.appendChild(empty);
+    }
+  }
+
+  private searchItems(cat: Cat): Item[] {
+    if (!this.searchQuery) return cat.items;
+    if (cat.label.toLowerCase().includes(this.searchQuery)) return cat.items;
+    return cat.items.filter((item) => this.itemMatchesSearch(item));
+  }
+
+  private allSearchItems(): { cat: Cat; item: Item }[] {
+    return CATS.flatMap((cat) => this.searchItems(cat).map((item) => ({ cat, item })));
+  }
+
+  private itemMatchesSearch(item: Item): boolean {
+    if (this.searchText(item).includes(this.searchQuery)) return true;
+    if (item.tool.cat !== "piece") return false;
+    const kind = item.tool.mat;
+    return ROOM_DEFS.some((room) => room.name.toLowerCase().includes(this.searchQuery) &&
+      room.requires.some((requirement) => requirement.kinds.includes(kind)));
+  }
+
+  private searchText(item: Item): string {
+    const parts = [item.label, this.itemMeta(item), this.itemDescription(item)];
+    if (item.tool.cat === "piece" || item.tool.cat === "person") {
+      const def = defOf(item.tool.mat);
+      if (def) {
+        parts.push(def.name);
+        if (def.use) parts.push(...Object.keys(def.use.needs));
+      }
+    }
+    if (item.tool.cat === "room") {
+      const room = ROOM_DEFS.find((row) => row.type === item.tool.mat);
+      if (room) parts.push(room.name, ...room.requires.map((requirement) => requirement.issue));
+    }
+    return parts.join(" ").toLowerCase();
   }
 
   private itemMeta(item: Item): string {
@@ -333,14 +511,24 @@ export class Editor {
     return "Ready to place";
   }
 
-  private selectItem(item: Item, btn: HTMLButtonElement) {
+  private selectItem(item: Item, btn: HTMLButtonElement, category: Cat = this.activeCat) {
     this.tool = item.tool;
     this.candidate = item;
+    this.activeCat = category;
     this.itemButtons.forEach((b) => b.classList.remove("on"));
+    this.itemButtons.forEach((b) => b.setAttribute("aria-pressed", "false"));
     btn.classList.add("on");
-    this.detailType.textContent = this.activeCat.label;
+    btn.setAttribute("aria-pressed", "true");
+    this.detailType.textContent = category.label;
     this.detailName.textContent = item.label;
     this.detailCopy.textContent = this.itemDescription(item);
+    document.getElementById("itemDetail")?.classList.add("has-selection");
+    const costLabel = document.querySelector<HTMLElement>("#detailCost span");
+    const cost = document.querySelector<HTMLElement>("#detailCost strong");
+    if (costLabel && cost) {
+      costLabel.textContent = "Placement";
+      cost.textContent = this.itemMeta(item);
+    }
     this.onChange?.();
   }
 
@@ -354,13 +542,27 @@ export class Editor {
         (room?.minSquare ? ` Minimum clear area: ${room.minSquare}\u00d7${room.minSquare}.` : "") +
         (requirements ? ` Requires: ${requirements}.` : "");
     }
-    if (item.tool.cat === "patrol" || item.tool.cat === "deploy") return `Use this ${item.label.toLowerCase()} tool directly on the yard.`;
+    if (item.tool.cat === "patrol") return "Click or drag across tiles to draw a guard patrol route.";
+    if (item.tool.cat === "unpatrol") return "Click a tile on a patrol route to remove that route.";
+    if (item.tool.cat === "deploy") return "Click a patrol route or staff room to post an available guard there.";
+    if (item.tool.cat === "undeploy") return "Click a staffed patrol route or room to remove its guard assignment.";
     if (item.tool.cat === "person") return `Hire and place ${item.label.toLowerCase()}. The hiring fee is charged on placement and payroll is charged hourly.`;
+    if (["door", "jaildoor", "staffdoor"].includes(item.tool.cat)) return "Click a wall tile to convert it into this door. It must sit in a wall boundary.";
+    if (["fencedoor", "fencestaffdoor", "fencejaildoor"].includes(item.tool.cat)) return "Click a fence tile to convert it into this gate.";
     if (item.tool.cat === "piece") {
       const def = defOf(item.tool.mat);
-      return `Place ${item.label.toLowerCase()}${def ? ` (${def.w}\u00d7${def.d} tiles)` : ""}. Use R to rotate before placement.`;
+      const needs = def?.use ? Object.entries(def.use.needs).map(([need, amount]) => `${need} (+${amount})`).join(", ") : "";
+      return `Place ${item.label.toLowerCase()}${def ? ` (${def.w}\u00d7${def.d} tile${def.w * def.d === 1 ? "" : "s"})` : ""}.` +
+        (needs ? ` Used by prisoners for: ${needs}.` : "") +
+        " Click a map tile to order construction. Press R to rotate.";
     }
-    return `Place ${item.label.toLowerCase()} in the world. Use R to rotate before placement where applicable.`;
+    if (item.tool.cat === "access") return `Paint the ${item.label.toLowerCase()} restriction over designated room tiles.`;
+    if (item.tool.cat === "erase") return "Click a tile or object to schedule demolition. Erased items may return materials to stock.";
+    if (item.tool.cat === "baton") return "Place a baton on the map for staff use.";
+    if (item.tool.cat === "walllight") return "Click an open wall face to mount a wall light.";
+    if (item.tool.cat === "rooflight") return "Click a roof tile to mount a roof light.";
+    if (item.tool.cat === "lamp") return "Place a floor lamp on an open tile.";
+    return `Use ${item.label.toLowerCase()} on the map. Press R to rotate where applicable.`;
   }
 
   clear() {
@@ -369,7 +571,15 @@ export class Editor {
     this.itemButtons.forEach((b) => b.classList.remove("on"));
     this.detailName.textContent = "Choose an item";
     this.detailCopy.textContent = this.categoryHelp[this.activeCat.key] ?? "Select an item from the catalog to see its placement details.";
+    document.getElementById("itemDetail")?.classList.remove("has-selection");
+    const costLabel = document.querySelector<HTMLElement>("#detailCost span");
+    const cost = document.querySelector<HTMLElement>("#detailCost strong");
+    if (costLabel && cost) { costLabel.textContent = "Placement"; cost.textContent = "Select an item to see its controls."; }
     this.onChange?.();
+  }
+
+  private announceOrientation() {
+    if (this.orientationStatus) this.orientationStatus.textContent = `Direction ${this.orient + 1} of 4`;
   }
 
   /** Do the staff tools show their layer? Beats and postings are invisible

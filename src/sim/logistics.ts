@@ -25,6 +25,14 @@ interface PurchaseRequest {
   source: string;
 }
 
+interface PurchaseDemand {
+  source: string;
+  commodity: string;
+  quantity: number;
+  createdAt: number;
+  mandatory: boolean;
+}
+
 export interface Truck {
   id: number;
   kind: "inbound" | "export" | "intake";
@@ -56,6 +64,7 @@ export class LogisticsSystem {
   readonly externalExports = new Map<number, ExternalExport>();
   private readonly collectedExternal: number[] = [];
   private readonly requests: PurchaseRequest[] = [];
+  private readonly demands = new Map<string, PurchaseDemand>();
   private nextPackageId = 1;
   private nextRequestId = 1;
   private nextTruckId = 1;
@@ -68,7 +77,7 @@ export class LogisticsSystem {
   quantity(commodity: string, states: CargoState[] = ["delivery", "site"]): number {
     let total = 0;
     for (const pkg of this.packages.values()) {
-      if (pkg.commodity === commodity && states.includes(pkg.state)) total += pkg.quantity;
+      if (pkg.commodity === commodity && !pkg.reservedBy && states.includes(pkg.state)) total += pkg.quantity;
     }
     return total;
   }
@@ -92,33 +101,32 @@ export class LogisticsSystem {
 
   pipelineQuantity(commodity: string): number {
     let total = 0;
-    for (const pkg of this.packages.values()) if (pkg.commodity === commodity && !["exports"].includes(pkg.state)) total += pkg.quantity;
+    for (const pkg of this.packages.values()) if (pkg.commodity === commodity && !pkg.reservedBy && pkg.state !== "exports") total += pkg.quantity;
     for (const req of this.requests) if (req.commodity === commodity) total += req.quantity;
     return total;
   }
 
   request(recipe: Recipe, createdAt: number, mandatory: boolean, source: string): void {
-    for (const [commodity, requested] of Object.entries(recipe)) {
-      const free = Math.max(0, this.quantity(commodity) + this.incoming(commodity) - this.reserved(commodity));
-      const quantity = Math.max(0, requested - free);
-      if (quantity <= 0) continue;
-      this.requests.push({
-        id: this.nextRequestId++, commodity, quantity, createdAt, mandatory, source,
-      });
+    for (const key of [...this.demands.keys()]) if (this.demands.get(key)?.source === source) this.demands.delete(key);
+    for (const [commodity, quantity] of Object.entries(recipe)) if (quantity > 0) {
+      const key = `${source}::${commodity}`;
+      this.demands.set(key, { source, commodity, quantity, createdAt, mandatory });
     }
+    this.rebuildRequests();
   }
 
   cancelSource(source: string): void {
-    for (let i = this.requests.length - 1; i >= 0; i--) {
-      if (this.requests[i].source === source) this.requests.splice(i, 1);
-    }
+    for (const key of [...this.demands.keys()]) if (this.demands.get(key)?.source === source) this.demands.delete(key);
+    this.rebuildRequests();
   }
 
   /** Reserve exact units. Partial packages are split so unrelated orders do not
    *  steal one another's stock. */
   reserve(recipe: Recipe, owner: string): boolean {
     for (const [commodity, amount] of Object.entries(recipe)) {
-      if (this.quantity(commodity) - this.reserved(commodity) < amount) return false;
+      // quantity() excludes every package with an owner reservation, including
+      // packages already staged at a construction site.
+      if (this.quantity(commodity) < amount) return false;
     }
     for (const [commodity, amount] of Object.entries(recipe)) {
       let left = amount;
@@ -142,12 +150,15 @@ export class LogisticsSystem {
     return true;
   }
 
-  reserveBundle(recipe: Recipe, owner: string): CargoPackage | null {
+  reserveBundle(recipe: Recipe, owner: string, near?: { x: number; z: number }): CargoPackage | null {
     for (const [commodity, amount] of Object.entries(recipe)) {
       if (amount <= 0) continue;
-      const pkg = [...this.packages.values()].find((candidate) =>
+      const candidates = [...this.packages.values()].filter((candidate) =>
         candidate.commodity === commodity && !candidate.reservedBy &&
         (candidate.state === "delivery" || candidate.state === "site"));
+      if (near) candidates.sort((a, b) =>
+        Math.abs(a.x - near.x) + Math.abs(a.z - near.z) - Math.abs(b.x - near.x) - Math.abs(b.z - near.z) || a.id - b.id);
+      const pkg = candidates[0];
       if (!pkg) continue;
       const take = Math.min(amount, commodityDef(commodity).packageSize, pkg.quantity);
       if (take < pkg.quantity) {
@@ -173,6 +184,20 @@ export class LogisticsSystem {
     const pkg = this.packages.get(packageId);
     if (!pkg || pkg.reservedBy !== owner) return null;
     pkg.state = "site"; pkg.x = x; pkg.z = z;
+    return pkg;
+  }
+
+  /** Keep a target's exact recipe reserved and leave the rest of a physically
+   * delivered bulk package available for nearby work. */
+  retainAtSite(packageId: number, owner: string, quantity: number): CargoPackage | null {
+    const pkg = this.packages.get(packageId);
+    if (!pkg || pkg.reservedBy !== owner || pkg.state !== "site" || quantity <= 0) return null;
+    const retained = Math.min(quantity, pkg.quantity);
+    if (pkg.quantity > retained) {
+      const remainder: CargoPackage = { ...pkg, id: this.nextPackageId++, quantity: pkg.quantity - retained, reservedBy: null };
+      this.packages.set(remainder.id, remainder);
+      pkg.quantity = retained;
+    }
     return pkg;
   }
 
@@ -266,7 +291,7 @@ export class LogisticsSystem {
       } else if (truck.state === "blocked") {
         if (yard && (truck.packageIds.length === 0 || availableSlots > 0)) {
           truck.state = "unloading"; truck.warning = ""; truck.timer = 0;
-        }
+        } else this.warnings.add(truck.warning || "Inbound truck is blocked");
       }
       if (truck.state === "arriving" || truck.state === "departing") {
         truck.z += dt * 64;
@@ -336,6 +361,13 @@ export class LogisticsSystem {
     }
     const readyIds = new Set(ready.map((r) => r.id));
     for (let i = this.requests.length - 1; i >= 0; i--) if (readyIds.has(this.requests[i].id)) this.requests.splice(i, 1);
+    // A demand is a snapshot of what its source needs now, not a standing
+    // stocking target. Once that snapshot has been converted to physical
+    // packages, those inbound packages satisfy the other live sources. Keep
+    // the snapshot around after its packages are later consumed would
+    // resurrect old setup orders on the next rebuild (for example, a serving
+    // table's initial cutlery order after a daily replacement request).
+    for (const req of ready) this.demands.delete(`${req.source}::${req.commodity}`);
     const packageIds: number[] = [];
     for (const req of ready) {
       let left = req.quantity;
@@ -359,6 +391,29 @@ export class LogisticsSystem {
         externalItemIds: [],
         x: 374.5, z: -8 - this.trucks.length * 9, timer: 0, warning: "",
       });
+    }
+  }
+
+  /** Rebuild pending orders from source demands and physical free stock. Each
+   * demand is independent, while unreserved stock and in-transit packages are
+   * allocated once across all sources in stable priority order. */
+  private rebuildRequests(): void {
+    const previous = new Map(this.requests.map((row) => [`${row.source}::${row.commodity}`, row]));
+    this.requests.length = 0;
+    const commodities = [...new Set([...this.demands.values()].map((row) => row.commodity))].sort();
+    for (const commodity of commodities) {
+      const rows = [...this.demands.entries()].filter(([, row]) => row.commodity === commodity)
+        .sort((a, b) => Number(b[1].mandatory) - Number(a[1].mandatory) || a[1].createdAt - b[1].createdAt || a[1].source.localeCompare(b[1].source));
+      let free = this.quantity(commodity);
+      for (const pkg of this.packages.values()) if (pkg.commodity === commodity && (pkg.state === "ordered" || pkg.state === "in-transit") && !pkg.reservedBy) free += pkg.quantity;
+      for (const [key, demand] of rows) {
+        const satisfied = Math.min(demand.quantity, free); free -= satisfied;
+        const quantity = demand.quantity - satisfied;
+        if (quantity <= 0) continue;
+        const prior = previous.get(key);
+        this.requests.push({ id: prior?.id ?? this.nextRequestId++, commodity, quantity,
+          createdAt: prior?.createdAt ?? demand.createdAt, mandatory: demand.mandatory, source: demand.source });
+      }
     }
   }
 
@@ -440,7 +495,7 @@ export class LogisticsSystem {
     return {
       packages: [...this.packages.values()], trucks: this.trucks,
       externalExports: [...this.externalExports.values()], collectedExternal: [...this.collectedExternal],
-      requests: this.requests, nextPackageId: this.nextPackageId,
+      requests: this.requests, demands: [...this.demands.values()], nextPackageId: this.nextPackageId,
       nextRequestId: this.nextRequestId, nextTruckId: this.nextTruckId,
       lastExportDay: this.lastExportDay,
     };
@@ -463,6 +518,10 @@ export class LogisticsSystem {
     this.externalExports.clear(); for (const row of data.externalExports ?? []) this.externalExports.set(row.itemId, { ...row });
     this.collectedExternal.length = 0; this.collectedExternal.push(...(data.collectedExternal ?? []));
     this.requests.length = 0; this.requests.push(...(data.requests ?? []).map((r) => ({ ...r })));
+    this.demands.clear();
+    if (data.demands) for (const row of data.demands) this.demands.set(`${row.source}::${row.commodity}`, { ...row });
+    else for (const row of this.requests) this.demands.set(`${row.source}::${row.commodity}`, { source: row.source,
+      commodity: row.commodity, quantity: row.quantity, createdAt: row.createdAt, mandatory: row.mandatory });
     this.nextPackageId = data.nextPackageId ?? 1;
     this.nextRequestId = data.nextRequestId ?? 1;
     this.nextTruckId = data.nextTruckId ?? 1;

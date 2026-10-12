@@ -56,20 +56,21 @@ export class ManagementSystem {
   private readonly institution: InstitutionSystem;
   private readonly items: ItemSystem;
   private readonly staff: StaffProfileSystem;
+  private readonly liveManagerKinds = new Set<ManagerKind>();
 
   constructor(economy: EconomySystem, institution: InstitutionSystem, items: ItemSystem, staff: StaffProfileSystem) {
     this.economy = economy; this.institution = institution; this.items = items; this.staff = staff;
   }
 
   canHire(kind: number, agents: readonly Agent[]): boolean {
-    return !MANAGER_KINDS.has(kind) || !agents.some((agent) => agent.kind === kind);
+    return !MANAGER_KINDS.has(kind) || !agents.some((agent) => this.isWorkingManager(agent) && agent.kind === kind);
   }
 
   managerKind(agent: Agent): ManagerKind | null { return MANAGER_KINDS.get(agent.kind) ?? null; }
 
   tick(dt: number, time: number, world: World, agents: readonly Agent[], tunnels: readonly Tunnel[]): void {
     this.warnings.clear(); this.refreshAssignments(world, agents);
-    for (const procedure of this.procedures.values()) if (procedure.activeUntil <= time) this.procedures.delete(procedure.id);
+    for (const procedure of this.procedures.values()) if (procedure.activeUntil <= time || !this.liveManagerKinds.has(this.procedureManager(procedure.id))) this.procedures.delete(procedure.id);
     this.anomalyT -= dt;
     if (this.anomalyT <= 0) { this.anomalyT = 8; this.updateAnomalies(time, world, tunnels); }
     this.analysisT -= dt;
@@ -81,7 +82,7 @@ export class ManagementSystem {
     }
     for (const kind of MANAGER_KINDS.values()) if (![...this.assignments.values()].some((row) => row.kind === kind)) {
       const label = kind === "chief" ? "Chief Officer" : kind === "foreman" ? "Foreman" : "Accountant";
-      if (agents.some((agent) => this.managerKind(agent) === kind)) this.warnings.add(`${label} has no unclaimed valid Management Office`);
+      if (agents.some((agent) => this.isWorkingManager(agent) && this.managerKind(agent) === kind)) this.warnings.add(`${label} has no unclaimed valid Management Office`);
     }
   }
 
@@ -124,7 +125,7 @@ export class ManagementSystem {
 
   canActivateProcedure(id: ControlProcedureId): boolean {
     const required = this.procedureManager(id);
-    return [...this.assignments.values()].some((assignment) => assignment.kind === required);
+    return this.liveManagerKinds.has(required) && [...this.assignments.values()].some((assignment) => assignment.kind === required);
   }
 
   activateProcedure(id: ControlProcedureId, time: number, hours = 24, reportId = -1): boolean {
@@ -177,7 +178,9 @@ export class ManagementSystem {
   }
 
   private refreshAssignments(world: World, agents: readonly Agent[]): void {
-    const managers = agents.filter((agent) => MANAGER_KINDS.has(agent.kind)).sort((a, b) => a.id - b.id);
+    const managers = agents.filter((agent) => this.isWorkingManager(agent)).sort((a, b) => a.id - b.id);
+    this.liveManagerKinds.clear();
+    for (const manager of managers) this.liveManagerKinds.add(MANAGER_KINDS.get(manager.kind)!);
     const validRooms = [...world.rooms.values()].filter((room) => room.valid && room.type === RoomType.ManagementOffice).sort((a, b) => a.id - b.id);
     const claimedRooms = new Set<number>();
     for (const manager of managers) {
@@ -191,6 +194,10 @@ export class ManagementSystem {
     }
     const live = new Set(managers.map((manager) => manager.id));
     for (const id of [...this.assignments.keys()]) if (!live.has(id)) this.assignments.delete(id);
+  }
+
+  private isWorkingManager(agent: Agent): boolean {
+    return MANAGER_KINDS.has(agent.kind) && !["dead", "morgue", "removed"].includes(agent.state);
   }
 
   private updateAnomalies(time: number, world: World, tunnels: readonly Tunnel[]): void {

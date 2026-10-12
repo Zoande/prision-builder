@@ -56,6 +56,13 @@ function systems(size = 500) {
   for (const def of OBJ_DEFS.filter((row) => row.palette && row.place !== "person")) {
     assert.equal(catalog.filter((entry) => entry.label === def.palette!.label).length, 1, `${def.palette!.label} appears exactly once`);
   }
+  const staffCatalog = catalog.filter((entry) => entry.tool.cat === "person");
+  const playerStaff = OBJ_DEFS.filter((row) => row.place === "person" && row.palette && row.kind !== Obj.Prisoner);
+  for (const def of playerStaff) {
+    assert.equal(staffCatalog.filter((entry) => entry.tool.mat === def.kind).length, 1, `${def.palette!.label} is available exactly once`);
+  }
+  assert.equal(staffCatalog.some((entry) => entry.tool.mat === Obj.Prisoner), false, "prisoners enter through Reception intake");
+  assert.equal(staffCatalog.some((entry) => entry.tool.mat === Obj.Sniper), false, "snipers are deployed by facility systems, not hired from the catalog");
   for (const room of ROOM_DEFS) assert.equal(catalog.filter((entry) => entry.tool.cat === "room" && entry.tool.mat === room.type).length, 1);
   assert.ok(catalog.some((entry) => entry.section === "objects:logistics" && entry.label === "Loading Pallet"));
 }

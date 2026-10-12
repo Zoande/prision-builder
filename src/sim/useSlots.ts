@@ -27,6 +27,11 @@ export function useCount(A: Agents, anchor: number): number {
 
 
 export function releaseUse(A: Agents, ag: Agent) {
+  const mealTable = A.mealUseClaims.get(ag.id);
+  if (mealTable !== undefined) {
+    A.mealUseClaims.delete(ag.id);
+    A.mealTableAvailable.set(mealTable, (A.mealTableAvailable.get(mealTable) ?? 0) + 1);
+  }
   if (ag.useIdx < 0) return;
   const set = A.useClaims.get(ag.useIdx);
   if (set) {
@@ -49,7 +54,7 @@ export function useable(A: Agents, ag: Agent, world: World, anchor: number, kind
   if (use.owned && ag.bedIdx !== anchor) return false;
   // You can't eat at a table without a tray — unless someone left one there.
   if (use.requires !== undefined && !hasItem(ag.inv, use.requires)) {
-    if (!(kind === Obj.Table && A.mealTables.has(anchor))) return false;
+    if (!(kind === Obj.Table && (A.mealTableAvailable.get(anchor) ?? 0) > 0)) return false;
   }
   // You can't take what it hands out if you've no hand free for it.
   if (use.gives !== undefined) {
@@ -189,11 +194,25 @@ export function startUse(A: Agents, ag: Agent, world: World) {
 
   // Set the tray down on the table before eating it (a leftover if he's
   // interrupted — which is exactly how leftovers happen today).
+  let tableMealClaimed = false;
   if (use.requires !== undefined && hasItem(ag.inv, use.requires)) {
     if (use.consumes !== undefined) {
-      removeItem(ag.inv, use.consumes);
-      if (kind === Obj.Table) { A.mealTables.add(anchor); A.mealsDirty = true; }
+      if (removeItem(ag.inv, use.consumes) && kind === Obj.Table) {
+        A.mealTables.add(anchor);
+        A.mealTableMeals.set(anchor, (A.mealTableMeals.get(anchor) ?? 0) + 1);
+        A.mealUseClaims.set(ag.id, anchor);
+        tableMealClaimed = true;
+        A.mealsDirty = true;
+      }
     }
+  }
+  // A diner using a leftover reserves that one meal; do not count a second
+  // setting simply because another inmate also sits at the same table.
+  if (kind === Obj.Table && !tableMealClaimed && (A.mealTableAvailable.get(anchor) ?? 0) > 0) {
+    const available = A.mealTableAvailable.get(anchor)! - 1;
+    if (available > 0) A.mealTableAvailable.set(anchor, available);
+    else A.mealTableAvailable.delete(anchor);
+    A.mealUseClaims.set(ag.id, anchor);
   }
   // Take what it hands out.
   if (use.gives !== undefined) {
@@ -267,9 +286,23 @@ export function finishUse(A: Agents, ag: Agent, world: World) {
   const kind = ag.useIdx >= 0 ? world.objKind[ag.useIdx] : Obj.None;
   const use = defOf(kind)?.use;
   // The meal is finished, so the tray goes.
-  if (kind === Obj.Table && A.mealTables.delete(ag.useIdx)) A.mealsDirty = true;
-  // Eating is also how a man squirrels away a spoon or works a cutter loose.
+  let finishedMeal = false;
   if (kind === Obj.Table) {
+    if (A.mealUseClaims.get(ag.id) === ag.useIdx) {
+      A.mealUseClaims.delete(ag.id);
+      const meals = A.mealTableMeals.get(ag.useIdx) ?? 1;
+      if (meals > 1) A.mealTableMeals.set(ag.useIdx, meals - 1);
+      else {
+        A.mealTableMeals.delete(ag.useIdx);
+        A.mealTableAvailable.delete(ag.useIdx);
+        A.mealTables.delete(ag.useIdx);
+        A.mealsDirty = true;
+      }
+      finishedMeal = true;
+    }
+  }
+  // Eating is also how a man squirrels away a spoon or works a cutter loose.
+  if (kind === Obj.Table && finishedMeal) {
     const wantsSpoon = ag.plan?.method === "dig" && toolCount(A, ag, Item.Spoon) < 4 &&
       (A.task3?.mayTakeSpoon(ag.id, A.simTime) ?? true);
     const spoonStolen = A.kitchen?.finishMeal(wantsSpoon, ag.id) ?? false;

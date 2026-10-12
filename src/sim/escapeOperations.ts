@@ -36,7 +36,7 @@ export interface EscapeOperation {
   launchAt: number;
   blocker: string;
   tunnelNetworkId: number;
-  acquisition: { asset: string; sources: string[]; state: "needed" | "acquired" | "lost"; holderId: number; itemId: number } | null;
+  acquisition: { asset: string; sources: string[]; state: "needed" | "acquired" | "lost"; holderId: number; itemId: number; itemIds?: number[] } | null;
   distraction: { planned: boolean; instigatorId: number; state: "none" | "pending" | "active" | "complete"; engagementId: number };
   /** Task 3 preparation graph. When set, this graph owns launch timing. */
   advancedSchemeId: number;
@@ -361,15 +361,15 @@ export class EscapeOperationsSystem {
   private initialAcquisition(method: Method, operationId: number): EscapeOperation["acquisition"] {
     if (method === "cut") {
       const asset = ["cutter", "hacksaw-blade", "pruning-shears"][operationId % 3];
-      return { asset, sources: ["metalshop", "greenhouse", "trade", "crafting", "theft"], state: "needed", holderId: -1, itemId: -1 };
+      return { asset, sources: ["metalshop", "greenhouse", "trade", "crafting", "theft"], state: "needed", holderId: -1, itemId: -1, itemIds: [] };
     }
     if (method === "dig") {
       const asset = ["spoon", "trowel", "shovel"][operationId % 3];
-      return { asset, sources: ["canteen", "greenhouse", "groundskeeping", "trade", "theft"], state: "needed", holderId: -1, itemId: -1 };
+      return { asset, sources: ["canteen", "greenhouse", "groundskeeping", "trade", "theft"], state: "needed", holderId: -1, itemId: -1, itemIds: [] };
     }
     const assets = ["staff-key", "guard-key", "staff-uniform", "rope", "radio", "service-pistol"];
     const asset = assets[operationId % assets.length];
-    return { asset, sources: ["laundry", "maintenance", "groundskeeping", "trade", "theft", "assault"], state: "needed", holderId: -1, itemId: -1 };
+    return { asset, sources: ["laundry", "maintenance", "groundskeeping", "trade", "theft", "assault"], state: "needed", holderId: -1, itemId: -1, itemIds: [] };
   }
   private random(): number { let x = this.rngState | 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; this.rngState = x >>> 0; return this.rngState / 0x1_0000_0000; }
 
@@ -384,7 +384,8 @@ export class EscapeOperationsSystem {
   loadData(data: Partial<ReturnType<EscapeOperationsSystem["saveData"]>>): void {
     this.operations.clear();
     for (const o of data.operations ?? []) this.operations.set(o.id, { ...o, members: o.members.map((m) => ({ ...m })), plan: this.copyPlan(o.plan), sharedIntel: [...o.sharedIntel], cache: { ...o.cache },
-      acquisition: o.acquisition ? { ...o.acquisition, sources: [...o.acquisition.sources] } : this.initialAcquisition(o.method, o.id),
+      acquisition: o.acquisition ? { ...o.acquisition, sources: [...o.acquisition.sources],
+        itemIds: [...(o.acquisition.itemIds ?? (o.acquisition.itemId >= 0 ? [o.acquisition.itemId] : []))] } : this.initialAcquisition(o.method, o.id),
       distraction: o.distraction ? { ...o.distraction } : { planned: false, instigatorId: -1, state: "none", engagementId: -1 },
       advancedSchemeId: o.advancedSchemeId ?? -1, advancedReady: o.advancedReady ?? false });
     this.tunnels.clear();

@@ -14,10 +14,14 @@ export class EscapeSupportSystem {
   tick(time: number, agents: readonly Agent[], operations: EscapeOperationsSystem): void {
     for (const op of operations.operations.values()) {
       if (["completed", "failed", "dissolved"].includes(op.state)) continue;
-      if (op.acquisition) {
+      // Once Task 3 owns the preparation graph it owns exact asset staging
+      // and quantity receipts; the legacy single-item sweep must not collapse
+      // a multi-tool acquisition back to one visible item.
+      if (op.acquisition && op.advancedSchemeId < 0) {
         const held = this.findAsset(op.acquisition.asset, op.members.map((m) => m.agentId));
         if (held) {
           op.acquisition.state = "acquired"; op.acquisition.holderId = held.owner; op.acquisition.itemId = held.itemId;
+          op.acquisition.itemIds = [held.itemId];
           const holder = agents.find((a) => a.id === held.owner);
           if (holder && ["cutter", "hacksaw-blade", "pruning-shears"].includes(op.acquisition.asset) && countItem(holder.inv, Item.Cutter) === 0) stow(holder.inv, Item.Cutter);
           if (holder && ["spoon", "trowel", "shovel"].includes(op.acquisition.asset) && countItem(holder.inv, Item.Spoon) === 0) stow(holder.inv, Item.Spoon);

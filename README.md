@@ -12,13 +12,13 @@ WGSL passes; the simulation is a plain TypeScript tile world.
 
 - A **WebGPU-capable browser** (Chrome/Edge 113+). The page shows an error banner
   if WebGPU is unavailable.
-- **Node 22+** — the dev scripts import `.ts` files directly and rely on Node's
+- **Node 22.18+ or Node 24+** — the dev scripts import `.ts` files directly and rely on Node's
   native type stripping.
 
 ## Quick start
 
 ```bash
-npm install
+npm ci
 npm run dev      # vite dev server
 ```
 
@@ -29,7 +29,12 @@ npm run dev      # vite dev server
 | `npm run preview` | Serve the built `dist/`. |
 | `npm run runtime-textures` | Rebuild committed 1K derivatives from licensed 4K sources. |
 | `npm run textures` | Re-encode the compressed textures (see below). |
-| `npm run check` | Run roof, stability, asset, construction, logistics, economy, kitchen, and intake checks. |
+| `npm run check` | Simulation regressions covering construction, supplies, meals, intake, behavior, security, health, work, management, escape preparation, and saves. |
+| `npm run sim-check` | Compare deterministic simulation behavior against its reviewed golden snapshot. |
+| `npm run check:playthrough` | Play two seeded prisons for four days each, checking live services, needs, population, and ownership. |
+| `npm run check:browser` | Use Chromium with real WebGPU to test canvas construction, catalogs, controls, saving, and responsive UI. |
+| `npm run check:production` | After `npm run build`, verify bundled WebGPU rendering and catalog controls in Chromium. |
+| `npm run check:ui` | Chromium component checks for care, needs, policy, work search, and institutional dashboards. |
 
 ## Controls
 
@@ -42,14 +47,42 @@ Camera is an orbit rig over the ground plane:
 - **Right-drag / WASD** — pan. **Wheel** — zoom.
 - **R** — rotate the pending object. **Esc/right-click** — discard the current
   transient preview.
+- **Space** — pause or resume. Keyboard shortcuts yield to text inputs.
+- **Click without a tool selected** — inspect a resident, room, or fixture.
 
 Tools live in the build palette (bottom of screen): floors, walls, fences, doors
 and jail doors, furniture, logistics fixtures, staff, room painting, and access
 zones. Prisoners arrive through scheduled intake rather than a normal placement
-tool. Logistics mode opens stock, vehicle, export, and ledger data. Intelligence
-mode opens the complete inmate roster: identity, custody, aptitudes, personality,
-skills, criminal record, emotions, relationships, sourced intelligence, cliques,
-and shared escape operations.
+tool. Search spans every catalog category, including logistics fixtures and
+specialized rooms. Room inspectors show missing requirements and link directly
+to the relevant tools. Staff mode includes a searchable live duty roster.
+Logistics mode opens stock, vehicles, exports, work assignments, and deployment.
+Intelligence mode shows the inmate roster and information the institution has
+learned; resident inspectors show welfare needs. Policy and management controls
+let you adjust searches, discipline, staffing, and active procedures.
+Open **Intelligence → Needs** for prison-wide urgent needs and links to affected
+residents. Work assignments, deployment and access lists can be searched, and
+policy fields show their names and explanations on phones.
+
+New prisons start paused. **Getting started** links to the tools for a delivery
+yard, workmen, Reception, housing, meals, and guards, and shows their current
+readiness. Supply deliveries require a valid road-connected Delivery Yard and
+Loading Pallet. Kitchen and library stock arrive physically and staff carry
+them to their destinations; clear routes matter as much as buying furniture.
+
+The browser check uses `/usr/bin/chromium` when available, or Playwright's
+installed Chromium. Set `CHROMIUM_PATH` to use another executable; otherwise
+install it with `npx playwright install chromium`. Screenshots and runtime
+errors go to `/tmp/prison-builder-playtest` (override with `PLAYTEST_ARTIFACTS`).
+The test supplies isolated save endpoints and never overwrites your dev save.
+For a longer simulation soak:
+
+```bash
+npm run check:playthrough -- --days=12 --seeds=12345,9876,773
+```
+
+A failed soak writes its full replayable state to
+`/tmp/prison-builder-playthrough/failure-<seed>.json`.
 
 ## Layout
 

@@ -1,17 +1,26 @@
 import { Camera } from "./camera";
+import { advanceSimulation } from "./sim/simulation";
 import { invert } from "./math";
-import { DIRS, NEEDS, Obj, RoomType, World, defOf } from "./sim/world";
+import { DIRS, NEEDS, Obj, RoomType, World, defOf, roomDef } from "./sim/world";
 import {
   Agents, CARGO_KIND, DRIVER_KIND, FOOD_KIND, HOLE_ENTRY_KIND, HOLE_SURF_KIND,
   INTAKE_TRUCK_KIND, MEDICAL_VEHICLE_KIND, OUTSIDE_VEHICLE_KIND, TRAY_STACK_KIND, TRUCK_KIND, VISITOR_VEHICLE_KIND,
-  REG, REG_NAMES, type Agent, type IssueLabel,
+  REG_NAMES, type Agent, type IssueLabel,
 } from "./sim/agents";
 import {
   PersonInstanceStager, foodInstances, holeInstances, trayStackInstances,
   logisticsInstances,
 } from "./sim/renderData";
 import { Item, countItem, itemDef } from "./sim/items";
-import { Editor } from "./editor";
+import { Editor, catalogSnapshot } from "./editor";
+import { FacilityInspector, type FacilityRoomSelection } from "./ui/facilityInspector";
+import { StaffRoster } from "./ui/staffRoster";
+import { residentCareMarkup, type ResidentCareFacts } from "./ui/residentCare";
+import { collectServiceProblems } from "./sim/serviceProblems";
+import { WelfareOverview, type WelfareNeedAction } from "./ui/welfareOverview";
+import { annotatePolicyControls } from "./ui/policyControls";
+import { annotateWorkAssignments } from "./ui/workAssignments";
+import { annotateInstitutionalDashboard } from "./ui/institutionalDashboard";
 import { clockLabel, dayOf, evalAtmosphere, HOUR_SECONDS, hourOf, isNightAt } from "./daynight";
 import { GroundPass } from "./render/groundPass";
 import { FloorPass } from "./render/floorPass";
@@ -185,8 +194,20 @@ async function main() {
   task2.escapeOperations = agents.escapeOperations;
   const personStager = new PersonInstanceStager();
   let saveDirty = false;
+  let saveRevision = 0;
+  function markSaveDirty(): void { saveDirty = true; saveRevision++; }
+  const simulation = { world, agents, economy, logistics, construction, kitchen, intake, task2, task3 };
 
+  let renderRevision = 0;
+  let furnitureStateKey = "";
+  let peopleStateKey = "";
+  let ghostStateKey = "";
+  let lastRenderKey = "";
+  let renderedFrames = 0;
   function refreshFurniture() {
+    const key = `${worldTime}:${saveRevision}:${renderRevision}`;
+    if (key === furnitureStateKey) return;
+    furnitureStateKey = key;
     const byKind = world.furnitureInstances();
     byKind.set(FOOD_KIND, foodInstances(agents, world));
     byKind.set(TRAY_STACK_KIND, trayStackInstances(agents, world));
@@ -208,6 +229,7 @@ async function main() {
 
   // Push current sim state into all instance buffers.
   function rebuild() {
+    renderRevision++;
     agents.sync(world); // person tiles placed by the editor come alive
     world.recomputeRoofs();
     world.recomputeRooms();
@@ -288,6 +310,17 @@ async function main() {
       task3.loadData(data.task3 ?? {}, world);
       construction.reconcile(world, new Set(agents.agents.filter((agent) => agent.kind === Obj.Workman).map((agent) => agent.id)));
       if (typeof data.worldTime === "number") worldTime = data.worldTime;
+      if (data.view) {
+        camera.target = [...data.view.target];
+        camera.yaw = data.view.yaw;
+        camera.pitch = data.view.pitch;
+        camera.distance = data.view.distance;
+      } else {
+        const pieces = [...world.pieces.values()];
+        camera.target = pieces.length ? [pieces.reduce((sum, piece) => sum + piece.x, 0) / pieces.length, 0,
+          pieces.reduce((sum, piece) => sum + piece.z, 0) / pieces.length] : [368, 0, 375];
+        camera.distance = 72;
+      }
       loadedV6 = true;
     } else if (data && typeof data === "object" && ("world" in data || [1, 2, 3, 4, 5].includes(Number((data as { version?: unknown }).version)))) {
       incompatibleSave = true;
@@ -314,10 +347,13 @@ async function main() {
     b.className = "spd";
     b.textContent = s === 0 ? "⏸" : `${s}x`;
     if (s === speed) b.classList.add("on");
+    b.setAttribute("aria-label", s === 0 ? "Pause simulation" : `Simulation speed ${s} times`);
+    b.setAttribute("aria-pressed", String(s === speed));
     b.onclick = () => {
       speed = s;
-      speedBtns.forEach((x) => x.classList.remove("on"));
+      speedBtns.forEach((x) => { x.classList.remove("on"); x.setAttribute("aria-pressed", "false"); });
       b.classList.add("on");
+      b.setAttribute("aria-pressed", "true");
     };
     speedsEl.appendChild(b);
     speedBtns.push(b);
@@ -335,17 +371,19 @@ async function main() {
       const label = document.createElement("span");
       label.className = "reg-hour";
       label.textContent = `${String(h).padStart(2, "0")}:00`;
-      const act = document.createElement("div");
+      const act = document.createElement("button");
+      act.type = "button";
       act.className = "reg-act";
       const paint = () => {
         act.textContent = REG_NAMES[agents.regime[h]];
+        act.setAttribute("aria-label", `${String(h).padStart(2, "0")}:00 · ${REG_NAMES[agents.regime[h]]}`);
         act.style.background = REG_COLORS[agents.regime[h]] + "55";
         act.style.borderColor = REG_COLORS[agents.regime[h]];
       };
       paint();
       act.onclick = () => {
         agents.regime[h] = (agents.regime[h] + 1) % REG_NAMES.length;
-        saveDirty = true;
+        markSaveDirty();
         paint();
       };
       row.appendChild(label);
@@ -355,11 +393,13 @@ async function main() {
   }
   buildRegimePanel();
   regimeBtn.addEventListener("click", () => {
-    regimePanel.style.display = regimePanel.style.display === "flex" ? "none" : "flex";
+    const show = regimePanel.style.display !== "flex";
+    regimePanel.style.display = show ? "flex" : "none";
+    regimeBtn.setAttribute("aria-expanded", String(show));
   });
 
   const editor = new Editor();
-  editor.onChange = () => { camera.buildMode = editor.active; };
+  editor.onChange = () => { camera.buildMode = editor.active; updateBuildQuote(); if (activeMode === "staff") updateStaffRoster(); };
   const noticeEl = document.getElementById("notice")!;
   let noticeTimer = 0;
   function notify(message: string): void {
@@ -385,7 +425,7 @@ async function main() {
     incompatibleSave = false;
     incompatibleData = null;
     startMenu.classList.remove("show");
-    saveDirty = true;
+    markSaveDirty();
     notify("Fresh v6 prison started. The game is paused while you prepare.");
   });
   document.getElementById("saveNowBtn")!.addEventListener("click", () => void saveNow());
@@ -416,45 +456,63 @@ async function main() {
   const policyDashboard = document.getElementById("policyDashboard")!;
   const intelligenceDashboard = document.getElementById("intelligenceDashboard")!;
   let activeMode = "";
-  document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const mode = btn.dataset.mode ?? "build";
-      if (activeMode === mode) {
-        activeMode = "";
-        btn.classList.remove("on");
-        buildPanel.classList.remove("open");
-        editor.clear();
-        logisticsDashboard.classList.remove("show");
-        financialsDashboard.classList.remove("show");
-        policyDashboard.classList.remove("show");
-        intelligenceDashboard.classList.remove("show");
-        return;
-      }
-      document.querySelectorAll(".mode-btn").forEach((x) => x.classList.remove("on"));
-      btn.classList.add("on");
-      activeMode = mode;
-      buildPanel.classList.toggle("open", !["financials", "intelligence", "policy", "admin"].includes(mode));
-      editor.setMode(mode);
-      logisticsDashboard.classList.toggle("show", mode === "logistics");
-      financialsDashboard.classList.toggle("show", mode === "financials");
-      policyDashboard.classList.toggle("show", mode === "policy");
-      intelligenceDashboard.classList.toggle("show", mode === "intelligence");
+  function changeMode(mode: string): void {
+    activeMode = mode;
+    selectedFacilityTile = null;
+    facilityInspector.clear();
+    if (mode === "staff") { selected = null; overlay.clear(); updateInspector(); }
+    document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((button) => {
+      const active = button.dataset.mode === mode;
+      button.classList.toggle("on", active);
+      button.setAttribute("aria-pressed", String(active));
     });
+    buildPanel.classList.toggle("open", !!mode && !["financials", "intelligence", "policy"].includes(mode));
+    if (mode) editor.setMode(mode);
+    else editor.clear();
+    logisticsDashboard.classList.toggle("show", mode === "logistics");
+    financialsDashboard.classList.toggle("show", mode === "financials");
+    policyDashboard.classList.toggle("show", mode === "policy");
+    intelligenceDashboard.classList.toggle("show", mode === "intelligence");
+    staffRoster.setOpen(mode === "staff");
+    if (mode === "staff") updateStaffRoster();
+    if (mode === "logistics") updateLogisticsUi();
+    else if (mode === "financials") updateFinancialsUi();
+    else if (mode === "policy") updatePolicyUi();
+    else if (mode === "intelligence") updateIntelligenceUi();
+  }
+  document.querySelectorAll<HTMLButtonElement>(".mode-btn").forEach((button) => {
+    button.addEventListener("click", () => changeMode(activeMode === button.dataset.mode ? "" : button.dataset.mode ?? "build"));
   });
+  document.addEventListener("click", (event) => {
+    if ((event.target as HTMLElement).closest("[data-close-dashboard]")) changeMode("");
+  });
+  const emergencyBar = document.getElementById("emergencyBar")!;
+  const emergencyToggle = document.getElementById("emergencyToggleBtn")!;
+  const emergencyStatus = document.getElementById("emergencyCurrentStatus")!;
+  function showEmergencyCommands(show: boolean): void {
+    emergencyBar.classList.toggle("open", show);
+    emergencyToggle.setAttribute("aria-expanded", String(show));
+  }
+  emergencyToggle.addEventListener("click", () => showEmergencyCommands(!emergencyBar.classList.contains("open")));
   document.querySelectorAll<HTMLButtonElement>("[data-emergency]").forEach((button) => button.onclick = () => {
     task2.security.command((button.dataset.emergency ?? "none") as never, worldTime, agents.agents);
-    saveDirty = true;
+    showEmergencyCommands(false);
+    markSaveDirty();
   });
 
   // Roof transparency toggle.
   let roofAlpha = ROOF_SOLID;
   const roofBtn = document.getElementById("roofBtn") as HTMLButtonElement;
+  roofBtn.setAttribute("aria-label", "Make roofs transparent");
+  roofBtn.setAttribute("aria-pressed", "false");
   roofBtn.addEventListener("click", () => {
     const solid = roofAlpha === ROOF_SOLID;
     roofAlpha = solid ? ROOF_GHOST : ROOF_SOLID;
     roofBtn.textContent = solid ? "\u25B1" : "\u2302";
     roofBtn.title = solid ? "Roof: Transparent" : "Roof: Solid";
     roofBtn.classList.toggle("off", solid);
+    roofBtn.setAttribute("aria-pressed", String(solid));
+    roofBtn.setAttribute("aria-label", solid ? "Make roofs solid" : "Make roofs transparent");
   });
 
   // --- Build placement (left button while a tool is active) -------------
@@ -464,8 +522,8 @@ async function main() {
   let dragPlaced = new Set<string>();
   let hoverTile: { x: number; z: number } | null = null;
 
-  function isOrderTool(): boolean {
-    const cat = editor.tool?.cat;
+  function isOrderTool(tool = editor.tool): boolean {
+    const cat = tool?.cat;
     return !!cat && [
       "floor", "wall", "fence", "door", "staffdoor", "jaildoor", "fencedoor",
       "fencestaffdoor", "fencejaildoor", "lamp", "walllight", "rooflight", "piece", "erase",
@@ -497,13 +555,13 @@ async function main() {
         return;
       }
       const kind = cat === "person" ? editor.tool!.mat : cat === "guard" ? Obj.Guard : cat === "cook" ? Obj.Cook : Obj.Workman;
-      if (!task3.canHire(kind, agents.agents)) { notify("That management role is already filled."); return; }
+      if (world.tilesOfKind(kind).length > 0 && [Obj.ChiefOfficer, Obj.Foreman, Obj.Accountant].includes(kind as never) || !task3.canHire(kind, agents.agents.filter((agent) => !["removed", "dead", "morgue"].includes(agent.state) && task2.health.state(agent.id)?.alive !== false))) { notify("That management role is already filled."); return; }
       if (!economy.hire(kind, worldTime)) {
         notify(`Hiring requires $${economy.hireFee(kind).toLocaleString()}; only $${Math.max(0, Math.floor(economy.cash)).toLocaleString()} is available.`);
         return;
       }
     }
-    if (!isOrderTool() && editor.apply(world, tx, tz)) { dirty = true; saveDirty = true; }
+    if (!isOrderTool() && editor.apply(world, tx, tz)) { dirty = true; markSaveDirty(); }
     // Deployment acts on the guard roster, not on tiles, so it lives here.
     const dcat = editor.tool?.cat;
     if (dcat === "deploy" || dcat === "undeploy") {
@@ -521,10 +579,10 @@ async function main() {
           if (after !== room.guards) { room.guards = after; changed = true; }
         }
       }
-      if (changed) { dirty = true; saveDirty = true; }
+      if (changed) { dirty = true; markSaveDirty(); }
     }
     // Tools that act on live agents rather than tiles.
-    if (editor.tool?.cat === "baton" && agents.giveBatonAt(tx, tz)) saveDirty = true;
+    if (editor.tool?.cat === "baton" && agents.giveBatonAt(tx, tz)) markSaveDirty();
   }
 
   function applyFloorRect(to: { x: number; z: number }) {
@@ -661,7 +719,7 @@ async function main() {
       if (agent) {
         if (agent.kind === Obj.Prisoner) return false; // prisoners are intake-controlled
         agents.removeAgent(agent); // firing is immediate and has no refund
-        saveDirty = true;
+        markSaveDirty();
         return true;
       }
     }
@@ -670,12 +728,13 @@ async function main() {
       notify(construction.lastIssue?.message ?? "Nothing can be built at that location.");
       return false;
     }
-    saveDirty = true;
+    markSaveDirty();
     return true;
   }
 
   // Agent inspection (click with no tool active).
   let selected: Agent | null = null;
+  let selectedFacilityTile: number | null = null;
   let overlayT = 0;
   let staffLayerWasUp = false;
   function selectAt(e: PointerEvent) {
@@ -686,9 +745,93 @@ async function main() {
     const hit = pickGround(vp, camera.eye(), ndcX, ndcY);
     if (!hit) return;
     selected = agents.agentNear(hit[0], hit[1], 1.5);
+    selectedFacilityTile = selected ? null : world.inBounds(Math.floor(hit[0]), Math.floor(hit[1]))
+      ? world.idx(Math.floor(hit[0]), Math.floor(hit[1])) : null;
+    updateFacilityInspector();
     overlayT = 0;
     if (!selected) overlay.clear();
     updateInspector();
+  }
+
+  const staffRoster = new StaffRoster({
+    select: (id) => {
+      selected = agents.agents.find((agent) => agent.id === id) ?? null;
+      selectedFacilityTile = null;
+      editor.clear(); facilityInspector.clear();
+      if (selected) { camera.target = [selected.x, 0, selected.z]; camera.distance = Math.min(camera.distance, 45); }
+      updateInspector();
+    },
+    hire: () => openCatalog("staff", "staff:people"),
+    close: () => changeMode(""),
+  });
+  function updateStaffRoster(): void {
+    const rows = agents.agents.filter((agent) => agent.kind !== Obj.Prisoner &&
+      !["removed", "dead", "morgue"].includes(agent.state) && task2.health.state(agent.id)?.alive !== false).map((agent) => {
+      const profile = task3.staff.profiles.get(agent.id), duty = task2.security.staff.get(agent.id), health = task2.health.state(agent.id);
+      const posting = task2.security.postings.get(agent.id);
+      const assignment = agent.buildGroup >= 0 ? `Construction order #${agent.buildGroup}` : posting ? `Area ${posting.areaId}` :
+        agent.routeId >= 0 ? `Patrol route ${agent.routeId}` : agent.postRoom >= 0 ? `Room ${agent.postRoom}` : "Available for duties";
+      return { id: agent.id, name: profile ? `${profile.firstName} ${profile.lastName}` : `${agentKindName(agent.kind)} #${agent.id}`,
+        role: agentKindName(agent.kind), currentState: STATE_TEXT[agent.state] ?? agent.state.replace(/([A-Z])/g, " $1"),
+        assignment, fatiguePercent: Math.round((duty?.fatigue ?? 0) * 100), onBreak: duty?.onBreak ?? false,
+        medicalStatus: health?.admitted ? "In treatment" : health && health.consciousness <= .08 ? "Unconscious" : health?.injuries.some((injury) => !injury.treated) ? "Injured" : "Fit for duty" };
+    });
+    staffRoster.update(rows);
+    staffRoster.setSelected(selected?.kind !== Obj.Prisoner ? selected?.id ?? null : null);
+    staffRoster.setOpen(activeMode === "staff" && selectedFacilityTile === null && !selected && !editor.active);
+  }
+
+  const facilityInspector = new FacilityInspector({
+    openCatalog: (section) => openCatalog(section.startsWith("rooms:") ? "rooms" : section.startsWith("build:") ? "build" : "objects", section),
+    paintRoom: (type) => {
+      const entry = catalogSnapshot().find((row) => row.tool.cat === "room" && row.tool.mat === type);
+      if (entry) { openCatalog("rooms", entry.section); editor.selectTool({ cat: "room", mat: type }); }
+    },
+    assignGuard: (id) => {
+      const room = world.rooms.get(id);
+      if (room) { room.guards++; markSaveDirty(); overlayT = 0; updateFacilityInspector(); }
+    },
+    removeGuard: (id) => {
+      const room = world.rooms.get(id);
+      if (room) { room.guards = Math.max(0, room.guards - 1); markSaveDirty(); overlayT = 0; updateFacilityInspector(); }
+    },
+    close: () => { selectedFacilityTile = null; if (activeMode === "staff") updateStaffRoster(); },
+  });
+  function facilityRoom(id: number): FacilityRoomSelection | undefined {
+    const room = world.rooms.get(id);
+    if (!room || !room.tiles.size) return;
+    const bounds = [...room.tiles].reduce((box, tile) => {
+      const x = tile % world.size, z = Math.floor(tile / world.size);
+      box.x0 = Math.min(box.x0, x); box.x1 = Math.max(box.x1, x);
+      box.z0 = Math.min(box.z0, z); box.z1 = Math.max(box.z1, z); return box;
+    }, { x0: Infinity, x1: -Infinity, z0: Infinity, z1: -Infinity });
+    const definition = roomDef(room.type), issues = world.roomIssues(room);
+    const areaId = task2.areas.areaAt[room.tiles.values().next().value!];
+    const area = task2.areas.access.get(areaId);
+    const capacity = [RoomType.Cell, RoomType.Dorm, RoomType.Solitary].includes(room.type as never)
+      ? `${world.piecesOfKind(Obj.Bed).filter((bed) => world.pieceTiles(bed).some((tile) => room.tiles.has(tile))).length} beds` : undefined;
+    return { kind: "room", id, name: `${definition?.name ?? "Room"} #${id}`,
+      status: issues.length ? "Needs attention" : "Operational", operational: room.valid,
+      tiles: room.tiles.size, width: bounds.x1 - bounds.x0 + 1, depth: bounds.z1 - bounds.z0 + 1,
+      capacity, access: room.access === 1 ? "Prisoners" : room.access === 2 ? "Forbidden" : "Staff",
+      custody: area?.roles.prisoner ? Object.entries(area.custody).filter(([, allowed]) => allowed).map(([name]) => name).join(", ") : "Staff only",
+      guards: room.guards, paintType: room.type,
+      requirements: issues.map((issue) => ({ text: issue.message, catalogSection: issue.suggestedCatalog || undefined })),
+      details: [{ label: "Area", value: `${areaId}${area?.mixed ? " · custody mixing allowed" : " · custody mixing disabled"}` }],
+    };
+  }
+  function updateFacilityInspector(): void {
+    if (selectedFacilityTile === null || editor.active) { facilityInspector.clear(); return; }
+    staffRoster.setOpen(false);
+    const tile = selectedFacilityTile, piece = world.pieceAtTile(tile), definition = defOf(world.objKind[tile]);
+    const room = world.roomAt(tile), context = room ? facilityRoom(room.id) : undefined;
+    if (definition && definition.kind !== Obj.None) {
+      const details = [];
+      if (definition.kind === Obj.Freezer) details.push({ label: "Frozen meals", value: `${kitchen.frozenMeals}/${kitchen.freezerCapacity} in prison storage` });
+      if (definition.kind === Obj.ServingTable) details.push({ label: "Ready meals", value: String(agents.servingStock.get(world.anchorOf(tile)) ?? 0) });
+      facilityInspector.update({kind:"object", id:piece?.id, name:definition.name,
+        width:piece?.w ?? definition.w, depth:piece?.d ?? definition.d, room:context, details });
+    } else facilityInspector.update(context ?? null);
   }
 
   const inspector = document.getElementById("inspector")!;
@@ -696,12 +839,19 @@ async function main() {
   const inspectState = document.getElementById("inspectState")!;
   const inspectStats = document.getElementById("inspectStats")!;
   const inspectProfile = document.getElementById("inspectProfile")!;
+  const inspectCare = document.getElementById("inspectCare")!;
   const agentKindName = (kind: number): string => ({ [Obj.Prisoner]: "Prisoner", [Obj.Guard]: "Guard", [Obj.Cook]: "Cook",
     [Obj.Workman]: "Workman", [Obj.Doctor]: "Doctor", [Obj.Investigator]: "Investigator", [Obj.DogHandler]: "Dog Handler",
     [Obj.ArmedGuard]: "Armed Guard", [Obj.SecurityDog]: "Security Dog", [Obj.Sniper]: "Sniper",
     [Obj.ChiefOfficer]: "Chief Officer", [Obj.Foreman]: "Foreman", [Obj.Accountant]: "Accountant" }[kind] ?? "Staff");
+  const needLabels: Record<typeof NEEDS[number], string> = {
+    food: "Food", sleep: "Rest", hygiene: "Hygiene", bladder: "Bladder", comfort: "Comfort", outdoors: "Outdoors",
+    recreation: "Recreation", exercise: "Exercise", social: "Social", spirituality: "Spirituality", family: "Family",
+    safety: "Safety", privacy: "Privacy", tobacco: "Tobacco", alcohol: "Alcohol", drugs: "Drugs",
+  };
   const inspectValues = new Map<string, HTMLElement>();
-  for (const label of ["Food", "Rest", "Comfort", "Outdoors", "Social", "Stress"]) {
+  for (const need of NEEDS) {
+    const label = needLabels[need];
     const stat = document.createElement("div");
     stat.className = "inspect-stat";
     const small = document.createElement("small");
@@ -716,8 +866,11 @@ async function main() {
     const kind = agentKindName(selected.kind);
     const pct = (v: number) => `${Math.round(v * 100)}%`;
     const profile = selected.profile;
-    inspectStats.style.display = "none"; // exact private needs/emotions belong to developer diagnostics, not player intelligence
-    const name = profile ? `${profile.firstName} ${profile.lastName}` : `${kind} #${selected.id}`;
+    inspectStats.style.display = selected.kind === Obj.Prisoner ? "grid" : "none";
+    inspectCare.style.display = selected.kind === Obj.Prisoner ? "block" : "none";
+    if (selected.kind === Obj.Prisoner) setPanelMarkup(inspectCare, residentCareMarkup(residentCareFacts(selected)));
+    const staffProfile = task3.staff.profiles.get(selected.id);
+    const name = profile ? `${profile.firstName} ${profile.lastName}` : staffProfile ? `${staffProfile.firstName} ${staffProfile.lastName} · ${kind}` : `${kind} #${selected.id}`;
     const socialAction = selected.socialAction === "arguing" ? " · arguing" : selected.socialAction === "talking" ? " · socializing" : "";
     const state = (STATE_TEXT[selected.state] ?? selected.state) + socialAction;
     if (inspectName.textContent !== name) inspectName.textContent = name;
@@ -726,26 +879,36 @@ async function main() {
       const el = inspectValues.get(label)!;
       if (el.textContent !== value) el.textContent = value;
     };
-    setValue("Food", pct(selected.needs.food));
-    setValue("Rest", pct(selected.needs.sleep));
-    setValue("Comfort", pct(selected.needs.comfort));
-    setValue("Outdoors", pct(selected.needs.outdoors));
-    setValue("Social", pct(selected.needs.social));
-    setValue("Stress", selected.mind ? pct(selected.mind.stress) : "—");
+    for (const need of NEEDS) setValue(needLabels[need], pct(selected.needs[need]));
     if (profile) {
       inspectProfile.textContent = `${CUSTODY_NAMES[profile.custody]} · ${crimeName(profile.conviction.crimeId)}\n` +
         `Sentence ${profile.sentenceMonths} months · ${profile.servedMonths} served\n` +
         `${task2.institution.knownAssessment(selected.id).cases} active intelligence case(s)` +
         (selected.protectiveCustody ? " · Protective Custody" : "");
-    } else inspectProfile.textContent = "";
+    } else {
+      const duty = task2.security.staff.get(selected.id), health = task2.health.state(selected.id);
+      inspectProfile.textContent = `${kind} #${selected.id} · Fatigue ${Math.round((duty?.fatigue ?? 0) * 100)}%${duty?.onBreak ? " · On break" : ""}` +
+        (health?.admitted ? "\nReceiving medical treatment" : health?.injuries.some((injury) => !injury.treated) ? "\nInjured — medical attention needed" : "");
+    }
     inspector.classList.add("show");
   }
+  document.getElementById("inspectClose")!.addEventListener("click", () => {
+    selected = null;
+    overlay.clear();
+    updateInspector();
+    if (activeMode === "staff") updateStaffRoster();
+  });
 
   const intelRoster = document.getElementById("intelRoster")!;
   const intelProfile = document.getElementById("intelProfile")!;
+  const intelWelfare = document.getElementById("intelWelfare")!;
+  const intelNeedsButton = document.getElementById("intelNeedsButton") as HTMLButtonElement;
+  let showWelfare = false;
+  const welfareOverview = new WelfareOverview({ selectResident: selectIntelligenceAgent, openCatalog }, intelWelfare);
   const intelSearch = document.getElementById("intelSearch") as HTMLInputElement;
   const html = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
   function selectIntelligenceAgent(id: number): void {
+    showWelfare = false;
     selected = agents.agents.find((a) => a.id === id) ?? null;
     overlayT = 0;
     updateInspector();
@@ -800,20 +963,104 @@ async function main() {
       `<div class="profile-section"><h3>Escape operation</h3>${op ? `<div class="profile-sub">${html(agents.escapeOperations.operationSummary(op.id))}<br>${html(op.blocker || "No current blocker")} · cache ${op.cache.spoons} spoons / ${op.cache.cutters} cutters</div><ul class="profile-list">${operationRows}</ul>` : `<div class="profile-sub">No active operation.</div>`}</div>`;
   }
   void updateDebugIntelligenceUi; // retained as an unreachable developer diagnostic renderer
+  const panelMarkup = new WeakMap<HTMLElement, string>();
+  function setPanelMarkup(element: HTMLElement, markup: string): void {
+    if (panelMarkup.get(element) === markup) return;
+    panelMarkup.set(element, markup);
+    element.innerHTML = markup;
+  }
+  function residentCareFacts(actor: Agent): ResidentCareFacts {
+    const room = world.rooms.get(actor.cellRoom), escort = agents.agents.find(agent => agent.id === actor.escortedBy);
+    const health = task2.health.state(actor.id), medicalJob = task2.health.treatmentJobs.find(job => job.patientId === actor.id && job.state !== "stable");
+    const orders = task2.institution.punishments.filter(order => order.prisonerId === actor.id && !["complete", "cancelled"].includes(order.state));
+    const warnings: string[] = [], actions: ResidentCareFacts["actions"][number][] = [];
+    const terminal = ["dead", "morgue", "removed"].includes(actor.state) || health?.alive === false;
+    const validHousingBed = (bed: number) => {
+      const housingRoom = world.rooms.get(world.roomId[bed]);
+      return bed >= 0 && world.objKind[bed] === Obj.Bed && !!housingRoom?.valid &&
+        (housingRoom.type === RoomType.Cell || housingRoom.type === RoomType.Dorm) && housingRoom.tiles.has(bed);
+    };
+    const hasBed = validHousingBed(actor.bedIdx) && room?.id === world.roomId[actor.bedIdx] && agents.claimedBeds.get(actor.bedIdx) === actor.id;
+    const reservedBed = [...agents.intakeBedClaims].find(([bed, owner]) => owner === actor.id && validHousingBed(bed))?.[0];
+    const housing = terminal ? "Housing no longer required" : hasBed ? `${roomDef(room!.type)?.name ?? "Room"} #${room!.id} · Bed assigned`
+      : reservedBed !== undefined ? `${roomDef(world.rooms.get(world.roomId[reservedBed])!.type)?.name} #${world.roomId[reservedBed]} · Bed reserved for intake` : "No valid assigned bed";
+    if (!terminal && !hasBed && reservedBed === undefined) {
+      warnings.push("A valid Cell or Dormitory with a free bed is needed for housing.");
+      actions.push({ label: "Housing", mode: "rooms", section: "rooms:prisoner" });
+    }
+    let escortText = "No escort needed";
+    if (actor.escortedBy >= 0) {
+      const guardProfile = escort && task3.staff.profiles.get(escort.id);
+      escortText = escort ? guardProfile ? `With ${guardProfile.firstName} ${guardProfile.lastName}` : `With guard #${escort.id}` : "Escort guard unavailable";
+      if (!escort || task2.health.isUnavailable(escort.id)) warnings.push("The escort needs an available guard to resume.");
+    } else if (actor.cuffed) {
+      escortText = orders.length ? "Restrained · Awaiting discipline response" : hasBed ? "Restrained · Awaiting return to housing" : "Intake · Awaiting placement in housing";
+    } else if (actor.state === "escorted") {
+      escortText = "Escort guard unavailable";
+      warnings.push("This escort has lost its guard.");
+    }
+    if (actor.state === "beingTransported") escortText = medicalJob?.transportGuardId !== undefined
+      ? `Medical transport · With guard #${medicalJob.transportGuardId}` : "Medical transport · Awaiting guard";
+    if (!terminal && (orders.length || actor.cuffed || actor.escortedBy >= 0 || actor.state === "escorted" || actor.state === "beingTransported")) actions.push({ label: "Guards", mode: "staff", section: "staff:people" });
+    const untreated = health?.injuries.filter(injury => !injury.treated).length ?? 0;
+    let medical = health?.alive === false ? "Deceased" : health?.admitted ? "Admitted to infirmary"
+      : health && health.consciousness <= .08 ? "Unconscious" : untreated ? `${untreated} untreated ${untreated === 1 ? "injury" : "injuries"}` : "No current injury requiring care";
+    if (medicalJob) medical += medicalJob.state === "waiting" ? medicalJob.transportGuardId !== undefined ? " · Medical transport in progress" : " · Medical transport queued"
+      : medicalJob.state === "treating" ? " · Doctor treating" : " · Waiting for doctor";
+    if (health?.admitted && (health.treatmentBed < 0 || world.objKind[health.treatmentBed] !== Obj.MedicalBed ||
+        !world.rooms.get(world.roomId[health.treatmentBed])?.valid)) warnings.push("The assigned medical bed is unavailable; a valid Infirmary is needed.");
+    if (untreated || health?.admitted || medicalJob || health?.alive === false)
+      actions.push({ label: "Medical facilities", mode: "rooms", section: "rooms:staff" });
+    const discipline = orders.length ? orders.map(order => order.state === "active"
+      ? `Solitary · ${Math.max(0, Math.ceil((order.solitaryUntil - worldTime) / HOUR_SECONDS))}h remaining`
+      : `Queued response${order.search !== "none" ? ` · ${order.search} search` : ""}${order.interrogate ? " · Interview" : ""}`).join("; ") : "No active discipline";
+    const state = actor.state.startsWith("escape:") ? actor.path ? "Moving" : "Occupied"
+      : STATE_TEXT[actor.state] ?? actor.state.replace(/([A-Z])/g, " $1");
+    return { state, housing, escort: escortText, medical, discipline, warnings, actions };
+  }
+  document.addEventListener("click", event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-care-action]");
+    if (button?.dataset.mode && button.dataset.section) openCatalog(button.dataset.mode, button.dataset.section);
+  });
   function updateIntelligenceUi(): void {
     const query = intelSearch.value.trim().toLowerCase();
     const prisoners = agents.agents.filter((a) => a.kind === Obj.Prisoner && a.profile).sort((a, b) => a.id - b.id);
-    intelRoster.innerHTML = prisoners.filter((a) => {
+    setPanelMarkup(intelRoster, prisoners.filter((a) => {
       const p = a.profile!;
       return !query || `${p.firstName} ${p.lastName} ${crimeName(p.conviction.crimeId)} ${p.custody}`.toLowerCase().includes(query);
     }).map((a) => {
       const p = a.profile!, color = CUSTODY_COLORS[p.custody].map((v) => Math.round(v * 255));
       const known = task2.institution.knownAssessment(a.id);
       return `<button class="intel-person${selected?.id === a.id ? " on" : ""}" data-agent="${a.id}"><strong><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</strong><small>${CUSTODY_NAMES[p.custody]}${a.protectiveCustody ? " / Protective" : ""} · ${html(crimeName(p.conviction.crimeId))} · ${known.cases} case(s)</small></button>`;
-    }).join("") || `<div class="profile-sub">No matching official records.</div>`;
+    }).join("") || `<div class="profile-sub">No matching official records.</div>`);
     intelRoster.querySelectorAll<HTMLButtonElement>("[data-agent]").forEach((el) => el.onclick = () => selectIntelligenceAgent(Number(el.dataset.agent)));
+    intelProfile.hidden = showWelfare;
+    intelWelfare.hidden = !showWelfare;
+    intelNeedsButton.setAttribute("aria-pressed", String(showWelfare));
+    intelNeedsButton.textContent = showWelfare ? "Profile" : "Needs";
+    if (showWelfare) {
+      const residents = prisoners.filter(actor => !["dead", "morgue", "removed"].includes(actor.state) && task2.health.state(actor.id)?.alive !== false);
+      const basic = { mode: "rooms", section: "rooms:prisoner", label: "Facilities" };
+      const living = { mode: "rooms", section: "rooms:living", label: "Living rooms" };
+      const actions: Partial<Record<typeof NEEDS[number], WelfareNeedAction>> = {
+        food: { mode: "objects", section: "objects:dining", label: "Dining" }, sleep: basic, hygiene: basic, bladder: basic,
+        outdoors: basic, privacy: basic, comfort: living, recreation: living, exercise: living, spirituality: living, social: living,
+        family: { mode: "rooms", section: "rooms:work", label: "Mail Room" },
+        safety: { mode: "staff", section: "staff:deploy", label: "Guard posts" },
+      };
+      welfareOverview.update({ population: residents.length, needs: NEEDS.map(need => ({ id: need, label: needLabels[need],
+        affected: residents.filter(actor => actor.needs[need] < .25).length,
+        urgent: residents.filter(actor => actor.needs[need] < .12).length, action: actions[need] })),
+        concerns: residents.flatMap(actor => {
+          const need = NEEDS.reduce((worst, current) => actor.needs[current] < actor.needs[worst] ? current : worst, NEEDS[0]);
+          return actor.needs[need] < .25 ? [{ id: actor.id, name: `${actor.profile!.firstName} ${actor.profile!.lastName}`,
+            need: needLabels[need], percent: Math.round(actor.needs[need] * 100),
+            detail: actor.cuffed ? "Restrained" : task2.health.isUnavailable(actor.id) ? "Receiving care" : "Needs attention" }] : [];
+        }) });
+      return;
+    }
     if (!selected?.profile) {
-      intelProfile.innerHTML = `<div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and sourced staff intelligence are shown. Traits, private relationships, money, stashes, gangs, and escape plans are not omnisciently exposed.</div>`;
+      setPanelMarkup(intelProfile, `<div class="profile-title">Select an inmate</div><div class="profile-sub">Select a resident to review welfare, official records, and sourced staff intelligence.</div>`);
       return;
     }
     const p = selected.profile, color = CUSTODY_COLORS[p.custody].map((v) => Math.round(v * 255));
@@ -834,16 +1081,22 @@ async function main() {
     const gang = gangKnown ? task2.gangs.gangFor(selected.id) : null;
     const knownTerritory = gang ? task3.territories.knownTerritories(task2.institution).filter((row) => row.controllerId === gang.id || row.contestedBy === gang.id) : [];
     const territoryRows = knownTerritory.map((row) => `<li>Area ${row.areaId}: ${html(row.state)} influence${row.state === "contested" ? "; competing affiliation also indicated" : ""}</li>`).join("") || `<li>No evidence-supported territory assessment.</li>`;
-    intelProfile.innerHTML = `<div class="profile-title"><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</div>` +
+    setPanelMarkup(intelProfile, `<div class="profile-title"><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</div>` +
       `<div class="profile-sub">Inmate #${selected.id} · ${CUSTODY_NAMES[p.custody]} custody${selected.protectiveCustody ? " · Protective Custody" : ""} · age ${p.age} · ${p.sentenceMonths} month sentence (${p.servedMonths} served)</div>` +
+      `<div class="profile-section"><h3>Current care</h3>${residentCareMarkup(residentCareFacts(selected))}</div>` +
       `<div class="profile-section"><h3>Official record</h3><ul class="profile-list"><li>Current conviction: ${html(crimeName(p.conviction.crimeId))}, ${p.conviction.sentenceMonths} months</li>${p.priors.map((r) => `<li>Prior at age ${r.ageAtConviction}: ${html(crimeName(r.crimeId))}, ${r.sentenceMonths} months</li>`).join("") || "<li>No prior convictions.</li>"}<li>Medical: ${html(formalInjuries)}</li></ul></div>` +
+      `<div class="profile-section"><h3>Welfare</h3><div class="toggle-grid">${NEEDS.map((need) => {
+        const value = selected!.needs[need];
+        return `<span>${html(needLabels[need])}: ${Math.round(value * 100)}%${value < .25 ? " · needs attention" : ""}</span>`;
+      }).join("")}</div></div>` +
       `<div class="profile-section"><h3>Case assessments</h3><div class="matrix">${caseRows}</div></div>` +
       `<div class="profile-section"><h3>Analyst reports</h3><ul class="profile-list">${managementRows}</ul></div>` +
       `<div class="profile-section"><h3>Known affiliation footprint</h3><ul class="profile-list">${territoryRows}</ul></div>` +
       `<div class="profile-section"><h3>Formal discipline</h3><ul class="profile-list">${discipline}</ul></div>` +
-      `<div class="profile-section"><h3>Information limits</h3><div class="profile-sub">Unreported traits, emotions, affiliations, relationships, possessions, contacts, caches, and plans remain unknown. Confidence reflects shared evidence, not ground truth.</div></div>`;
+      `<div class="profile-section"><h3>Information sources</h3><div class="profile-sub">Assessments reflect shared staff observations, investigations, and management reports. Confidence changes as evidence develops.</div></div>`);
   }
   intelSearch.addEventListener("input", updateIntelligenceUi);
+  intelNeedsButton.addEventListener("click", () => { showWelfare = !showWelfare; updateIntelligenceUi(); });
 
   canvas.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
@@ -852,7 +1105,7 @@ async function main() {
     // Persistent planned ghosts always win the click, even if another build
     // tool is selected. Cancellation keeps already completed group targets.
     if (construction.cancelAt(tile.x, tile.z, world)) {
-      saveDirty = true;
+      markSaveDirty();
       return;
     }
     if (!editor.active) { selectAt(e); return; }
@@ -892,13 +1145,13 @@ async function main() {
       world.endRoomPaint(editor.roomDrag);
       editor.roomDrag = 0;
       dirty = true;
-      saveDirty = true;
+      markSaveDirty();
     }
     if (editor.routeDrag > 0) {
       world.endRoute(editor.routeDrag);
       editor.routeDrag = 0;
       dirty = true;
-      saveDirty = true;
+      markSaveDirty();
     }
   });
   const discardTransient = () => {
@@ -916,13 +1169,32 @@ async function main() {
     discardTransient();
   });
   addEventListener("keydown", (e) => {
+    const target = e.target;
+    const typing = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+    if (typing && e.key !== "Escape") return;
+    // Let the catalog clear a search before closing it; other dashboards must
+    // remain dismissible while one of their controls has keyboard focus.
+    if (e.key === "Escape" && target === document.getElementById("catalogSearch") && (target as HTMLInputElement).value) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if ((e.key === "Delete" || e.key === "Backspace") && hoverTile && !(e.target instanceof HTMLInputElement)) {
       e.preventDefault();
       const group = construction.planDemolition(hoverTile.x, hoverTile.z, worldTime, world);
-      if (group) { saveDirty = true; notify(`Demolition order ${group.id} created.`); }
+      if (group) { markSaveDirty(); notify(`Demolition order ${group.id} created.`); }
       else notify("That location cannot be demolished.");
     }
-    if (e.key === "Escape" && painting) discardTransient();
+    if (e.key === "Escape") {
+      if (selectedFacilityTile !== null) { selectedFacilityTile = null; facilityInspector.clear(); }
+      if (painting) discardTransient();
+      else if (guidePanel?.classList.contains("show")) showGuide(false);
+      else if (problemsPanel.classList.contains("show")) { problemsPanel.classList.remove("show"); problemButton.setAttribute("aria-expanded", "false"); }
+      else if (regimePanel.style.display === "flex") { regimePanel.style.display = "none"; regimeBtn.setAttribute("aria-expanded", "false"); }
+      else if (emergencyBar.classList.contains("open")) showEmergencyCommands(false);
+      else changeMode("");
+    }
+    if (e.code === "Space") {
+      e.preventDefault();
+      speedBtns.find((button) => button.textContent === (speed > 0 ? "⏸" : "1x"))?.click();
+    }
     if (e.key === "r" || e.key === "R") {
       // Editor owns the actual orientation change; this just ensures the
       // overlay redraws even if the mouse is not moving.
@@ -1031,7 +1303,11 @@ async function main() {
       : null;
     const ag = hit ? agents.agentNear(hit[0], hit[1], 1.2) : null;
     const group = hoverTile ? construction.groupAt(hoverTile.x, hoverTile.z, world) : null;
-    if (!ag && !group) { tip.style.display = "none"; return; }
+    const tile = hoverTile ? world.idx(hoverTile.x, hoverTile.z) : -1;
+    const piece = tile >= 0 ? world.pieceAtTile(tile) : null;
+    const object = tile >= 0 && world.objKind[tile] !== Obj.None ? defOf(world.objKind[tile]) : null;
+    const room = tile >= 0 ? world.roomAt(tile) : null;
+    if (!ag && !group && !object && !room) { tip.style.display = "none"; return; }
     if (ag) tip.textContent = tipText(ag);
     else if (group) {
       const done = group.targets.filter((target) => target.completed).length;
@@ -1040,6 +1316,16 @@ async function main() {
       tip.textContent = `${group.operation.toUpperCase()} GROUP ${group.id}\n` +
         `${done}/${group.targets.length} targets complete · ${group.state}\n` +
         `Resources: ${resources}\n${group.blocker || "Click to cancel unfinished targets"}`;
+    }
+    else {
+      const label = room ? world.roomLabels().find((row) => row.id === room.id) : null;
+      tip.textContent = [
+        object ? `${object.name}${piece ? ` · ${piece.w} × ${piece.d} tiles` : ""}` : "",
+        label ? `${label.name} · ${label.valid ? "Operational" : label.issue || "Incomplete"}` : "",
+        room ? `${room.guards} guard${room.guards === 1 ? "" : "s"} assigned · ${room.access === 1 ? "Prisoner access" : room.access === 2 ? "Forbidden" : "Staff access"}` : "",
+        object?.kind === Obj.Freezer ? `Frozen meals: ${kitchen.frozenMeals}/${kitchen.freezerCapacity}` : "",
+        object?.kind === Obj.ServingTable ? `Meals ready: ${agents.servingStock.get(world.anchorOf(tile)) ?? 0}` : "",
+      ].filter(Boolean).join("\n");
     }
     tip.style.display = "block";
     tip.style.left = `${Math.min(e.clientX + 16, innerWidth - 360)}px`;
@@ -1067,10 +1353,34 @@ async function main() {
   };
 
   function openCatalog(mode: string, section: string): void {
-    const button = document.querySelector<HTMLButtonElement>(`.mode-btn[data-mode="${mode}"]`);
-    if (activeMode !== mode) button?.click();
+    const search = document.getElementById("catalogSearch") as HTMLInputElement;
+    if (search.value) { search.value = ""; search.dispatchEvent(new Event("input")); }
+    if (activeMode !== mode) changeMode(mode);
     editor.selectCategory(section);
   }
+
+  const guidePanel = document.getElementById("guidePanel");
+  const guideButton = document.getElementById("guideBtn");
+  function showGuide(show: boolean): void {
+    guidePanel?.classList.toggle("show", show);
+    guideButton?.setAttribute("aria-expanded", String(show));
+  }
+  guideButton?.addEventListener("click", () => showGuide(!guidePanel?.classList.contains("show")));
+  document.getElementById("guideClose")?.addEventListener("click", () => showGuide(false));
+  guidePanel?.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const dashboard = target.closest<HTMLButtonElement>("[data-open-guide-dashboard]");
+    if (dashboard) {
+      const [mode, tab] = dashboard.dataset.openGuideDashboard!.split("|");
+      if (mode === "logistics" && logisticsTabs.includes(tab as typeof logisticsTabs[number])) logisticsTab = tab as typeof logisticsTab;
+      changeMode(mode); showGuide(false); return;
+    }
+    const button = target.closest<HTMLButtonElement>("[data-open-guide-catalog]");
+    if (!button) return;
+    const [mode, section] = button.dataset.openGuideCatalog!.split("|");
+    openCatalog(mode, section);
+    showGuide(false);
+  });
 
   function renderProblems(): void {
     const rows = problems.list();
@@ -1079,6 +1389,7 @@ async function main() {
     const problemRows = rows.map((problem) => {
       const actions = problem.actions.map((action) => {
         if (action.kind === "catalog") return `<button data-catalog="${html(action.mode)}|${html(action.section)}">${html(action.label)}</button>`;
+        if (action.kind === "mode") return `<button data-mode="${html(action.mode)}">${html(action.label)}</button>`;
         if (action.kind === "order") return `<button data-order="${action.orderId}">${html(action.label)}</button>`;
         return `<button data-center="${problem.x},${problem.z}">${html(action.label)}</button>`;
       }).join("");
@@ -1092,7 +1403,9 @@ async function main() {
         `<p>${html(group.blocker || targetStates || group.state)}</p><div class="queue-actions"><button data-center="${group.targets[0]?.x ?? 0},${group.targets[0]?.z ?? 0}">Center</button>` +
         `<button data-retry-order="${group.id}">Retry</button><button data-cancel-order="${group.id}">Cancel</button></div></div>`;
     }).join("") || `<div class="profile-sub">No active construction orders.</div>`;
-    problemsPanel.innerHTML = `<div class="problem-head"><span>Operational problems</span><span>${rows.length}</span></div>${problemRows}<section class="queue-section"><div class="problem-head">Construction queue</div>${queueRows}</section>`;
+    const markup = `<div class="problem-head"><span>Operational problems</span><span>${rows.length}</span></div>${problemRows}<section class="queue-section"><div class="problem-head">Construction queue</div>${queueRows}</section>`;
+    if (problemsPanel.innerHTML === markup) return;
+    problemsPanel.innerHTML = markup;
     problemsPanel.querySelectorAll<HTMLButtonElement>("[data-center]").forEach((button) => button.onclick = () => {
       const [x, z] = button.dataset.center!.split(",").map(Number);
       camera.target = [x, 0, z];
@@ -1102,6 +1415,7 @@ async function main() {
       const [mode, section] = button.dataset.catalog!.split("|");
       openCatalog(mode, section);
     });
+    problemsPanel.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) => button.onclick = () => changeMode(button.dataset.mode!));
     problemsPanel.querySelectorAll<HTMLButtonElement>("[data-order]").forEach((button) => button.onclick = () => {
       const group = construction.groups.get(Number(button.dataset.order));
       const target = group?.targets.find((row) => !row.completed);
@@ -1111,7 +1425,7 @@ async function main() {
       if (construction.retryGroup(Number(button.dataset.retryOrder))) notify("Construction order queued for another attempt.");
     });
     problemsPanel.querySelectorAll<HTMLButtonElement>("[data-cancel-order]").forEach((button) => button.onclick = () => {
-      if (construction.cancelGroup(Number(button.dataset.cancelOrder))) { saveDirty = true; notify("Construction order cancelled; unused materials are available for other work."); }
+      if (construction.cancelGroup(Number(button.dataset.cancelOrder))) { markSaveDirty(); notify("Construction order cancelled; unused materials are available for other work."); }
     });
   }
   let worldOverlayDataT = 0;
@@ -1163,7 +1477,7 @@ async function main() {
     for (const group of construction.groups.values()) {
       if (group.state === "complete" || group.state === "cancelled") continue;
       const blocked = group.targets.find((target) => target.state === "blocked");
-      if (!blocked && group.state !== "waiting-resources") continue;
+      if (!blocked) continue;
       problems.add({
         id: `construction-${group.id}`, severity: blocked ? "warning" : "info", source: "construction",
         message: `Order ${group.id}: ${blocked?.blocker || group.blocker || "Waiting for materials"}`,
@@ -1217,12 +1531,28 @@ async function main() {
     for (const warning of task2.warnings) issues.push({
       id: `task2-${warningI++}`, x: 369.5, z: 376.5 + warningI, issue: warning,
     });
-    for (const warning of task2.work.warnings) problems.add({
-      id: `work-${warning}`, severity: "warning", source: "work", message: warning, x: 369.5, z: 376.5,
-      actions: [{ kind: "catalog", label: "Open work facilities", mode: "objects", section: "objects:work" }],
-    });
+    for (const problem of collectServiceProblems({
+      security: task2.security.warnings, market: task2.market.warnings, gangs: task2.gangs.warnings,
+      health: task2.health.warnings, work: task2.work.warnings,
+      facility: task3.facility.warnings, management: task3.management.warnings,
+      constructionGroups: construction.groups.values(),
+      stock: { available: commodity => logistics.quantity(commodity), incoming: commodity => logistics.incoming(commodity) },
+    })) problems.add(problem);
     for (const warning of task3.warnings) issues.push({
       id: `task3-${warningI++}`, x: 371.5, z: 376.5 + warningI, issue: warning,
+    });
+    const roomCount = (type: number) => [...world.rooms.values()].filter((room) => room.type === type && room.valid).length;
+    const staffCount = (kind: number) => agents.agents.filter((agent) => agent.kind === kind && agent.state !== "removed").length;
+    const readiness: Record<string, string> = {
+      workmen: String(staffCount(Obj.Workman)), delivery: String(roomCount(RoomType.Delivery)),
+      reception: String(roomCount(RoomType.Reception)), beds: String(world.prisonerCapacity()),
+      kitchen: String(roomCount(RoomType.Kitchen)), canteen: String(roomCount(RoomType.Canteen)),
+      cooks: String(staffCount(Obj.Cook)), guards: String(staffCount(Obj.Guard) + staffCount(Obj.ArmedGuard)),
+    };
+    document.querySelectorAll<HTMLElement>("[data-guide-count]").forEach((element) => {
+      const value = readiness[element.dataset.guideCount!] ?? "0";
+      if (element.textContent !== value) element.textContent = value;
+      element.classList.toggle("missing", value === "0");
     });
     worldOverlay.updateData(rooms, issues, agents.prisonerCount(), world.prisonerCapacity());
     renderProblems();
@@ -1236,6 +1566,7 @@ async function main() {
       version: SAVE_VERSION,
       savedAt: new Date().toISOString(),
       worldTime,
+      view: { target: [...camera.target], yaw: camera.yaw, pitch: camera.pitch, distance: camera.distance },
       world: world.saveData(),
       agents: agents.saveData(),
       infrastructure: infrastructure.saveData(),
@@ -1251,10 +1582,11 @@ async function main() {
   async function saveNow() {
     if (saveInFlight) return;
     saveInFlight = true;
+    const revision = saveRevision;
     saveStatusEl.textContent = "Saving\u2026";
     try {
       await saveRepository.save(saveSnapshot());
-      saveDirty = false;
+      saveDirty = saveRevision !== revision;
       saveStatusEl.textContent = `Saved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
     } catch (error) {
       saveStatusEl.textContent = "Save failed";
@@ -1358,11 +1690,11 @@ async function main() {
     };
   }
 
-  void fetch("/api/sim-log", { method: "DELETE" }).then(() => writeSimLog({
+  void writeSimLog({
     t: new Date().toISOString(),
     event: "sim-log-start",
     note: "Samples are appended every 10 real seconds while the game is open.",
-  })).catch(() => undefined);
+  });
 
   // --- Loop --------------------------------------------------------------
   const hud = document.getElementById("hud")!;
@@ -1406,7 +1738,7 @@ async function main() {
       const count = Math.max(1, orderTargets().length);
       const recipe = construction.estimate(editor.tool, count);
       const parts = Object.entries(recipe).map(([id, need]) => {
-        const available = Math.max(0, logistics.quantity(id) - logistics.reserved(id));
+        const available = Math.max(0, logistics.quantity(id));
         const ordered = logistics.incoming(id);
         const missing = Math.max(0, need - available - ordered);
         return `${commodityDef(id).name} ${available}/${need}${ordered ? ` +${ordered} inbound` : ""}${missing ? ` (${missing} missing)` : ""}`;
@@ -1465,46 +1797,63 @@ async function main() {
       }).join("");
       body = `<div class="matrix">${workplaces.map((w) => `<div class="matrix-row"><header><strong>${html(w.jobId)} · room ${w.roomId}</strong><span>${w.active.length}/${w.assigned.length}/${w.capacity} active/assigned/capacity</span></header><label>Supervision <select class="work-select" data-supervision="${w.roomId}">${["none", "periodic", "constant"].map((s) => `<option ${w.supervision === s ? "selected" : ""}>${s}</option>`).join("")}</select></label>${w.blocked ? `<small>${html(w.blocked)}</small>` : ""}</div>`).join("")}</div><div class="profile-section"><h3>Inmate assignments</h3><div class="matrix">${workerRows || "No inmates available."}</div></div>`;
     }
-    logisticsDashboard.innerHTML = `<div class="log-title">Institutional logistics</div>${tabBar()}${body}`;
+    logisticsDashboard.innerHTML = `<div class="log-title">Institutional logistics <button class="tiny-btn" data-close-dashboard aria-label="Close logistics">Close</button></div>${tabBar()}${body}`;
+    annotateWorkAssignments(logisticsDashboard);
+    annotateInstitutionalDashboard(logisticsDashboard);
     logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-logtab]").forEach((button) => button.onclick = () => { logisticsTab = button.dataset.logtab as typeof logisticsTab; updateLogisticsUi(); });
     logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-open-catalog]").forEach((button) => button.onclick = () => openCatalog("logistics", button.dataset.openCatalog!));
     logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-deploy]").forEach((button) => button.onclick = () => {
       const [area, role, delta] = button.dataset.deploy!.split(":"); const row = task2.security.deploymentTargets.get(Number(area)) ?? {};
-      task2.security.setDeployment(Number(area), role as never, (row[role as keyof typeof row] ?? 0) + Number(delta)); saveDirty = true; updateLogisticsUi();
+      task2.security.setDeployment(Number(area), role as never, (row[role as keyof typeof row] ?? 0) + Number(delta)); markSaveDirty(); updateLogisticsUi();
     });
-    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-mixed]").forEach((input) => input.onchange = () => { task2.areas.access.get(Number(input.dataset.areaMixed))!.mixed = input.checked; saveDirty = true; });
-    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-custody]").forEach((input) => input.onchange = () => { const [area, key] = input.dataset.areaCustody!.split(":"); (task2.areas.access.get(Number(area))!.custody as Record<string, boolean>)[key] = input.checked; saveDirty = true; });
-    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-role]").forEach((input) => input.onchange = () => { const [area, key] = input.dataset.areaRole!.split(":"); (task2.areas.access.get(Number(area))!.roles as Record<string, boolean>)[key] = input.checked; saveDirty = true; });
-    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-work-agent]").forEach((select) => select.onchange = () => { const id = Number(select.dataset.workAgent); task2.work.unassign(id); if (Number(select.value) >= 0) task2.work.assign(id, Number(select.value)); saveDirty = true; });
-    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-supervision]").forEach((select) => select.onchange = () => { const w = task2.work.workplaces.get(Number(select.dataset.supervision)); if (w) w.supervision = select.value as never; saveDirty = true; });
-    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-gate-inspection]").forEach((select) => select.onchange = () => { task3.facility.setInspection(Number(select.dataset.gateInspection), select.value as never); saveDirty = true; updateLogisticsUi(); });
+    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-mixed]").forEach((input) => input.onchange = () => { task2.areas.access.get(Number(input.dataset.areaMixed))!.mixed = input.checked; markSaveDirty(); });
+    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-custody]").forEach((input) => input.onchange = () => { const [area, key] = input.dataset.areaCustody!.split(":"); (task2.areas.access.get(Number(area))!.custody as Record<string, boolean>)[key] = input.checked; markSaveDirty(); });
+    logisticsDashboard.querySelectorAll<HTMLInputElement>("[data-area-role]").forEach((input) => input.onchange = () => { const [area, key] = input.dataset.areaRole!.split(":"); (task2.areas.access.get(Number(area))!.roles as Record<string, boolean>)[key] = input.checked; markSaveDirty(); });
+    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-work-agent]").forEach((select) => select.onchange = () => {
+      const id = Number(select.dataset.workAgent), destination = Number(select.value);
+      if (destination < 0) task2.work.unassign(id);
+      else if (!task2.work.assign(id, destination)) {
+        select.value = String(task2.work.assignments.get(id) ?? -1);
+        notify("That workplace is full or unavailable. The previous assignment has been kept.");
+        return;
+      }
+      markSaveDirty();
+    });
+    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-supervision]").forEach((select) => select.onchange = () => { const w = task2.work.workplaces.get(Number(select.dataset.supervision)); if (w) w.supervision = select.value as never; markSaveDirty(); });
+    logisticsDashboard.querySelectorAll<HTMLSelectElement>("[data-gate-inspection]").forEach((select) => select.onchange = () => { task3.facility.setInspection(Number(select.dataset.gateInspection), select.value as never); markSaveDirty(); updateLogisticsUi(); });
+  }
+
+  function updateBuildQuote(): void {
+    const tool = editor.detailTool;
     const detail = document.querySelector<HTMLElement>("#detailCost strong");
-    if (detail && editor.tool && isOrderTool()) {
-      const recipe = construction.estimate(editor.tool, Math.max(1, orderTargets().length));
-      const invalid = construction.preview(editor.tool, orderTargets(), editor.orient, world).find((target) => !target.valid);
+    if (detail && tool && isOrderTool(tool)) {
+      const targets = hoverTile ? (tool === editor.tool ? orderTargets() : [hoverTile]) : [];
+      const recipe = construction.estimate(tool, Math.max(1, targets.length));
+      const invalid = targets.length ? construction.preview(tool, targets, editor.orient, world).find((target) => !target.valid) : undefined;
       detail.textContent = invalid
         ? `Cannot place: ${invalid.blocker}`
-        : `$${recipeCost(recipe).toLocaleString()} · ${Object.entries(recipe).map(([id, n]) => `${commodityDef(id).name} ${Math.max(0, logistics.quantity(id) - logistics.reserved(id))}/${n}`).join(", ")}`;
-    } else if (detail && editor.tool?.cat === "person") {
-      detail.textContent = `$${economy.hireFee(editor.tool.mat).toLocaleString()} hire · $${economy.hourlyWage(editor.tool.mat)}/hour`;
+        : `$${recipeCost(recipe).toLocaleString()} · ${Object.entries(recipe).map(([id, n]) => `${commodityDef(id).name} ${Math.max(0, logistics.quantity(id))}/${n}`).join(", ")}`;
+    } else if (detail && tool?.cat === "person") {
+      detail.textContent = `$${economy.hireFee(tool.mat).toLocaleString()} hire · $${economy.hourlyWage(tool.mat)}/hour`;
     }
   }
 
   function updateFinancialsUi(): void {
     const daily = new Map<string, number>(); for (const entry of economy.ledger) if (entry.time >= worldTime - HOUR_SECONDS * 24) daily.set(entry.kind, (daily.get(entry.kind) ?? 0) + entry.amount);
     const recent = economy.ledger.slice(-30).reverse().map((entry) => `<tr><td>${clockLabel(entry.time)}</td><td>${html(entry.kind)}</td><td>${html(entry.memo)}</td><td>${entry.amount >= 0 ? "+" : "−"}$${Math.abs(Math.round(entry.amount))}</td></tr>`).join("");
-    financialsDashboard.innerHTML = `<div class="log-title">Financials</div><div class="log-summary"><div class="log-kpi"><small>Cash</small><strong>${economy.cash < 0 ? "−" : ""}$${Math.abs(Math.round(economy.cash)).toLocaleString()}</strong></div><div class="log-kpi"><small>Net / hour</small><strong>$${economy.netHourly()}</strong></div><div class="log-kpi"><small>Performance</small><strong>${Math.round(economy.performanceMultiplier * 100)}%</strong></div></div>` +
+    financialsDashboard.innerHTML = `<div class="log-title">Financials <button class="tiny-btn" data-close-dashboard aria-label="Close financials">Close</button></div><div class="log-summary"><div class="log-kpi"><small>Cash</small><strong>${economy.cash < 0 ? "−" : ""}$${Math.abs(Math.round(economy.cash)).toLocaleString()}</strong></div><div class="log-kpi"><small>Net / hour</small><strong>$${economy.netHourly()}</strong></div><div class="log-kpi"><small>Performance</small><strong>${Math.round(economy.performanceMultiplier * 100)}%</strong></div></div>` +
       `<table class="log-table"><thead><tr><th>Last 24 hours</th><th>Net</th></tr></thead><tbody>${[...daily].map(([k, v]) => `<tr><td>${html(k)}</td><td>${v >= 0 ? "+" : "−"}$${Math.abs(Math.round(v))}</td></tr>`).join("")}</tbody></table>` +
       `<div class="profile-section"><h3>Ledger</h3><table class="log-table"><thead><tr><th>Time</th><th>Type</th><th>Memo</th><th>Amount</th></tr></thead><tbody>${recent || `<tr><td colspan="4">No entries</td></tr>`}</tbody></table></div>`;
     const procedures = ["spoon-count", "tray-count", "key-signout", "tool-count", "shipment-manifest", "till-reconcile", "floor-survey", "dual-evidence"] as const;
     const reportRows = [...task3.management.reports.values()].filter((report) => report.expiresAt > worldTime).sort((a, b) => b.createdAt - a.createdAt).map((report) => `<div class="matrix-row"><header><strong>${html(report.title)}</strong><span>${html(report.manager)} · ${Math.round(report.confidence * 100)}%</span></header><div>${html(report.summary)}</div><small>${html(report.recommendation)}</small></div>`).join("");
     financialsDashboard.innerHTML += `<div class="profile-section"><h3>Temporary controls</h3><div class="profile-sub">Controls improve detection but consume staff time. A compromised employee may warn an inmate or quietly bypass the procedure.</div><div class="toggle-grid">${procedures.map((id) => { const active = task3.management.procedure(id, worldTime), manager = task3.management.procedureManager(id), enabled = task3.management.canActivateProcedure(id); return `<button class="tiny-btn${active ? " on" : ""}" data-procedure="${id}" ${!active && !enabled ? "disabled" : ""}>${html(id)} · ${manager}${active ? ` · ${Math.max(1, Math.ceil((active.activeUntil - worldTime) / HOUR_SECONDS))}h` : ""}</button>`; }).join("")}</div></div>` +
       `<div class="profile-section"><h3>Management reports</h3><div class="matrix">${reportRows || `<div class="profile-sub">No current reports. Each manager needs a separate valid Management Office and time to inspect records or the facility.</div>`}</div></div>`;
+    annotateInstitutionalDashboard(financialsDashboard);
     financialsDashboard.querySelectorAll<HTMLButtonElement>("[data-procedure]").forEach((button) => button.onclick = () => {
       const id = button.dataset.procedure as typeof procedures[number];
       if (task3.management.procedure(id, worldTime)) task3.management.deactivateProcedure(id);
       else task3.management.activateProcedure(id, worldTime, 24);
-      saveDirty = true; updateFinancialsUi();
+      markSaveDirty(); updateFinancialsUi();
     });
   }
 
@@ -1516,7 +1865,7 @@ async function main() {
       return { def, category, rule: task2.institution.ruleFor(category, def.id),
         overridden: task2.institution.rules.some((r) => r.category === category && r.itemDefId === def.id) };
     });
-    policyDashboard.innerHTML = `<div class="log-title">Policy</div><div class="profile-sub">Automatic responses execute only after the configured evidence threshold is met. Item-specific overrides inherit these category defaults.</div>` +
+    policyDashboard.innerHTML = `<div class="log-title">Policy <button class="tiny-btn" data-close-dashboard aria-label="Close policy">Close</button></div><div class="profile-sub">Automatic responses execute only after the configured evidence threshold is met. Item-specific overrides inherit these category defaults.</div>` +
       `<div class="policy-row"><b>Incident</b><b>Evidence</b><b>Force ceiling</b><b>Search</b><b>Hours</b><b>Interview</b><b>Custody ↑</b><b>Protect</b></div>` +
       baseRules.map((r, index) => `<div class="policy-row"><strong>${html(r.category)}</strong>` +
         `<select data-policy="${index}:threshold">${["suspected", "probable", "confirmed"].map((v) => option(v, r.threshold)).join("")}</select>` +
@@ -1537,20 +1886,22 @@ async function main() {
       `<div class="profile-section"><h3>Mail inspection</h3><select class="work-select" id="mailInspection">${["none", "sample", "all"].map((v) => option(v, task2.market.mailInspection)).join("")}</select></div>`;
     const categoryHeader = policyDashboard.querySelector<HTMLElement>(".policy-row");
     if (categoryHeader?.children.length === 8) categoryHeader.insertAdjacentHTML("beforeend", "<b>Seize</b><b>Medical</b>");
+    annotatePolicyControls(policyDashboard);
     policyDashboard.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-policy]").forEach((input) => input.onchange = () => {
       const [indexText, field] = input.dataset.policy!.split(":"), rule = baseRules[Number(indexText)] as unknown as Record<string, unknown>;
-      rule[field] = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : field === "solitaryHours" ? Number(input.value) : input.value; saveDirty = true;
+      rule[field] = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : field === "solitaryHours" ? Math.max(0, Math.min(72, Number(input.value) || 0)) : input.value; markSaveDirty();
     });
     policyDashboard.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-item-policy]").forEach((input) => input.onchange = () => {
       const [indexText, field] = input.dataset.itemPolicy!.split(":"), row = itemPolicies[Number(indexText)];
-      const value = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : field === "solitaryHours" ? Number(input.value) : input.value;
-      task2.institution.setItemOverride(row.category, row.def.id, { [field]: value }); saveDirty = true;
+      const value = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : field === "solitaryHours" ? Math.max(0, Math.min(72, Number(input.value) || 0)) : input.value;
+      task2.institution.setItemOverride(row.category, row.def.id, { [field]: value }); markSaveDirty();
     });
-    const mail = policyDashboard.querySelector<HTMLSelectElement>("#mailInspection"); if (mail) mail.onchange = () => { task2.market.mailInspection = mail.value as never; saveDirty = true; };
+    const mail = policyDashboard.querySelector<HTMLSelectElement>("#mailInspection"); if (mail) mail.onchange = () => { task2.market.mailInspection = mail.value as never; markSaveDirty(); };
   }
 
   function frame(now: number) {
-    const dt = Math.min((now - last) / 1000, 0.05);
+    const elapsed = Math.max(0, (now - last) / 1000);
+    const dt = Math.min(elapsed, 0.05);
     last = now;
     resize();
     camera.update(dt);
@@ -1562,40 +1913,7 @@ async function main() {
 
     // Advance the world clock at the selected speed; substep the sim so
     // high speeds don't let agents tunnel through walls.
-    let simDt = dt * speed;
-    worldTime += simDt;
-    const staffCounts = new Map<number, number>();
-    for (const ag of agents.agents) if (ag.kind !== Obj.Prisoner) staffCounts.set(ag.kind, (staffCounts.get(ag.kind) ?? 0) + 1);
-    economy.setStaffCounts(staffCounts);
-    economy.tick(worldTime, staffCounts);
-    kitchen.tick(worldTime, world);
-    if (agents.repairJobs.length > 0) {
-      const repairDemand = { metal: 0, concrete: 0 };
-      for (const job of agents.repairJobs) {
-        if (job.claimedBy >= 0) continue;
-        if (job.kind === "fence") repairDemand.metal++;
-        else repairDemand.concrete += 2;
-      }
-      logistics.request(repairDemand, worldTime, false, "security-repairs");
-    }
-    agents.staffPerformance = economy.performanceMultiplier;
-    while (simDt > 0) {
-      const step = Math.min(0.1, simDt);
-      logistics.tick(step, worldTime, world);
-      construction.tick(step);
-      intake.tick(step, worldTime, world, agents);
-      agents.roadVehicleZ = [
-        ...logistics.trucks.filter((truck) => truck.state === "arriving" || truck.state === "departing").map((truck) => truck.z),
-        ...intake.vehicles.filter((vehicle) => vehicle.state === "arriving" || vehicle.state === "departing").map((vehicle) => vehicle.z),
-        ...[...task3.escape.externalVehicles.values()].filter((vehicle) => vehicle.state === "arriving" || vehicle.state === "departing").map((vehicle) => vehicle.z),
-      ];
-      task2.tick(step, worldTime, world, agents.agents,
-        agents.currentActivity() === REG.Work, agents.currentActivity() === REG.RollCall);
-      task3.tick(step, worldTime, world, agents.agents, agents.social, agents.escapeOperations, agents.tunnels);
-      for (const id of task3.consumeEscaped()) agents.markEscapedBySystem(id);
-      agents.update(step, world, isNightAt(worldTime), hourOf(worldTime), worldTime);
-      simDt -= step;
-    }
+    worldTime = advanceSimulation(simulation, worldTime, dt * speed);
     const atmo = evalAtmosphere(worldTime);
 
     // Clock + regime UI.
@@ -1609,6 +1927,14 @@ async function main() {
         `<span class="clock-time">${String(hour).padStart(2, "0")}:${String(clockMinutes).padStart(2, "0")}</span>` +
         `<span class="clock-sun">${night ? "☾" : "☀"}</span>`;
     }
+    document.querySelectorAll<HTMLButtonElement>("[data-emergency]").forEach((button) => {
+      const active = button.dataset.emergency === task2.security.emergency;
+      button.classList.toggle("on", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    const emergencyText = task2.security.emergency === "none" ? "No active response"
+      : document.querySelector<HTMLButtonElement>(`[data-emergency="${task2.security.emergency}"]`)?.textContent ?? task2.security.emergency;
+    if (emergencyStatus.textContent !== emergencyText) emergencyStatus.textContent = emergencyText;
     const regimeText = `Regime: ${REG_NAMES[agents.regime[hour]]}`;
     if (regimeBtn.textContent !== regimeText) regimeBtn.textContent = regimeText;
     const escapedText = String(agents.escapedCount), caughtText = String(agents.caughtCount);
@@ -1625,9 +1951,11 @@ async function main() {
     logisticsUiT -= dt;
     if (logisticsUiT <= 0) {
       logisticsUiT = 0.5;
-      if (activeMode === "logistics") updateLogisticsUi();
-      else if (activeMode === "financials") updateFinancialsUi();
-      else if (activeMode === "policy") updatePolicyUi();
+      if (activeMode === "logistics" && !logisticsDashboard.contains(document.activeElement)) updateLogisticsUi();
+      else if (activeMode === "financials" && !financialsDashboard.contains(document.activeElement)) updateFinancialsUi();
+      else if (activeMode === "policy" && !policyDashboard.contains(document.activeElement)) updatePolicyUi();
+      updateBuildQuote();
+      if (activeMode === "staff") updateStaffRoster();
     }
     intelligenceUiT -= dt;
     if (intelligenceUiT <= 0) { intelligenceUiT = 0.5; if (activeMode === "intelligence") updateIntelligenceUi(); }
@@ -1640,12 +1968,21 @@ async function main() {
       if (editor.tool && hoverTile && isOrderTool()) {
         renderedGhosts.push(...construction.preview(editor.tool, orderTargets(), editor.orient, world));
       }
-      ghosts.set(device, renderedGhosts);
+      const ghostKey = JSON.stringify(renderedGhosts);
+      if (ghostKey !== ghostStateKey) {
+        ghostStateKey = ghostKey;
+        ghosts.set(device, renderedGhosts);
+        renderRevision++;
+      }
     }
 
-    people.update(device, personStager.stage(agents.agents));
-    if (agents.takeWorldDirty()) { dirty = true; saveDirty = true; } // fences cut / repaired
-    else if (agents.takeMealsDirty()) { refreshFurniture(); saveDirty = true; }
+    const peopleKey = `${worldTime}:${saveRevision}:${renderRevision}`;
+    if (peopleKey !== peopleStateKey) {
+      peopleStateKey = peopleKey;
+      people.update(device, personStager.stage(agents.agents));
+    }
+    if (agents.takeWorldDirty()) { dirty = true; markSaveDirty(); } // fences cut / repaired
+    else if (agents.takeMealsDirty()) { refreshFurniture(); markSaveDirty(); }
     if (selected && !agents.agents.includes(selected)) { selected = null; overlay.clear(); updateInspector(); }
     if (selected) updateInspector();
     overlayT -= dt;
@@ -1681,6 +2018,7 @@ async function main() {
     if (worldOverlayDataT <= 0) {
       worldOverlayDataT = 0.25;
       refreshWorldOverlayData();
+      updateFacilityInspector();
     }
     const previewCount = previewTiles();
     worldOverlay.render(
@@ -1700,6 +2038,12 @@ async function main() {
       simLogTimer = 0;
       void writeSimLog(simLogSample());
     }
+    // A paused scene only needs a GPU submission after a visible change.
+    // UI panels and camera input still update on every animation frame.
+    const renderKey = `${worldTime}:${renderRevision}:${saveRevision}:${canvas.width},${canvas.height}:${roofAlpha}:${camera.target.join(",")}:${camera.yaw}:${camera.pitch}:${camera.distance}:${selected?.id}:${editor.tool?.cat},${editor.tool?.mat},${editor.orient}:${hoverTile?.x},${hoverTile?.z}`;
+    if (speed > 0 || renderKey !== lastRenderKey) {
+      lastRenderKey = renderKey;
+      renderedFrames++;
     writeGlobals(uni, {
       viewProj,
       invViewProj: invert(viewProj),
@@ -1750,7 +2094,9 @@ async function main() {
     pass.end();
     device.queue.submit([encoder.finish()]);
 
-    fpsAccum += dt; fpsFrames++;
+    }
+
+    fpsAccum += elapsed; fpsFrames++;
     if (fpsAccum >= 0.5) { fps = fpsFrames / fpsAccum; fpsAccum = 0; fpsFrames = 0; }
     const tool = editor.tool ? `${editor.tool.cat}` : "none";
     const waiting = agents.agents.filter((a) => a.cuffed && a.escortedBy < 0).length;
@@ -1785,6 +2131,36 @@ async function main() {
     hud.textContent = text;
 
     requestAnimationFrame(frame);
+  }
+  if (import.meta.env.DEV && new URLSearchParams(location.search).has("playtest")) {
+    const bridge = {
+      snapshot: saveSnapshot,
+      inspect: () => ({ time: worldTime, speed, cash: economy.cash, floor: Array.from(world.floorMat),
+        agents: agents.agents.map((agent) => ({ id: agent.id, kind: agent.kind, state: agent.state, x: agent.x, z: agent.z })),
+        orders: [...construction.groups.values()].map((group) => ({ id: group.id, state: group.state, blocker: group.blocker })),
+        rooms: [...world.rooms.values()].map((room) => ({ id: room.id, type: room.type, valid: room.valid })),
+      }),
+      diagnostics: () => agents.diagnostics(world),
+      renderStats: () => ({ renderedFrames, worldTime }),
+      advance: (seconds: number) => {
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds > 3600) throw new Error("Advance must be between 0 and 3600 seconds");
+        if (dirty) { rebuild(); dirty = false; }
+        worldTime = advanceSimulation(simulation, worldTime, seconds);
+        rebuild(); dirty = false; markSaveDirty();
+        refreshWorldOverlayData();
+        return worldTime;
+      },
+      screenTile: (x: number, z: number) => {
+        const m = camera.viewProj(canvas.width / canvas.height), px = x + .5, pz = z + .5;
+        const w = m[3] * px + m[11] * pz + m[15];
+        return {
+          x: ((m[0] * px + m[8] * pz + m[12]) / w + 1) * innerWidth / 2,
+          y: (1 - (m[1] * px + m[9] * pz + m[13]) / w) * innerHeight / 2,
+        };
+      },
+      camera: (x: number, z: number, distance = 60) => { camera.target = [x, 0, z]; camera.distance = distance; },
+    };
+    Object.defineProperty(window, "__prisonPlaytest", { value: bridge, configurable: true });
   }
   requestAnimationFrame(frame);
 }

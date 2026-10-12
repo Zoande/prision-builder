@@ -1,4 +1,4 @@
-import type { Agent } from "./agent.ts";
+import { REG, type Agent } from "./agent.ts";
 import type { CombatSystem } from "./combat.ts";
 import type { CredentialKind, CredentialSystem } from "./credentials.ts";
 import type { EscapeOperation, EscapeOperationsSystem } from "./escapeOperations.ts";
@@ -151,6 +151,8 @@ export class AdvancedEscapeSystem {
   readonly externalVehicles = new Map<number, ExternalEscapeVehicle>();
   readonly concealed = new Map<number, ConcealedPassenger>();
   readonly warnings = new Set<string>();
+  private readonly needsYielded = new Set<number>();
+  private readonly controlYielded = new Set<number>();
   private nextSchemeId = 1;
   private nextNodeId = 1;
   private nextCommitmentId = 1;
@@ -245,18 +247,80 @@ export class AdvancedEscapeSystem {
     return scheme;
   }
 
-  updatePrisoner(agent: Agent, dt: number, time: number, world: World, agents: readonly Agent[]): boolean {
+  updatePrisoner(agent: Agent, dt: number, time: number, world: World, agents: readonly Agent[], activity?: number,
+    medicallyUnavailable = false): boolean {
     if (this.concealed.has(agent.id)) { agent.state = "concealedInVehicle"; agent.path = null; agent.amp = 0; return true; }
-    const assignment = this.activeAssignment(agent.id); if (!assignment) return false;
+    if (agent.cuffed || agent.escortedBy >= 0 || medicallyUnavailable ||
+        ["escorted", "inTreatment", "beingTransported", "knockedOut", "unconscious"].includes(agent.state)) return false;
+    const assignment = this.activeAssignment(agent.id);
+    if (!assignment) { this.controlYielded.delete(agent.id); return false; }
     const { scheme, node } = assignment;
+    // Escape planning is background intent, not a custody lock. Hand the
+    // decision slot back to normal prisoner behavior for urgent needs and
+    // when the inmate is no longer motivated to continue. Keep the active
+    // node and its progress so it can resume if circumstances change.
+    if (agent.needs.food < .3 || agent.needs.sleep < .3) this.needsYielded.add(agent.id);
+    if (this.needsYielded.has(agent.id) && agent.needs.food >= .6 && agent.needs.sleep >= .6) this.needsYielded.delete(agent.id);
+    const inOrdinaryUse = agent.state === "toUse" || agent.state === "using";
+    const shouldYield = this.needsYielded.has(agent.id) || inOrdinaryUse || activity === REG.Eating || activity === REG.Sleep ||
+        activity === REG.Shower || agent.escapeDesire < .28;
+    if (shouldYield) {
+      // Legacy physical plans can leave the inmate in `exploring` while a
+      // movement path is still taking them toward an escape task. If we yield
+      // only the advanced task but keep that path, the ordinary AI follows it
+      // before it gets a chance to select food or sleep. Clear that escape
+      // path once on handoff; after that, ordinary exploring and use paths
+      // belong to the needs AI and must be allowed to progress.
+      const legacyEscapeMovement = !!agent.plan &&
+        ["exploring", "toTunnel", "toBreach", "fleeing", "retreating"].includes(agent.state);
+      if (!this.controlYielded.has(agent.id)) {
+        if (agent.state.startsWith("escape:") || legacyEscapeMovement) { agent.path = null; agent.pathI = 0; }
+        this.controlYielded.add(agent.id);
+      }
+      return false;
+    }
+    this.controlYielded.delete(agent.id);
     if (this.isPassive(node.action)) return node.action === "depart-vehicle" || this.concealed.has(agent.id);
+    if (node.action === "acquire-item" || node.action === "steal-record") {
+      const source = this.findSourceItem(node.itemDefId, agent, world);
+      if (source) node.targetTile = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(source.x))),
+        Math.max(0, Math.min(world.size - 1, Math.floor(source.z))));
+    }
+    if (node.action === "hide-in-vehicle") {
+      const truck = this.logistics.trucks.filter((row) => ["unloading", "departing"].includes(row.state))
+        .sort((a, b) => Math.hypot(agent.x - a.x, agent.z - a.z) - Math.hypot(agent.x - b.x, agent.z - b.z))[0];
+      if (truck) node.targetTile = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(truck.x))),
+        Math.max(0, Math.min(world.size - 1, Math.floor(truck.z))));
+    }
+    if (node.action === "credential-walkout") {
+      const hasDisguise = this.findCarried(agent.id, "staff-uniform") || this.findCarried(agent.id, "civilian-clothes");
+      const stagedDisguise = !hasDisguise && this.items.itemsIn(scheme.cacheContainer)
+        .find((item) => item.defId === "staff-uniform" || item.defId === "civilian-clothes");
+      if (stagedDisguise) {
+        const container = this.items.containers.get(scheme.cacheContainer)!;
+        const cacheTile = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(container.x))),
+          Math.max(0, Math.min(world.size - 1, Math.floor(container.z))));
+        if (Math.hypot(agent.x - (container.x + .5), agent.z - (container.z + .5)) <= 1.35) {
+          this.items.moveToContainer(stagedDisguise.id, `agent:${agent.id}:pockets`, time, agent.id, true);
+          const gate = world.piecesOfKind(Obj.Gatehouse)[0];
+          if (gate) node.targetTile = world.idx(gate.x + 1, gate.z + 1);
+        } else node.targetTile = cacheTile;
+      }
+    }
     if (node.targetTile >= 0) {
       const tx = node.targetTile % world.size, tz = Math.floor(node.targetTile / world.size);
       if (Math.hypot(agent.x - (tx + .5), agent.z - (tz + .5)) > 1.35) {
         if (!agent.path) {
           const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
-          const path = astar(world.size, start, node.targetTile, (i) => passable(world, i, false, agent.accessKeys), 35000,
-            (from, to) => world.canNavigateEdge(from, to));
+          const open = (i: number) => passable(world, i, false, agent.accessKeys);
+          const targetOpen = open(node.targetTile);
+          const tx = node.targetTile % world.size, tz = Math.floor(node.targetTile / world.size);
+          const goals = targetOpen ? [node.targetTile] : [[1, 0], [-1, 0], [0, 1], [0, -1]]
+            .map(([dx, dz]) => [tx + dx, tz + dz] as const)
+            .filter(([x, z]) => world.inBounds(x, z)).map(([x, z]) => world.idx(x, z)).filter(open);
+          const path = goals.map((goal) => astar(world.size, start, goal, open, 35000,
+            (from, to) => world.canNavigateEdge(from, to))).filter((candidate): candidate is number[] => !!candidate)
+            .sort((a, b) => a.length - b.length)[0] ?? null;
           if (path) { agent.path = path; agent.pathI = 0; }
           else { node.attempts++; node.blocker = "Assigned member cannot reach the task"; node.state = "waiting"; return false; }
         }
@@ -282,7 +346,8 @@ export class AdvancedEscapeSystem {
     schemes: [...this.schemes.values()].map((s) => ({ ...s, memberIds: [...s.memberIds], escapedMemberIds: [...s.escapedMemberIds], nodes: s.nodes.map(copyNode), compromisedNodes: [...s.compromisedNodes] })),
     knowledge: [...this.knowledge.values()].map((row) => ({ ...row, nodeIds: [...row.nodeIds] })),
     commitments: [...this.commitments.values()].map((row) => ({ ...row })), externalVehicles: [...this.externalVehicles.values()].map((row) => ({ ...row, passengerIds: [...row.passengerIds] })),
-    concealed: [...this.concealed.values()].map((row) => ({ ...row })), nextSchemeId: this.nextSchemeId, nextNodeId: this.nextNodeId,
+    concealed: [...this.concealed.values()].map((row) => ({ ...row })), needsYielded: [...this.needsYielded],
+    controlYielded: [...this.controlYielded], nextSchemeId: this.nextSchemeId, nextNodeId: this.nextNodeId,
     nextCommitmentId: this.nextCommitmentId, nextVehicleId: this.nextVehicleId, rngState: this.rngState,
   }; }
   loadData(data: Partial<ReturnType<AdvancedEscapeSystem["saveData"]>>): void {
@@ -291,6 +356,8 @@ export class AdvancedEscapeSystem {
     this.commitments.clear(); for (const row of data.commitments ?? []) this.commitments.set(row.id, { ...row });
     this.externalVehicles.clear(); for (const row of data.externalVehicles ?? []) this.externalVehicles.set(row.id, { ...row, passengerIds: [...row.passengerIds] });
     this.concealed.clear(); for (const row of data.concealed ?? []) this.concealed.set(row.agentId, { ...row });
+    this.needsYielded.clear(); for (const id of data.needsYielded ?? []) this.needsYielded.add(id);
+    this.controlYielded.clear(); for (const id of data.controlYielded ?? []) this.controlYielded.add(id);
     this.nextSchemeId = data.nextSchemeId ?? 1; this.nextNodeId = data.nextNodeId ?? 1; this.nextCommitmentId = data.nextCommitmentId ?? 1;
     this.nextVehicleId = data.nextVehicleId ?? 1_000_000; this.rngState = data.rngState ?? 0x5d84ce27;
   }
@@ -312,20 +379,40 @@ export class AdvancedEscapeSystem {
     if (scheme.mode === "perimeter") {
       const item = op.method === "climb" ? "rope" : "cutter";
       const insideHelp = scheme.complexityBudget >= 7 ? this.addNode(scheme, "bribe-staff", [prior], op.leaderId, this.sourceTile(item, world) ?? rallyTile, "Compromise a worker to leave a controlled tool unsecured", "branch", true, "", "", "leave-tool") : null;
-      const asset = this.addNode(scheme, "acquire-item", [prior, ...(insideHelp ? [insideHelp.id] : [])], this.memberFor(op, item === "rope" ? "supplier" : "cutter"), this.sourceTile(item, world) ?? rallyTile, `Acquire ${item}`, "retry", false, item);
-      const stash = this.addNode(scheme, "stash", [asset.id], asset.actors[0], rallyTile, "Stage the breach tool near the rally point", "retry", false, item);
+      let assetDependency = prior;
+      let stashDependency = -1;
+      const toolCount = item === "cutter" ? Math.max(1, op.plan.needed) : 1;
+      for (let i = 0; i < toolCount; i++) {
+        const asset = this.addNode(scheme, "acquire-item", [assetDependency, ...(i === 0 && insideHelp ? [insideHelp.id] : [])],
+          this.memberFor(op, item === "rope" ? "supplier" : "cutter"), this.sourceTile(item, world) ?? rallyTile,
+          `Acquire ${item}${toolCount > 1 ? ` ${i + 1}/${toolCount}` : ""}`, "retry", false, item);
+        const stash = this.addNode(scheme, "stash", [asset.id], asset.actors[0], rallyTile,
+          `Stage ${item}${toolCount > 1 ? ` ${i + 1}/${toolCount}` : ""} near the rally point`, "retry", false, item);
+        assetDependency = stash.id; stashDependency = stash.id;
+      }
       const distraction = scheme.memberIds.length >= 3 ? this.addNode(scheme, "start-distraction", [scout.id], this.memberFor(op, "lookout"), rallyTile, "Draw response away from the perimeter", "delay", true) : null;
-      this.addNode(scheme, "legacy-execute", [stash.id, ...(distraction ? [distraction.id] : [])], op.leaderId, rallyTile, "Cut or climb the physical perimeter and flee", "replan");
+      this.addNode(scheme, "legacy-execute", [stashDependency, ...(distraction ? [distraction.id] : [])], op.leaderId, rallyTile, "Cut or climb the physical perimeter and flee", "replan");
     } else if (scheme.mode === "tunnel" || scheme.mode === "outside-assistance") {
       const insideHelp = scheme.complexityBudget >= 7 ? this.addNode(scheme, "bribe-staff", [prior], op.leaderId, this.sourceTile("shovel", world) ?? rallyTile, "Compromise a worker to leave a digging tool unsecured", "branch", true, "", "", "leave-tool") : null;
-      const tool = this.addNode(scheme, "acquire-item", [prior, ...(insideHelp ? [insideHelp.id] : [])], this.memberFor(op, "digger"), this.sourceTile("shovel", world) ?? rallyTile, "Acquire a digging tool", "retry", false, "shovel");
-      const stash = this.addNode(scheme, "stash", [tool.id], tool.actors[0], rallyTile, "Move digging tools and spoons into the entry cache", "retry", false, "shovel");
+      const dist = Math.hypot((op.plan.exitTile % world.size) - (rallyTile % world.size),
+        Math.floor(op.plan.exitTile / world.size) - Math.floor(rallyTile / world.size));
+      const toolCount = Math.max(4, Math.ceil(dist + 3));
+      let assetDependency = prior;
+      let stashDependency = -1;
+      for (let i = 0; i < toolCount; i++) {
+        const tool = this.addNode(scheme, "acquire-item", [assetDependency, ...(i === 0 && insideHelp ? [insideHelp.id] : [])],
+          this.memberFor(op, "digger"), this.sourceTile("spoon", world) ?? rallyTile,
+          `Acquire digging spoon ${i + 1}/${toolCount}`, "retry", false, "spoon");
+        const stash = this.addNode(scheme, "stash", [tool.id], tool.actors[0], rallyTile,
+          `Stage digging spoon ${i + 1}/${toolCount}`, "retry", false, "spoon");
+        assetDependency = stash.id; stashDependency = stash.id;
+      }
       if (scheme.mode === "outside-assistance") {
         const contact = this.addNode(scheme, "contact-outsider", [scout.id], op.architectId, this.roomTarget(world, RoomType.MailRoom) ?? rallyTile, "Arrange an outside digger and pickup", "retry");
         const wait = this.addNode(scheme, "wait-external", [contact.id], op.leaderId, rallyTile, "Wait for the outside tunnel commitment", "delay");
-        const outside = this.addNode(scheme, "outside-dig", [wait.id, stash.id], tool.actors[0], rallyTile, "Connect the internal tunnel to the outside excavation", "replan");
+        const outside = this.addNode(scheme, "outside-dig", [wait.id, stashDependency], this.memberFor(op, "digger"), rallyTile, "Connect the internal tunnel to the outside excavation", "replan");
         this.addNode(scheme, "legacy-execute", [outside.id], op.leaderId, rallyTile, "Traverse the connected tunnel and flee", "replan");
-      } else this.addNode(scheme, "legacy-execute", [stash.id], op.leaderId, rallyTile, "Dig, surface, and leave through the shared tunnel", "replan");
+      } else this.addNode(scheme, "legacy-execute", [stashDependency], op.leaderId, rallyTile, "Dig, surface, and leave through the shared tunnel", "replan");
     } else if (scheme.mode === "credential") {
       const leak = scheme.complexityBudget >= 7 ? this.addNode(scheme, "bribe-staff", [prior], op.leaderId, recordsTile, "Compromise records staff for a schedule warning", "branch", true, "", "", "leak-schedule") : null;
       const record = this.addNode(scheme, "steal-record", [prior, ...(leak ? [leak.id] : [])], this.memberFor(op, "scout"), recordsTile, "Copy staff movements and credential format", "retry", false, "copied-schedule");
@@ -338,12 +425,14 @@ export class AdvancedEscapeSystem {
       exit.actors = [...scheme.memberIds];
     } else if (scheme.mode === "vehicle") {
       const schedule = this.addNode(scheme, "steal-record", [prior], this.memberFor(op, "scout"), recordsTile, "Copy the outgoing truck and inspection schedule", "retry", false, "delivery-manifest");
+      const contact = this.addNode(scheme, "contact-outsider", [schedule.id], op.architectId, deliveryTile, "Arrange a driver to leave the shipment unsealed", "retry");
+      const wait = this.addNode(scheme, "wait-external", [contact.id], op.leaderId, deliveryTile, "Wait for the driver to confirm the shipment", "delay");
       const bribe = this.addNode(scheme, "bribe-staff", [schedule.id], op.leaderId, deliveryTile, "Bribe a driver or Gatehouse guard to ignore the concealment", "substitute", true, "", "", "alter-manifest");
       if (scheme.complexityBudget >= 7) {
         const blackmail = this.addNode(scheme, "blackmail-staff", [schedule.id], op.architectId, deliveryTile, "Pressure a compromised employee to alter the outgoing manifest", "branch", true, "", "", "alter-manifest");
         bribe.alternatives.push(blackmail.id); blackmail.alternatives.push(bribe.id);
       }
-      const hide = this.addNode(scheme, "hide-in-vehicle", [schedule.id, bribe.id], this.memberFor(op, "supplier"), deliveryTile, "Conceal members in outgoing cargo", "delay");
+      const hide = this.addNode(scheme, "hide-in-vehicle", [schedule.id, wait.id, bribe.id], this.memberFor(op, "supplier"), deliveryTile, "Conceal members in outgoing cargo", "delay");
       hide.actors = [...scheme.memberIds];
       this.addNode(scheme, "depart-vehicle", [hide.id], op.leaderId, gateTile, "Pass inspection and depart in the truck", "replan");
     } else if (scheme.mode === "visitation") {
@@ -355,7 +444,8 @@ export class AdvancedEscapeSystem {
         bribe.alternatives.push(blackmail.id); blackmail.alternatives.push(bribe.id);
       }
       const clothes = this.addNode(scheme, "acquire-item", [wait.id], this.memberFor(op, "supplier"), visitTile, "Receive civilian clothing and a visitor pass", "delay", false, "civilian-clothes");
-      const exit = this.addNode(scheme, "visitation-exit", [clothes.id, bribe.id], op.leaderId, gateTile, "Merge with departing visitors and leave", "replan");
+      const pass = this.addNode(scheme, "acquire-item", [clothes.id], this.memberFor(op, "supplier"), visitTile, "Receive the visitor movement pass", "delay", false, "visitor-pass");
+      const exit = this.addNode(scheme, "visitation-exit", [pass.id, bribe.id], op.leaderId, gateTile, "Merge with departing visitors and leave", "replan");
       exit.actors = [...scheme.memberIds];
     } else {
       const contact = this.addNode(scheme, "contact-outsider", [prior], op.architectId, this.roomTarget(world, RoomType.MailRoom) ?? infirmaryTile, "Arrange an outside medical pickup", "retry");
@@ -396,7 +486,7 @@ export class AdvancedEscapeSystem {
       if (node.action === "wait-external") {
         const commitment = [...this.commitments.values()].find((row) => row.schemeId === scheme.id);
         if (!commitment) { node.blocker = "No outside commitment was created"; node.state = "waiting"; continue; }
-        if (["arrived", "fulfilled"].includes(commitment.state)) this.finishNode(scheme, node, time, world, agents);
+        if (commitment.state === "fulfilled") this.finishNode(scheme, node, time, world, agents);
         else node.blocker = `${commitment.type} commitment is ${commitment.state}`;
       } else if (node.action === "legacy-execute") {
         if (!op) { node.state = "failed"; node.blocker = "Original breach operation no longer exists"; continue; }
@@ -427,12 +517,38 @@ export class AdvancedEscapeSystem {
         node.state = "waiting"; node.blocker = "The assigned member cannot conceal the item"; return;
       }
       node.sourceItemId = item.id;
+      if (scheme.mode === "visitation" && node.action === "acquire-item" && node.itemDefId === "visitor-pass") {
+        const visit = [...this.commitments.values()].find((row) => row.schemeId === scheme.id &&
+          row.type === "visitor" && row.state === "fulfilled");
+        const familyContact = visit && [...this.market.contacts.values()].flat().find((contact) =>
+          contact.id === visit.contactId && contact.relation === "family");
+        // Receiving items is not itself a social visit. This task can only
+        // complete after the live visitor commitment arrives and the inmate
+        // physically meets the contact at the visitation room.
+        if (familyContact) actor.needs.family = Math.min(1, actor.needs.family + .45);
+      }
     } else if (node.action === "write-note") {
       const note = this.items.create("plan-note", time, { ownerId: actor.id, quality: scheme.confidence });
       this.items.moveToContainer(note.id, `agent:${actor.id}:pockets`, time, actor.id, true); node.sourceItemId = note.id;
     } else if (node.action === "stash") {
+      // `legacy-execute` may activate in the same Task 3 update after its
+      // dependencies complete, then hand the cache asset to the legacy
+      // executor. Do not let a stale/retried stash assignment take it back.
+      if (scheme.nodes.some((candidate) => candidate.action === "legacy-execute" &&
+          ["active", "complete"].includes(candidate.state))) {
+        this.finishNode(scheme, node, time, world, agents); return;
+      }
       const item = this.findCarried(actor.id, node.itemDefId);
-      if (!item || !this.items.moveToContainer(item.id, scheme.cacheContainer, time, actor.id, true)) { node.state = "waiting"; node.blocker = "The staged asset is missing"; return; }
+      if (!item) {
+        // Stashing and graph completion can be separated by an interruption
+        // or save boundary. Treat an already-present matching cache item as
+        // the idempotent result of that physical move.
+        const staged = this.items.itemsIn(scheme.cacheContainer).find((candidate) => candidate.defId === node.itemDefId);
+        if (staged) { node.sourceItemId = staged.id; this.finishNode(scheme, node, time, world, agents); return; }
+      }
+      if (!item || !this.items.moveToContainer(item.id, scheme.cacheContainer, time, actor.id, true)) {
+        node.attempts++; node.state = "waiting"; node.progress = 0; node.blocker = "The staged asset is missing"; return;
+      }
     } else if (node.action === "forge-pass" || node.action === "copy-key") {
       const ingredients = node.action === "copy-key" ? ["key-blank", "metal-scrap"] : ["paper", "ink"];
       const consumed = ingredients.map((defId) => this.findCarried(actor.id, defId) ?? this.findSourceItem(defId, actor, world));
@@ -475,6 +591,11 @@ export class AdvancedEscapeSystem {
     } else if (node.action === "hide-in-vehicle") {
       const truck = this.logistics.trucks.filter((row) => ["unloading", "departing"].includes(row.state)).sort((a, b) => a.id - b.id)[0];
       if (!truck) { node.state = "waiting"; node.blocker = "No outgoing truck is present"; node.progress = 0; return; }
+      if (Math.hypot(actor.x - truck.x, actor.z - truck.z) > 1.75) {
+        node.targetTile = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(truck.x))),
+          Math.max(0, Math.min(world.size - 1, Math.floor(truck.z))));
+        node.blocker = "Waiting for the member to reach the outgoing truck"; return;
+      }
       this.concealed.set(actor.id, { agentId: actor.id, vehicleId: truck.id, schemeId: scheme.id,
         concealment: clamp(.34 + skill(actor.profile, "stealth") * .055 + skill(actor.profile, "smuggling") * .04), checked: false, detected: false, boardedAt: time });
       actor.x = truck.x; actor.z = truck.z; actor.path = null; actor.state = "concealedInVehicle";
@@ -488,18 +609,19 @@ export class AdvancedEscapeSystem {
       vehicle.state = "departing"; vehicle.timer = 8;
     } else if (node.action === "credential-walkout") {
       const pass = this.credentials.bestPresentation(actor.id, "movement-pass", time);
+      const key = this.credentials.bestPresentation(actor.id, "staff-key", time);
       const uniform = this.findCarried(actor.id, "staff-uniform") || this.findCarried(actor.id, "civilian-clothes");
       const gate = [...this.facility.gatehouses.values()][0], guard = gate && agents.find((a) => a.id === gate.guardId);
       const areaId = this.facility.areaIdAt(world.idx(Math.floor(actor.x), Math.floor(actor.z)));
       const familiarity = guard ? this.staff.familiarity(guard.id, areaId) : 0;
       const deception = skill(actor.profile, "deception") / 10 + (pass?.quality ?? 0) * .45 + (uniform ? .22 : 0) - familiarity * .3;
       const bribed = guard && this.staff.permits(guard.id, actor.id, "ignore-access", time);
-      if (!bribed && (!pass || !uniform || deception < .46 + this.random() * .28)) { this.exposeExitAttempt(scheme, actor, time, "Forged credential presentation failed"); node.state = "failed"; return; }
+      if (!bribed && (!pass || !key || !uniform || deception < .46 + this.random() * .28)) { this.exposeExitAttempt(scheme, actor, time, "Forged credential presentation failed"); node.state = "failed"; return; }
       this.queueEscape(scheme, actor.id);
       if (this.completeOneActor(node, actor.id)) return;
       this.finishNode(scheme, node, time, world, agents); return;
     } else if (node.action === "outside-dig") {
-      const commitment = [...this.commitments.values()].find((row) => row.schemeId === scheme.id && row.type === "outside-digger" && ["arrived", "fulfilled"].includes(row.state));
+      const commitment = [...this.commitments.values()].find((row) => row.schemeId === scheme.id && row.type === "outside-digger" && row.state === "fulfilled");
       if (!commitment) { node.state = "waiting"; node.blocker = "Outside excavation has not reached the rendezvous"; return; }
     }
     this.finishNode(scheme, node, time, world, agents);
@@ -549,7 +671,10 @@ export class AdvancedEscapeSystem {
       if (vehicle.state === "arriving") { vehicle.z = Math.min(375, vehicle.z + dt * 48); if (vehicle.z >= 375) {
         vehicle.state = "unloading"; vehicle.timer = vehicle.kind === "outside" ? 20 : 12;
         const commitment = [...this.commitments.values()].find((row) => row.vehicleId === vehicle.id);
-        if (commitment && vehicle.kind === "outside") commitment.state = "fulfilled";
+        if (commitment) {
+          commitment.state = "fulfilled";
+          if (commitment.type === "visitor") this.materializeVisitorItems(commitment.schemeId, world, time);
+        }
       } }
       else if (vehicle.state === "unloading" && vehicle.timer <= 0 && (vehicle.passengerIds.length || vehicle.kind === "outside")) { vehicle.state = "departing"; vehicle.timer = 8; }
       else if (vehicle.state === "departing") vehicle.z += dt * 48;
@@ -604,6 +729,20 @@ export class AdvancedEscapeSystem {
     this.commitments.set(id, row); return row;
   }
 
+  private materializeVisitorItems(schemeId: number, world: World, time: number): void {
+    const tile = this.roomTarget(world, RoomType.Visitation);
+    const x = tile === null ? Math.min(world.size - 2, 374) : tile % world.size;
+    const z = tile === null ? Math.min(world.size - 2, 375) : Math.floor(tile / world.size);
+    for (const defId of ["civilian-clothes", "visitor-pass"]) {
+      const existing = [...this.items.items.values()].some((item) => item.defId === defId && item.locationKind !== "destroyed" &&
+        Math.hypot(item.x - x, item.z - z) < 2);
+      if (existing) continue;
+      const item = this.items.create(defId, time, { ownerId: -1, quality: .7 });
+      this.items.moveToWorld(item.id, x, z, time);
+    }
+    void schemeId;
+  }
+
   private boardExternalVehicle(scheme: EscapeScheme, vehicle: ExternalEscapeVehicle, agent: Agent, time: number): void {
     if (!vehicle.passengerIds.includes(agent.id)) vehicle.passengerIds.push(agent.id);
     this.concealed.set(agent.id, { agentId: agent.id, vehicleId: vehicle.id, schemeId: scheme.id,
@@ -637,6 +776,12 @@ export class AdvancedEscapeSystem {
   }
 
   private stageLegacyAssets(scheme: EscapeScheme, op: EscapeOperation, agents: readonly Agent[], time: number): void {
+    // Once an advanced physical asset has entered the legacy executor, its
+    // location is authoritative in ItemSystem. Readiness can briefly drop
+    // while the legacy operation catches up; restaging on every transition
+    // would pull the asset back out of the member's pockets and make the two
+    // systems alternate it between cache and holder.
+    if (op.advancedReady && ((op.acquisition?.itemIds?.length ?? 0) > 0 || (op.acquisition?.itemId ?? -1) >= 0)) return;
     const cached = this.items.itemsIn(scheme.cacheContainer).sort((a, b) => a.id - b.id);
     for (const item of cached) {
       const role = ["cutter", "hacksaw-blade", "pruning-shears"].includes(item.defId) ? "cutter" :
@@ -645,7 +790,13 @@ export class AdvancedEscapeSystem {
       const member = agents.find((agent) => agent.id === memberId); if (!member) continue;
       if (this.items.moveToContainer(item.id, `agent:${member.id}:pockets`, time, member.id, true) && op.acquisition &&
           (["cutter", "hacksaw-blade", "pruning-shears"].includes(item.defId) || ["spoon", "trowel", "shovel"].includes(item.defId))) {
-        op.acquisition.asset = item.defId; op.acquisition.state = "needed"; op.acquisition.holderId = member.id; op.acquisition.itemId = item.id;
+        // Mark the staged asset as assigned so market hiding and custody
+        // systems leave it with the designated breach member until use.
+        this.items.issue(item.id, member.id, time);
+        op.acquisition.asset = item.defId; op.acquisition.state = "needed"; op.acquisition.holderId = member.id;
+        op.acquisition.itemIds ??= op.acquisition.itemId >= 0 ? [op.acquisition.itemId] : [];
+        if (!op.acquisition.itemIds.includes(item.id)) op.acquisition.itemIds.push(item.id);
+        if (op.acquisition.itemId < 0) op.acquisition.itemId = item.id;
       }
     }
   }
@@ -749,7 +900,15 @@ export class AdvancedEscapeSystem {
     return workplace ? [...world.rooms.get(workplace.roomId)?.tiles ?? []][0] ?? null : null;
   }
   private findSourceItem(defId: string, actor: Agent, _world: World) {
-    const candidates = [...this.items.items.values()].filter((item) => item.defId === defId && item.locationKind !== "destroyed" && item.ownerId !== actor.id && Math.hypot(item.x - actor.x, item.z - actor.z) <= 4.25);
+    const candidates = [...this.items.items.values()].filter((item) => {
+      if (item.defId !== defId || item.locationKind === "destroyed" || item.ownerId === actor.id ||
+          Math.hypot(item.x - actor.x, item.z - actor.z) > 4.25) return false;
+      const container = this.items.containers.get(item.containerId);
+      // A cache is a destination, never a source. The former loose search
+      // let a member reacquire the same item from his own scheme cache and
+      // report several preparation steps complete with one physical tool.
+      return !container?.tags.some((tag) => ["escape", "hiding-place", "personal", "hands", "equipment"].includes(tag));
+    });
     return candidates.sort((a, b) => Math.hypot(a.x - actor.x, a.z - actor.z) - Math.hypot(b.x - actor.x, b.z - actor.z) || a.id - b.id)[0] ?? null;
   }
   private findCarried(agentId: number, defId: string) { return ["hands", "pockets", "worn"].flatMap((suffix) => this.items.itemsIn(`agent:${agentId}:${suffix}`)).find((item) => item.defId === defId) ?? null; }

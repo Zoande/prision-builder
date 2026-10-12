@@ -1,0 +1,72 @@
+#logisticsDashboard .area-filter-controls {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin:0 0 8px;
+}
+#logisticsDashboard .area-filter-search {
+  flex:1 1 auto;
+  min-width:0;
+  min-height:36px;
+  padding:7px 9px;
+  border:1px solid var(--line);
+  border-radius:4px;
+  color:#e7eeea;
+  background:#10242d;
+}
+#logisticsDashboard .area-filter-count { flex:0 0 auto; color:#aebcbd; font-size:9px; }
+#logisticsDashboard .matrix[data-no-matches="true"]::after {
+  display:block;
+  padding:12px 8px;
+  color:#aebcbd;
+  content:"No areas match this filter.";
+  font-size:11px;
+}
+#financialsDashboard.financials-mobile .log-kpi strong { overflow-wrap:anywhere; }
+#financialsDashboard.show ~ #saveStatus,
+#financialsDashboard.show ~ #saveControls { display:none; }
+
+@media (max-width:720px) {
+  #financialsDashboard.show.financials-mobile {
+    left:8px;
+    right:8px;
+    top:236px;
+    bottom:8px;
+    width:auto;
+    max-height:calc(100vh - 244px);
+    overflow:auto;
+    padding:10px;
+  }
+  #financialsDashboard.financials-mobile .log-summary { gap:4px; }
+  #financialsDashboard.financials-mobile .log-kpi { min-width:0; padding:6px 4px; }
+  #financialsDashboard.financials-mobile .log-kpi strong { font-size:11px; }
+  #financialsDashboard.financials-mobile .log-table { width:100%; table-layout:fixed; }
+  #financialsDashboard.financials-mobile .log-table th,
+  #financialsDashboard.financials-mobile .log-table td {
+    min-width:0;
+    padding:5px 3px;
+    overflow-wrap:anywhere;
+    font-size:9px;
+  }
+  #financialsDashboard.financials-mobile .log-table th:nth-child(1),
+  #financialsDashboard.financials-mobile .log-table td:nth-child(1) { width:18%; }
+  #financialsDashboard.financials-mobile .log-table th:nth-child(2),
+  #financialsDashboard.financials-mobile .log-table td:nth-child(2) { width:18%; }
+  #financialsDashboard.financials-mobile .log-table th:nth-child(4),
+  #financialsDashboard.financials-mobile .log-table td:nth-child(4) { width:18%; }
+  #financialsDashboard.financials-mobile .profile-section { min-width:0; }
+  #logisticsDashboard .area-filter-controls { align-items:stretch; flex-direction:column; gap:4px; }
+  #logisticsDashboard .area-filter-search { width:100%; min-height:40px; }
+  #logisticsDashboard .area-filter-count { align-self:flex-end; }
+  #logisticsDashboard .dash-tabs { position:sticky; top:-10px; z-index:2; padding:4px 0; background:#081319; }
+  #logisticsDashboard .matrix-row .toggle-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; }
+  #logisticsDashboard .matrix-row .toggle-grid label { min-width:0; min-height:36px; padding:5px 6px; border:1px solid rgba(255,255,255,.08); border-radius:4px; overflow-wrap:anywhere; }
+  #logisticsDashboard .matrix-row .toggle-grid input { flex:0 0 auto; width:18px; height:18px; }
+  #logisticsDashboard [data-deploy] { min-width:34px; min-height:34px; padding:4px 8px; }
+}
+
+@media (max-width:340px) {
+  #financialsDashboard.financials-mobile .log-table th,
+  #financialsDashboard.financials-mobile .log-table td { font-size:8px; }
+  #logisticsDashboard .matrix-row .toggle-grid { grid-template-columns:1fr; }
+}

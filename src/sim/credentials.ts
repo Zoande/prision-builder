@@ -66,8 +66,8 @@ export class CredentialSystem {
 
   keyTier(agentId: number, time: number): 0 | 1 | 2 {
     const physical = ["hands", "pockets", "worn"].flatMap((suffix) => this.items.itemsIn(`agent:${agentId}:${suffix}`));
-    if (physical.some((item) => item.defId === "guard-key" || item.defId === "duplicate-guard-key")) return 2;
-    if (physical.some((item) => item.defId === "staff-key" || item.defId === "duplicate-staff-key")) return 1;
+    if (physical.some((item) => item.defId === "guard-key")) return 2;
+    if (physical.some((item) => item.defId === "staff-key")) return 1;
     const rows = this.carried(agentId, time);
     return rows.some((row) => row.kind === "guard-key") ? 2 : rows.some((row) => row.kind === "staff-key") ? 1 : 0;
   }

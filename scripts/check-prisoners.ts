@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { Agents } from "../src/sim/agents.ts";
 import { blankAgent, type EscapePlan } from "../src/sim/agent.ts";
 import { Obj, World } from "../src/sim/world.ts";
+import { PrisonerSocialSystem } from "../src/sim/social.ts";
 import {
   APTITUDE_IDS, PERSONALITY_IDS, generatePrisonerProfile, freshPrisonerMind,
 } from "../src/sim/profiles.ts";
@@ -52,6 +53,43 @@ assert.equal(restored.agents.length, agents.agents.length);
 assert.equal(restored.social.bonds.size, agents.social.bonds.size);
 assert.equal(restored.agents[0].profile?.firstName, agents.agents[0].profile?.firstName);
 assert.equal(restored.agents[0].needs.social, agents.agents[0].needs.social);
+
+// Spatial observation buckets must report the same guard and peer visibility
+// as the legacy full scan, including exact-radius and cross-cell boundaries.
+const visibilityWorld = new World(64), visibility = new PrisonerSocialSystem();
+const observer = prisoner(101, 7.5, 7.5);
+const peerAtBoundary = prisoner(102, 7.5 + 11.5 * .55, 7.5);
+const peerOutside = prisoner(103, 7.5 + 11.5 * .55 + .001, 7.5);
+const farPeer = prisoner(104, 40.5, 40.5);
+for (const agent of [observer, peerAtBoundary, peerOutside, farPeer]) agent.profile!.aptitudes.perception = 10;
+const guardAtBoundary = blankAgent(Obj.Guard);
+guardAtBoundary.id = 201; guardAtBoundary.x = 19; guardAtBoundary.z = 7.5;
+const guardOutside = blankAgent(Obj.Guard);
+guardOutside.id = 202; guardOutside.x = 19.001; guardOutside.z = 7.5;
+const guardAcrossCell = blankAgent(Obj.Guard);
+guardAcrossCell.id = 203; guardAcrossCell.x = 8.1; guardAcrossCell.z = 7.5;
+const guardWithoutPosition = blankAgent(Obj.Guard);
+guardWithoutPosition.id = 204; guardWithoutPosition.x = Number.NaN; guardWithoutPosition.z = 7.5;
+const visibilityAgents = [observer, guardAtBoundary, peerAtBoundary, guardOutside, guardAcrossCell, guardWithoutPosition, peerOutside, farPeer];
+for (const source of [observer, peerAtBoundary, peerOutside, farPeer]) for (const target of [observer, peerAtBoundary, peerOutside, farPeer]) {
+  if (source === target) continue;
+  visibility.bond(source.id, target.id)!.familiarity = .3;
+}
+(visibility as unknown as { observe(time: number, world: World, agents: typeof visibilityAgents): void })
+  .observe(12, visibilityWorld, visibilityAgents);
+for (const source of [observer, peerAtBoundary, peerOutside, farPeer]) {
+  const range = 5 + source.profile!.aptitudes.perception * .65;
+  const expectedGuards = visibilityAgents.filter((other) => other.kind === Obj.Guard &&
+    !(Math.hypot(other.x - source.x, other.z - source.z) > range)).map((other) => other.id);
+  const expectedPeers = visibilityAgents.filter((other) => other.id !== source.id && other.kind === Obj.Prisoner &&
+    !(Math.hypot(other.x - source.x, other.z - source.z) > range * .55) &&
+    (visibility.bond(source.id, other.id, false)?.familiarity ?? 0) > .2).map((other) => other.id);
+  const facts = [...(visibility.intel.get(source.id)?.values() ?? [])];
+  assert.deepEqual(facts.filter((fact) => fact.type === "guard-route" || fact.type === "guard-post")
+    .map((fact) => Number(fact.key.slice("guard:".length))), expectedGuards);
+  assert.deepEqual(facts.filter((fact) => fact.type === "reliability")
+    .map((fact) => Number(fact.key.slice("reliability:".length))), expectedPeers);
+}
 
 // Shared operation has no member cap, elects distinct roles, and persists.
 const leader = agents.agents[0];

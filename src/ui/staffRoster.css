@@ -1,0 +1,57 @@
+.staff-roster {
+  position: fixed;
+  z-index: 14;
+  top: 112px;
+  right: 18px;
+  width: min(340px, calc(100vw - 36px));
+  height: min(620px, calc(100vh - 150px));
+  max-height: calc(100vh - 150px);
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  color: #e3ebeb;
+  border: 1px solid rgba(183, 207, 211, .28);
+  border-radius: 8px;
+  background: rgba(9, 21, 27, .97);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, .38);
+  pointer-events: auto;
+}
+.staff-roster.is-open { display: flex; }
+.staff-roster > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px 9px; border-bottom: 1px solid rgba(173,194,202,.15); }
+.sr-eyebrow { color: #b2c879; font-size: 9px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+.staff-roster h2 { margin: 1px 0 0; color: #e9efeb; font-size: 18px; line-height: 1.1; }
+.sr-close, .sr-hire { min-height: 30px; padding: 5px 9px; border: 1px solid rgba(173,194,202,.2); border-radius: 4px; color: #d4dfdd; background: rgba(255,255,255,.045); font-size: 10px; font-weight: 800; cursor: pointer; }
+.sr-close:hover, .sr-hire:hover { border-color: rgba(183,207,211,.48); background: rgba(255,255,255,.09); }
+.sr-controls { display: flex; gap: 7px; padding: 10px 12px 6px; }
+.sr-controls input { min-width: 0; flex: 1 1 auto; padding: 7px 9px; border: 1px solid rgba(166,190,190,.22); border-radius: 5px; outline: none; color: #eef3ef; background: #0b1820; font: inherit; font-size: 11px; }
+.sr-controls input:focus { border-color: #9fb56c; box-shadow: 0 0 0 2px rgba(159,181,108,.16); }
+.sr-count { flex: 0 0 auto; padding: 0 13px 5px; color: #9aa9aa; font-size: 10px; }
+.sr-list { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 6px; overflow-x: hidden; overflow-y: auto; padding: 3px 10px 12px; scrollbar-color: #536b4a transparent; }
+.sr-list[data-empty]::before { content: attr(aria-label); display: block; padding: 18px 10px; color: #aebcbd; font-size: 11px; text-align: center; }
+.sr-entry { flex: 0 0 auto; display: grid; gap: 4px; width: 100%; padding: 8px 9px; border: 1px solid rgba(173,194,202,.14); border-radius: 5px; color: #d2dcdb; background: rgba(255,255,255,.035); cursor: pointer; text-align: left; }
+.sr-entry:hover { border-color: rgba(183,207,211,.4); background: rgba(255,255,255,.075); }
+.sr-entry.is-selected { border-color: rgba(184,204,120,.72); background: rgba(132,154,83,.16); box-shadow: inset 0 0 0 1px rgba(184,204,120,.15); }
+.sr-entry-top { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.sr-name { min-width: 0; overflow: hidden; color: #eef3ef; font-size: 12px; font-weight: 850; text-overflow: ellipsis; white-space: nowrap; }
+.sr-role { flex: 0 0 auto; color: #b6c984; font-size: 9px; font-weight: 850; letter-spacing: .055em; text-transform: uppercase; }
+.sr-state { overflow: hidden; color: #bdc9c7; font-size: 10px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.sr-assignment { overflow: hidden; color: #95a6a6; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.sr-fatigue-line { display: grid; grid-template-columns:auto auto minmax(45px, 1fr); align-items: center; gap: 6px; }
+.sr-fatigue-label { color: #91a1a2; font-size: 9px; }
+.sr-fatigue-line strong { color: #c8d1ce; font-size: 9px; font-weight: 800; }
+.sr-fatigue-track { height: 4px; overflow: hidden; border-radius: 9px; background: rgba(220,236,228,.11); }
+.sr-fatigue-fill { display: block; height: 100%; border-radius: inherit; background: #90ad60; transition: width .15s ease; }
+.sr-fatigue-fill.is-mid { background: #d2ae58; }
+.sr-fatigue-fill.is-high { background: #d77870; }
+.sr-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.sr-badge { padding: 2px 5px; border-radius: 8px; color: #d8e6bd; background: rgba(128,158,73,.16); font-size: 8px; font-weight: 800; }
+.sr-badge.is-medical { color: #f0b7a7; background: rgba(170,93,56,.2); }
+.sr-entry:focus-visible, .sr-close:focus-visible, .sr-hire:focus-visible { outline: 2px solid #d7e890; outline-offset: 2px; }
+@media (max-width: 720px) {
+  .staff-roster { top: 232px; right: 8px; width: min(340px, calc(100vw - 16px)); height: calc(100vh - clamp(190px, 30vh, 244px) - 246px); max-height: none; }
+}
+@media (max-width: 359px) {
+  .sr-controls { flex-wrap: wrap; }
+  .sr-controls input { flex-basis: 100%; }
+  .sr-hire { flex: 1 1 auto; }
+}

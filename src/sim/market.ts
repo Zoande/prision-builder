@@ -293,7 +293,7 @@ export class MarketSystem {
   private hidingPass(time: number, agents: readonly Agent[]): void {
     const hiding = [...this.items.containers.values()].filter((c) => c.tags.includes("hiding-place"));
     for (const prisoner of agents.filter((a) => a.kind === Obj.Prisoner)) {
-      const illegal = this.items.itemsIn(`agent:${prisoner.id}:pockets`).find((i) => itemDefV4(i.defId).legality !== "legal");
+      const illegal = this.items.itemsIn(`agent:${prisoner.id}:pockets`).find((i) => i.issuedTo < 0 && itemDefV4(i.defId).legality !== "legal");
       if (!illegal) continue;
       const place = hiding.filter((c) => Math.hypot(c.x - prisoner.x, c.z - prisoner.z) < 2.2 && c.itemIds.length < c.capacity)
         .sort((a, b) => b.concealment - a.concealment)[0];

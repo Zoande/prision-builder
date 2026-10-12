@@ -132,6 +132,7 @@ export class World {
   private routeAt: Int32Array[] = [];
   private nextRouteId = 1;
   private active = new Set<number>();
+  private readonly tilesByKind = new Map<number, number[]>();
   // Rooms: per-tile room id (0 = outside / none) + the room registry.
   readonly roomId: Int32Array;
   readonly rooms = new Map<number, Room>();
@@ -302,15 +303,26 @@ export class World {
 
   /** Tile indices of every object of a kind (scans only touched tiles). */
   tilesOfKind(kind: number): number[] {
-    const out: number[] = [];
-    for (const i of this.active) if (this.objKind[i] === kind) out.push(i);
-    return out;
+    let tiles = this.tilesByKind.get(kind);
+    if (!tiles) {
+      tiles = [];
+      for (const i of this.active) if (this.objKind[i] === kind) tiles.push(i);
+      this.tilesByKind.set(kind, tiles);
+    }
+    // Preserve the original API's mutable result without exposing cached state.
+    return [...tiles];
+  }
+
+  /** Invalidate lookups after external object-kind mutations. */
+  invalidateObjectLookup(): void {
+    this.tilesByKind.clear();
   }
   inBounds(x: number, z: number): boolean {
     return x >= 0 && z >= 0 && x < this.size && z < this.size;
   }
 
   private touch(x: number, z: number) {
+    this.invalidateObjectLookup();
     this.active.add(this.idx(x, z));
     if (x < this.bx0) this.bx0 = x;
     if (z < this.bz0) this.bz0 = z;
@@ -1004,6 +1016,7 @@ export class World {
   }
 
   loadData(data: ReturnType<World["saveData"]> & LegacySave) {
+    this.invalidateObjectLookup();
     this.floorMat.fill(0);
     this.objKind.fill(0);
     this.objMat.fill(0);

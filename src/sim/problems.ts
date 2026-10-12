@@ -2,12 +2,13 @@ export type ProblemSeverity = "info" | "warning" | "critical";
 export type ProblemAction =
   | { kind: "center"; label: string }
   | { kind: "catalog"; label: string; mode: string; section: string }
+  | { kind: "mode"; label: string; mode: string }
   | { kind: "order"; label: string; orderId: number };
 
 export interface Problem {
   id: string;
   severity: ProblemSeverity;
-  source: "construction" | "room" | "logistics" | "intake" | "staff" | "kitchen" | "work";
+  source: "construction" | "room" | "logistics" | "intake" | "staff" | "kitchen" | "work" | "health" | "security" | "management" | "market" | "gangs" | "facility";
   message: string;
   x: number;
   z: number;

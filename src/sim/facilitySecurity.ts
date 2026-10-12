@@ -61,16 +61,19 @@ export class FacilitySecurityGraph {
       circuit.online = true; circuit.sabotagedBy = -1; circuit.evidence = Math.max(circuit.evidence, .35);
     }
     for (const gate of this.gatehouses.values()) {
-      const guard = agents.find((agent) => agent.id === gate.guardId && agent.kind === Obj.Guard);
-      gate.open = !!guard;
-      gate.warning = guard ? "" : "Gatehouse is unmanned";
-      if (!guard) this.warnings.add("A Gatehouse is unmanned; vehicles are leaving unchecked");
-      this.inspectTraffic(gate, guard ?? null, trucks, dt);
+      const assigned = agents.find((agent) => agent.id === gate.guardId && agent.kind === Obj.Guard);
+      const piece = world.pieces.get(gate.pieceId);
+      const onPost = !!assigned && !!piece && assigned.state === "manningGatehouse" &&
+        Math.hypot(assigned.x - (piece.x + .9), assigned.z - (piece.z + 1.5)) <= .9;
+      gate.open = onPost;
+      gate.warning = onPost ? "" : "Gatehouse is unmanned";
+      if (!onPost) this.warnings.add("A Gatehouse is unmanned; vehicles are leaving unchecked");
+      this.inspectTraffic(gate, onPost ? assigned : null, trucks, dt);
     }
   }
 
   updateGuard(agent: Agent, dt: number, world: World, urgentResponse: boolean): boolean {
-    if (agent.kind !== Obj.Guard || urgentResponse) return false;
+    if (agent.kind !== Obj.Guard || urgentResponse || this.isOnPairedDuty(agent)) return false;
     const gate = [...this.gatehouses.values()].find((row) => row.guardId === agent.id);
     if (!gate) return false;
     const piece = world.pieces.get(gate.pieceId); if (!piece) return false;
@@ -152,10 +155,18 @@ export class FacilitySecurityGraph {
     const claimed = new Set([...this.gatehouses.values()].map((row) => row.guardId).filter((id) => id >= 0));
     for (const gate of this.gatehouses.values()) {
       if (agents.some((agent) => agent.id === gate.guardId && agent.kind === Obj.Guard)) continue;
-      const guard = agents.filter((agent) => agent.kind === Obj.Guard && !claimed.has(agent.id) && !unavailable.has(agent.id) && agent.routeId < 0 && agent.postRoom < 0)
+      const guard = agents.filter((agent) => agent.kind === Obj.Guard && !claimed.has(agent.id) && !unavailable.has(agent.id) &&
+        !this.isOnPairedDuty(agent) && agent.routeId < 0 && agent.postRoom < 0)
         .sort((a, b) => Math.abs(a.z - Math.floor(gate.anchor / this.areas.areaAt.length ** .5)) - Math.abs(b.z - Math.floor(gate.anchor / this.areas.areaAt.length ** .5)) || a.id - b.id)[0];
       gate.guardId = guard?.id ?? -1; if (guard) claimed.add(guard.id);
     }
+  }
+
+  private isOnPairedDuty(agent: Agent): boolean {
+    return ["intakeGo", "intakeEscort", "regimeGo", "regimeEscort", "escorting", "policyResponse", "policyEscort",
+      "escortingToSearch", "escortingToInterview", "escortingToSolitary", "searching", "interrogating", "toBody", "movingBody", "bodyWaiting",
+      "toCasualty", "casualtyWaiting", "movingCasualty"]
+      .includes(agent.state);
   }
 
   private inspectTraffic(gate: GatehousePost, guard: Agent | null, trucks: readonly RoadVehicleState[], dt: number): void {

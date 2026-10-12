@@ -1,0 +1,34 @@
+.welfare-overview {
+  min-width: 0;
+  margin: 0 0 15px;
+  padding: 12px;
+  border: 1px solid rgba(184, 203, 115, .24);
+  border-radius: 6px;
+  color: #dce6e1;
+  background: rgba(16, 34, 43, .72);
+}
+.welfare-overview > header { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+.wo-eyebrow { color:#b9ca78; font-size:8px; font-weight:900; letter-spacing:.1em; text-transform:uppercase; }
+.welfare-overview h2 { margin:2px 0 0; color:#f0f4ee; font-size:14px; }
+.wo-population { flex:0 0 auto; color:#aebcbd; font-size:9px; }
+.wo-empty { margin:10px 0 0; color:#aebcbd; font-size:10px; }
+.wo-needs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:5px; margin-top:9px; }
+.wo-need { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:2px 6px; min-width:0; padding:6px 7px; border:1px solid rgba(255,255,255,.08); border-radius:4px; background:rgba(255,255,255,.025); }
+.wo-need[data-urgent="true"] { border-color:rgba(221,164,84,.4); }
+.wo-need strong { min-width:0; overflow-wrap:anywhere; color:#e1e9df; font-size:9px; }
+.wo-need span { grid-column:1 / 2; color:#aebcbd; font-size:8px; }
+.wo-need button { grid-column:2; grid-row:1 / span 2; max-width:102px; min-height:27px; padding:4px 6px; border:1px solid rgba(184,203,115,.28); border-radius:4px; color:#dce8b2; background:#1a302a; cursor:pointer; font-size:8px; font-weight:800; }
+.wo-need button:hover,.wo-need button:focus-visible { border-color:#b8cc78; background:#31452f; }
+.wo-concerns { display:grid; gap:4px; margin-top:10px; }
+.wo-concerns h3 { margin:0 0 2px; color:#b9ca78; font-size:9px; letter-spacing:.07em; text-transform:uppercase; }
+.wo-concern { display:flex; justify-content:space-between; gap:8px; min-width:0; padding:6px 7px; border:1px solid rgba(255,255,255,.08); border-radius:4px; color:#dbe5e1; background:#10222b; cursor:pointer; text-align:left; }
+.wo-concern:hover,.wo-concern:focus-visible { border-color:#aabd71; background:#18303a; }
+.wo-concern strong { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:9px; }
+.wo-concern span { min-width:0; overflow:hidden; color:#aebcbd; text-align:right; text-overflow:ellipsis; white-space:nowrap; font-size:8px; }
+@media (max-width:420px) {
+  .welfare-overview { padding:9px; }
+  .wo-needs { grid-template-columns:1fr; }
+  .wo-need button { max-width:96px; }
+  .wo-concern { align-items:flex-start; flex-direction:column; gap:2px; }
+  .wo-concern span { width:100%; text-align:left; }
+}
