@@ -121,6 +121,8 @@ async function main() {
     });
   }
 
+  qualBtn.setAttribute("aria-label", qualBtn.title);
+
   // --- Simulation (empty world) -----------------------------------------
   const world = new World(WORLD_SIZE);
 
@@ -1609,6 +1611,7 @@ async function main() {
   let simLogInFlight = false;
 
   async function writeSimLog(sample: unknown) {
+    if (!import.meta.env.DEV) return;
     if (simLogInFlight) return;
     simLogInFlight = true;
     try {

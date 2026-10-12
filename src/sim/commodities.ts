@@ -1,4 +1,4 @@
-import { Obj, type ObjDef } from "./objects.ts";
+import { Obj, defOf, type ObjDef } from "./objects.ts";
 
 export type HandlerRole = "workman" | "cook";
 
@@ -49,7 +49,15 @@ export const COMMODITIES: CommodityDef[] = [
 const BY_ID = new Map(COMMODITIES.map((d) => [d.id, d]));
 
 export function commodityDef(id: string): CommodityDef {
-  const def = BY_ID.get(id);
+  let def = BY_ID.get(id);
+  // Box commodities are derived from object definitions and are registered
+  // when construction is planned. A save can contain boxed salvage without
+  // this realm ever having planned that object, so reconstruct it on demand.
+  const boxed = /^box:(\d+)$/.exec(id);
+  if (!def && boxed) {
+    const objectDef = defOf(Number(boxed[1]));
+    if (objectDef) def = ensureBoxCommodity(objectDef);
+  }
   if (!def) throw new Error(`Unknown commodity: ${id}`);
   return def;
 }
