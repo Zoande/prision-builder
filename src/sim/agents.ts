@@ -14,7 +14,7 @@
 // move.ts, vision.ts, nav.ts.
 
 import { Access, RoomType, World, type Room } from "./world.ts";
-import { rnd } from "./rng.ts";
+import { getRngState, rnd, setRngState } from "./rng.ts";
 import {
   Item, POCKET_SLOTS, type Stack,
   countItem, hasItem, newInventory, removeItem, stow, takeInHands,
@@ -2846,6 +2846,7 @@ export class Agents {
     const serMem = (m: Map<number, Set<number>> | null): [number, number[]][] | null =>
       m ? [...m].map(([kind, tiles]) => [kind, [...tiles]]) : null;
     return {
+      rngState: getRngState(),
       nextId: this.nextId,
       regime: [...this.regime],
       curHour: this.curHour,
@@ -3017,6 +3018,7 @@ export class Agents {
     this.simTime = data.simTime ?? 0;
     this.social.loadData(data.social ?? {});
     this.escapeOperations.loadData(data.escapeOperations ?? {});
+    if (data.rngState !== undefined) setRngState(data.rngState);
   }
 }
 

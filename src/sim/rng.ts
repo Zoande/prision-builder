@@ -14,6 +14,18 @@ export function seedRng(seed = 0x2f6e2b1) {
   state = (seed >>> 0) || 1;
 }
 
+/** Capture the current stream position for deterministic save files. */
+export function getRngState(): number {
+  return state >>> 0;
+}
+
+/** Restore a captured stream position. Zero is invalid for xorshift32. */
+export function setRngState(next: number): void {
+  if (!Number.isInteger(next) || next < 1 || next > 0xffffffff)
+    throw new RangeError("RNG state must be a nonzero unsigned 32-bit integer");
+  state = next >>> 0;
+}
+
 /** Uniform in [0, 1). xorshift32 — small, fast, and good enough for a game. */
 export function rnd(): number {
   state ^= state << 13; state >>>= 0;
