@@ -4,6 +4,7 @@ import { chromium } from 'playwright';
 import { createServer } from 'vite';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createPrison } from './scenarios/prison.ts';
+import { Obj } from '../src/sim/world.ts';
 
 const browserPath=process.env.CHROMIUM_PATH || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
 const server=await createServer({root:process.cwd(),server:{host:'127.0.0.1',port:0,hmr:false}});
@@ -158,6 +159,8 @@ try {
   assert.equal((await page.evaluate(()=>window.__prisonPlaytest.inspect())).floor[373*500+360],1,'a rejected import preserves the current prison');
   const populated=createPrison(9876,16);
   populated.advance(10);
+  const injured=populated.agents.agents.find(actor=>actor.kind===Obj.Prisoner);
+  populated.task2.health.applyInjury(injured,'blunt','left-arm',.3,populated.time);
   await Promise.all([
     page.waitForNavigation({waitUntil:'domcontentloaded',timeout:120000}),
     page.locator('#importSaveFile').setInputFiles({name:'playtest-prison.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(populated.snapshot()))}),
@@ -174,9 +177,17 @@ try {
     assert.match(await page.locator('#intelProfile').textContent(),/Family/);
     assert.match(await page.locator('#intelProfile').textContent(),/Privacy/);
     assert.match(await page.locator('#intelProfile').textContent(),/Safety/);
+    assert.match(await page.locator('#intelProfile').textContent(),/Current care/);
+    assert.match(await page.locator('#intelProfile').textContent(),/Housing/);
+    assert.match(await page.locator('#intelProfile').textContent(),/untreated injury/);
+    assert.match(await page.locator('#intelProfile').textContent(),/Medical transport queued/);
+    assert.equal(await page.locator('#inspector').isVisible(),false,'intelligence shows one resident profile');
     const profileBounds=await page.locator('#intelProfile').boundingBox();
     assert.ok(profileBounds.width>200&&profileBounds.height>100,'populated inmate profile has readable space');
     await page.screenshot({timeout:30000,path:`${artifactDir}/intelligence-${width}.png`});
+    const careButton=page.locator('#intelProfile [data-care-action]').filter({hasText:'Medical facilities'});
+    await careButton.click();
+    assert.ok(await page.locator('#palette .build-item').filter({hasText:'Infirmary'}).isVisible(),'care action opens medical room tools');
     await page.locator('.mode-btn[data-mode=staff]').click();
     await page.locator('.staff-roster.is-open').waitFor({state:'visible'});
     assert.equal(await page.locator('.staff-roster .sr-entry').count(),13);

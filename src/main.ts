@@ -15,6 +15,8 @@ import { Item, countItem, itemDef } from "./sim/items";
 import { Editor, catalogSnapshot } from "./editor";
 import { FacilityInspector, type FacilityRoomSelection } from "./ui/facilityInspector";
 import { StaffRoster } from "./ui/staffRoster";
+import { residentCareMarkup, type ResidentCareFacts } from "./ui/residentCare";
+import { collectServiceProblems } from "./sim/serviceProblems";
 import { clockLabel, dayOf, evalAtmosphere, HOUR_SECONDS, hourOf, isNightAt } from "./daynight";
 import { GroundPass } from "./render/groundPass";
 import { FloorPass } from "./render/floorPass";
@@ -833,6 +835,7 @@ async function main() {
   const inspectState = document.getElementById("inspectState")!;
   const inspectStats = document.getElementById("inspectStats")!;
   const inspectProfile = document.getElementById("inspectProfile")!;
+  const inspectCare = document.getElementById("inspectCare")!;
   const agentKindName = (kind: number): string => ({ [Obj.Prisoner]: "Prisoner", [Obj.Guard]: "Guard", [Obj.Cook]: "Cook",
     [Obj.Workman]: "Workman", [Obj.Doctor]: "Doctor", [Obj.Investigator]: "Investigator", [Obj.DogHandler]: "Dog Handler",
     [Obj.ArmedGuard]: "Armed Guard", [Obj.SecurityDog]: "Security Dog", [Obj.Sniper]: "Sniper",
@@ -860,6 +863,8 @@ async function main() {
     const pct = (v: number) => `${Math.round(v * 100)}%`;
     const profile = selected.profile;
     inspectStats.style.display = selected.kind === Obj.Prisoner ? "grid" : "none";
+    inspectCare.style.display = selected.kind === Obj.Prisoner ? "block" : "none";
+    if (selected.kind === Obj.Prisoner) setPanelMarkup(inspectCare, residentCareMarkup(residentCareFacts(selected)));
     const staffProfile = task3.staff.profiles.get(selected.id);
     const name = profile ? `${profile.firstName} ${profile.lastName}` : staffProfile ? `${staffProfile.firstName} ${staffProfile.lastName} · ${kind}` : `${kind} #${selected.id}`;
     const socialAction = selected.socialAction === "arguing" ? " · arguing" : selected.socialAction === "talking" ? " · socializing" : "";
@@ -955,6 +960,59 @@ async function main() {
     panelMarkup.set(element, markup);
     element.innerHTML = markup;
   }
+  function residentCareFacts(actor: Agent): ResidentCareFacts {
+    const room = world.rooms.get(actor.cellRoom), escort = agents.agents.find(agent => agent.id === actor.escortedBy);
+    const health = task2.health.state(actor.id), medicalJob = task2.health.treatmentJobs.find(job => job.patientId === actor.id && job.state !== "stable");
+    const orders = task2.institution.punishments.filter(order => order.prisonerId === actor.id && !["complete", "cancelled"].includes(order.state));
+    const warnings: string[] = [], actions: ResidentCareFacts["actions"][number][] = [];
+    const terminal = ["dead", "morgue", "removed"].includes(actor.state) || health?.alive === false;
+    const validHousingBed = (bed: number) => {
+      const housingRoom = world.rooms.get(world.roomId[bed]);
+      return bed >= 0 && world.objKind[bed] === Obj.Bed && !!housingRoom?.valid &&
+        (housingRoom.type === RoomType.Cell || housingRoom.type === RoomType.Dorm) && housingRoom.tiles.has(bed);
+    };
+    const hasBed = validHousingBed(actor.bedIdx) && room?.id === world.roomId[actor.bedIdx] && agents.claimedBeds.get(actor.bedIdx) === actor.id;
+    const reservedBed = [...agents.intakeBedClaims].find(([bed, owner]) => owner === actor.id && validHousingBed(bed))?.[0];
+    const housing = terminal ? "Housing no longer required" : hasBed ? `${roomDef(room!.type)?.name ?? "Room"} #${room!.id} · Bed assigned`
+      : reservedBed !== undefined ? `${roomDef(world.rooms.get(world.roomId[reservedBed])!.type)?.name} #${world.roomId[reservedBed]} · Bed reserved for intake` : "No valid assigned bed";
+    if (!terminal && !hasBed && reservedBed === undefined) {
+      warnings.push("A valid Cell or Dormitory with a free bed is needed for housing.");
+      actions.push({ label: "Housing", mode: "rooms", section: "rooms:prisoner" });
+    }
+    let escortText = "No escort needed";
+    if (actor.escortedBy >= 0) {
+      const guardProfile = escort && task3.staff.profiles.get(escort.id);
+      escortText = escort ? guardProfile ? `With ${guardProfile.firstName} ${guardProfile.lastName}` : `With guard #${escort.id}` : "Escort guard unavailable";
+      if (!escort || task2.health.isUnavailable(escort.id)) warnings.push("The escort needs an available guard to resume.");
+    } else if (actor.cuffed) {
+      escortText = orders.length ? "Restrained · Awaiting discipline response" : hasBed ? "Restrained · Awaiting return to housing" : "Intake · Awaiting placement in housing";
+    } else if (actor.state === "escorted") {
+      escortText = "Escort guard unavailable";
+      warnings.push("This escort has lost its guard.");
+    }
+    if (actor.state === "beingTransported") escortText = medicalJob?.transportGuardId !== undefined
+      ? `Medical transport · With guard #${medicalJob.transportGuardId}` : "Medical transport · Awaiting guard";
+    if (!terminal && (orders.length || actor.cuffed || actor.escortedBy >= 0 || actor.state === "escorted" || actor.state === "beingTransported")) actions.push({ label: "Guards", mode: "staff", section: "staff:people" });
+    const untreated = health?.injuries.filter(injury => !injury.treated).length ?? 0;
+    let medical = health?.alive === false ? "Deceased" : health?.admitted ? "Admitted to infirmary"
+      : health && health.consciousness <= .08 ? "Unconscious" : untreated ? `${untreated} untreated ${untreated === 1 ? "injury" : "injuries"}` : "No current injury requiring care";
+    if (medicalJob) medical += medicalJob.state === "waiting" ? medicalJob.transportGuardId !== undefined ? " · Medical transport in progress" : " · Medical transport queued"
+      : medicalJob.state === "treating" ? " · Doctor treating" : " · Waiting for doctor";
+    if (health?.admitted && (health.treatmentBed < 0 || world.objKind[health.treatmentBed] !== Obj.MedicalBed ||
+        !world.rooms.get(world.roomId[health.treatmentBed])?.valid)) warnings.push("The assigned medical bed is unavailable; a valid Infirmary is needed.");
+    if (untreated || health?.admitted || medicalJob || health?.alive === false)
+      actions.push({ label: "Medical facilities", mode: "rooms", section: "rooms:staff" });
+    const discipline = orders.length ? orders.map(order => order.state === "active"
+      ? `Solitary · ${Math.max(0, Math.ceil((order.solitaryUntil - worldTime) / HOUR_SECONDS))}h remaining`
+      : `Queued response${order.search !== "none" ? ` · ${order.search} search` : ""}${order.interrogate ? " · Interview" : ""}`).join("; ") : "No active discipline";
+    const state = actor.state.startsWith("escape:") ? actor.path ? "Moving" : "Occupied"
+      : STATE_TEXT[actor.state] ?? actor.state.replace(/([A-Z])/g, " $1");
+    return { state, housing, escort: escortText, medical, discipline, warnings, actions };
+  }
+  document.addEventListener("click", event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-care-action]");
+    if (button?.dataset.mode && button.dataset.section) openCatalog(button.dataset.mode, button.dataset.section);
+  });
   function updateIntelligenceUi(): void {
     const query = intelSearch.value.trim().toLowerCase();
     const prisoners = agents.agents.filter((a) => a.kind === Obj.Prisoner && a.profile).sort((a, b) => a.id - b.id);
@@ -991,6 +1049,7 @@ async function main() {
     const territoryRows = knownTerritory.map((row) => `<li>Area ${row.areaId}: ${html(row.state)} influence${row.state === "contested" ? "; competing affiliation also indicated" : ""}</li>`).join("") || `<li>No evidence-supported territory assessment.</li>`;
     setPanelMarkup(intelProfile, `<div class="profile-title"><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</div>` +
       `<div class="profile-sub">Inmate #${selected.id} · ${CUSTODY_NAMES[p.custody]} custody${selected.protectiveCustody ? " · Protective Custody" : ""} · age ${p.age} · ${p.sentenceMonths} month sentence (${p.servedMonths} served)</div>` +
+      `<div class="profile-section"><h3>Current care</h3>${residentCareMarkup(residentCareFacts(selected))}</div>` +
       `<div class="profile-section"><h3>Official record</h3><ul class="profile-list"><li>Current conviction: ${html(crimeName(p.conviction.crimeId))}, ${p.conviction.sentenceMonths} months</li>${p.priors.map((r) => `<li>Prior at age ${r.ageAtConviction}: ${html(crimeName(r.crimeId))}, ${r.sentenceMonths} months</li>`).join("") || "<li>No prior convictions.</li>"}<li>Medical: ${html(formalInjuries)}</li></ul></div>` +
       `<div class="profile-section"><h3>Welfare</h3><div class="toggle-grid">${NEEDS.map((need) => {
         const value = selected!.needs[need];
@@ -1291,6 +1350,7 @@ async function main() {
     const problemRows = rows.map((problem) => {
       const actions = problem.actions.map((action) => {
         if (action.kind === "catalog") return `<button data-catalog="${html(action.mode)}|${html(action.section)}">${html(action.label)}</button>`;
+        if (action.kind === "mode") return `<button data-mode="${html(action.mode)}">${html(action.label)}</button>`;
         if (action.kind === "order") return `<button data-order="${action.orderId}">${html(action.label)}</button>`;
         return `<button data-center="${problem.x},${problem.z}">${html(action.label)}</button>`;
       }).join("");
@@ -1316,6 +1376,7 @@ async function main() {
       const [mode, section] = button.dataset.catalog!.split("|");
       openCatalog(mode, section);
     });
+    problemsPanel.querySelectorAll<HTMLButtonElement>("[data-mode]").forEach((button) => button.onclick = () => changeMode(button.dataset.mode!));
     problemsPanel.querySelectorAll<HTMLButtonElement>("[data-order]").forEach((button) => button.onclick = () => {
       const group = construction.groups.get(Number(button.dataset.order));
       const target = group?.targets.find((row) => !row.completed);
@@ -1377,7 +1438,7 @@ async function main() {
     for (const group of construction.groups.values()) {
       if (group.state === "complete" || group.state === "cancelled") continue;
       const blocked = group.targets.find((target) => target.state === "blocked");
-      if (!blocked && group.state !== "waiting-resources") continue;
+      if (!blocked) continue;
       problems.add({
         id: `construction-${group.id}`, severity: blocked ? "warning" : "info", source: "construction",
         message: `Order ${group.id}: ${blocked?.blocker || group.blocker || "Waiting for materials"}`,
@@ -1431,17 +1492,13 @@ async function main() {
     for (const warning of task2.warnings) issues.push({
       id: `task2-${warningI++}`, x: 369.5, z: 376.5 + warningI, issue: warning,
     });
-    for (const warning of task2.work.warnings) problems.add({
-      id: `work-${warning}`, severity: "warning", source: "work", message: warning, x: 369.5, z: 376.5,
-      actions: [{ kind: "catalog", label: "Open work facilities", mode: "objects", section: "objects:work" }],
-    });
-    for (const [source, warnings] of [["health", task2.health.warnings], ["security", task2.security.warnings], ["management", task3.management.warnings], ["security", task3.facility.warnings]] as const) {
-      for (const warning of warnings) problems.add({
-        id: `${source}-${warning}`, severity: source === "health" ? "critical" : "warning", source,
-        message: warning, x: camera.target[0], z: camera.target[2],
-        actions: [{ kind: "catalog", label: source === "health" ? "Medical facilities" : "Required rooms", mode: "rooms", section: warning.includes("Solitary") ? "rooms:utility" : "rooms:staff" }],
-      });
-    }
+    for (const problem of collectServiceProblems({
+      security: task2.security.warnings, market: task2.market.warnings, gangs: task2.gangs.warnings,
+      health: task2.health.warnings, work: task2.work.warnings,
+      facility: task3.facility.warnings, management: task3.management.warnings,
+      constructionGroups: construction.groups.values(),
+      stock: { available: commodity => logistics.quantity(commodity), incoming: commodity => logistics.incoming(commodity) },
+    })) problems.add(problem);
     for (const warning of task3.warnings) issues.push({
       id: `task3-${warningI++}`, x: 371.5, z: 376.5 + warningI, issue: warning,
     });
