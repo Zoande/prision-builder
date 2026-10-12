@@ -228,10 +228,15 @@ export class CombatSystem {
     const responders = agents.filter((a) => [Obj.Guard, Obj.ArmedGuard, Obj.DogHandler].includes(a.kind as never) &&
       this.isAvailableCombatant(a) && Math.hypot(a.x - engagement.x, a.z - engagement.z) <= 2.5).length;
     const needed = Math.max(1, Math.ceil(prisoners.filter((p) => !p.p.surrendered).length / 2));
-    if (responders >= needed && forceRank(rule.force) >= forceRank("restraint")) {
+    const armedThreat = prisoners.some((row) => !row.p.surrendered && !!this.weaponFor(row.a.id));
+    // Headcount can resolve an ordinary unarmed scuffle; it is not itself a
+    // restraint action against an armed attacker. Armed threats require the
+    // force-policy response below (or actual surrender/incapacitation).
+    if (!armedThreat && responders >= needed && forceRank(rule.force) >= forceRank("restraint")) {
       this.contain(engagement.id, agents); return false;
     }
     const lethalThreat = prisoners.some((row) => {
+      if (row.p.surrendered) return false;
       const weapon = this.weaponFor(row.a.id); return !!weapon && itemDefV4(weapon.defId).weapon?.damage === "gunshot";
     });
     const ceiling = lethalThreat ? rule.force : forceRank(rule.force) >= forceRank("lethal") ? "less-lethal" : rule.force;

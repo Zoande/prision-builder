@@ -1,5 +1,6 @@
 import { Camera } from "./camera";
 import { advanceSimulation } from "./sim/simulation";
+import { createSimulationFrameBoundary } from "./sim/frameBoundary";
 import { invert } from "./math";
 import { DIRS, NEEDS, Obj, RoomType, World, defOf, roomDef } from "./sim/world";
 import {
@@ -120,6 +121,8 @@ async function main() {
       location.reload();
     });
   }
+
+  qualBtn.setAttribute("aria-label", qualBtn.title);
 
   // --- Simulation (empty world) -----------------------------------------
   const world = new World(WORLD_SIZE);
@@ -340,6 +343,10 @@ async function main() {
 
   // --- Game speed + clock + regime UI ------------------------------------
   let speed = loadedV6 ? 1 : 0;
+  const simulationBoundary = createSimulationFrameBoundary();
+  let simulationFailure: { error: unknown } | null = null;
+  let pendingPlaytestFailure: Error | null = null;
+  let frameFailureLogged = false;
   const speedsEl = document.getElementById("speeds")!;
   const speedBtns: HTMLButtonElement[] = [];
   for (const s of [0, 1, 2, 3, 5, 10]) {
@@ -350,6 +357,7 @@ async function main() {
     b.setAttribute("aria-label", s === 0 ? "Pause simulation" : `Simulation speed ${s} times`);
     b.setAttribute("aria-pressed", String(s === speed));
     b.onclick = () => {
+      if (simulationFailure !== null && s > 0) return;
       speed = s;
       speedBtns.forEach((x) => { x.classList.remove("on"); x.setAttribute("aria-pressed", "false"); });
       b.classList.add("on");
@@ -401,11 +409,39 @@ async function main() {
   const editor = new Editor();
   editor.onChange = () => { camera.buildMode = editor.active; updateBuildQuote(); if (activeMode === "staff") updateStaffRoster(); };
   const noticeEl = document.getElementById("notice")!;
+  const simulationFaultEl = document.getElementById("simulationFault")!;
+  const simulationFaultMessageEl = document.getElementById("simulationFaultMessage")!;
+  const simulationFaultDetailsEl = document.getElementById("simulationFaultDetails")!;
   let noticeTimer = 0;
   function notify(message: string): void {
     noticeEl.textContent = message;
     noticeEl.classList.add("show");
     noticeTimer = 4;
+  }
+  function errorDetails(error: unknown): string {
+    if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`;
+    return String(error);
+  }
+  function pauseAfterFrameFailure(error: unknown): void {
+    if (simulationFailure !== null) return;
+    simulationFailure = { error };
+    speed = 0;
+    speedBtns.forEach((button, index) => {
+      const paused = index === 0;
+      button.classList.toggle("on", paused);
+      button.setAttribute("aria-pressed", String(paused));
+      button.disabled = !paused;
+    });
+    const message = error instanceof Error ? error.message : String(error);
+    simulationFaultMessageEl.textContent = `Simulation paused after an error: ${message}. The last saved game is unchanged. Export diagnostics or reload that save.`;
+    simulationFaultDetailsEl.textContent = errorDetails(error);
+    simulationFaultEl.classList.add("show");
+    simulationFaultEl.setAttribute("aria-hidden", "false");
+    (document.getElementById("saveNowBtn") as HTMLButtonElement).disabled = true;
+    if (!frameFailureLogged) {
+      console.error("Simulation/frame failure; simulation has been paused and will not resume in this session.", error);
+      frameFailureLogged = true;
+    }
   }
   function downloadJson(value: unknown, filename: string): void {
     const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }));
@@ -430,6 +466,17 @@ async function main() {
   });
   document.getElementById("saveNowBtn")!.addEventListener("click", () => void saveNow());
   document.getElementById("exportSaveBtn")!.addEventListener("click", () => downloadJson(saveSnapshot(), "prison-builder-v6-save.json"));
+  document.getElementById("exportSimulationDiagnosticBtn")!.addEventListener("click", () => {
+    if (simulationFailure === null) return;
+    const error = simulationFailure.error;
+    downloadJson({
+      kind: "prison-builder-simulation-error",
+      reportedAt: new Date().toISOString(),
+      error: { message: error instanceof Error ? error.message : String(error), details: errorDetails(error) },
+      save: saveSnapshot(),
+    }, "prison-builder-simulation-diagnostic.json");
+  });
+  document.getElementById("reloadSavedGameBtn")!.addEventListener("click", () => location.reload());
   const importFile = document.getElementById("importSaveFile") as HTMLInputElement;
   document.getElementById("importSaveBtn")!.addEventListener("click", () => importFile.click());
   importFile.addEventListener("change", async () => {
@@ -1580,7 +1627,7 @@ async function main() {
     };
   }
   async function saveNow() {
-    if (saveInFlight) return;
+    if (saveInFlight || simulationFailure !== null) return;
     saveInFlight = true;
     const revision = saveRevision;
     saveStatusEl.textContent = "Saving\u2026";
@@ -1609,6 +1656,7 @@ async function main() {
   let simLogInFlight = false;
 
   async function writeSimLog(sample: unknown) {
+    if (!import.meta.env.DEV) return;
     if (simLogInFlight) return;
     simLogInFlight = true;
     try {
@@ -1899,7 +1947,7 @@ async function main() {
     const mail = policyDashboard.querySelector<HTMLSelectElement>("#mailInspection"); if (mail) mail.onchange = () => { task2.market.mailInspection = mail.value as never; markSaveDirty(); };
   }
 
-  function frame(now: number) {
+  function renderFrame(now: number) {
     const elapsed = Math.max(0, (now - last) / 1000);
     const dt = Math.min(elapsed, 0.05);
     last = now;
@@ -1913,7 +1961,18 @@ async function main() {
 
     // Advance the world clock at the selected speed; substep the sim so
     // high speeds don't let agents tunnel through walls.
-    worldTime = advanceSimulation(simulation, worldTime, dt * speed);
+    if (simulationFailure === null) {
+      const result = simulationBoundary.advance(() => {
+        if (pendingPlaytestFailure !== null) {
+          const injected = pendingPlaytestFailure;
+          pendingPlaytestFailure = null;
+          throw injected;
+        }
+        return advanceSimulation(simulation, worldTime, dt * speed);
+      });
+      if (result.kind === "advanced") worldTime = result.value;
+      else pauseAfterFrameFailure(result.error);
+    }
     const atmo = evalAtmosphere(worldTime);
 
     // Clock + regime UI.
@@ -2031,7 +2090,7 @@ async function main() {
     saveTimer += dt;
     if (saveTimer >= 5) {
       saveTimer = 0;
-      if (saveDirty || speed > 0) void saveNow();
+      if (simulationFailure === null && (saveDirty || speed > 0)) void saveNow();
     }
     simLogTimer += dt;
     if (simLogTimer >= 10) {
@@ -2130,7 +2189,17 @@ async function main() {
     }
     hud.textContent = text;
 
-    requestAnimationFrame(frame);
+  }
+  function frame(now: number) {
+    try {
+      renderFrame(now);
+    } catch (error) {
+      // A fault in code after simulation advance also pauses gameplay. Keep the
+      // RAF alive so camera input and recovery controls continue responding.
+      pauseAfterFrameFailure(error);
+    } finally {
+      requestAnimationFrame(frame);
+    }
   }
   if (import.meta.env.DEV && new URLSearchParams(location.search).has("playtest")) {
     const bridge = {
@@ -2143,12 +2212,22 @@ async function main() {
       diagnostics: () => agents.diagnostics(world),
       renderStats: () => ({ renderedFrames, worldTime }),
       advance: (seconds: number) => {
+        if (simulationFailure !== null) throw new Error("Simulation is faulted and cannot be advanced in this session");
         if (!Number.isFinite(seconds) || seconds < 0 || seconds > 3600) throw new Error("Advance must be between 0 and 3600 seconds");
         if (dirty) { rebuild(); dirty = false; }
         worldTime = advanceSimulation(simulation, worldTime, seconds);
         rebuild(); dirty = false; markSaveDirty();
         refreshWorldOverlayData();
         return worldTime;
+      },
+      injectSimulationFailure: () => {
+        if (simulationFailure !== null) throw new Error("Simulation is already faulted");
+        // Keep unsaved work pending so the browser regression proves autosave
+        // cannot replace the last known-good saved game after this fault.
+        saveDirty = true;
+        saveTimer = 0;
+        pendingPlaytestFailure = new Error("DEV injected simulation failure");
+        speedBtns.find((button) => button.textContent === "1x")?.click();
       },
       screenTile: (x: number, z: number) => {
         const m = camera.viewProj(canvas.width / canvas.height), px = x + .5, pz = z + .5;

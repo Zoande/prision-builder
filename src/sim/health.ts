@@ -1,4 +1,4 @@
-import { POSE_LIE_FLOOR, POSE_STAND, type Agent } from "./agent.ts";
+import { POSE_LIE_FLOOR, POSE_STAND, RATES, type Agent } from "./agent.ts";
 import { Obj, RoomType } from "./objects.ts";
 import type { ItemSystem } from "./itemSystem.ts";
 import type { World } from "./world.ts";
@@ -82,6 +82,8 @@ export interface TreatmentJob {
   priority: number;
   claimedBy: number;
   transportGuardId?: number;
+  /** A medical cot reserved while an escort is physically carrying this patient. */
+  transportBed?: number;
   state: "waiting" | "transported" | "treating" | "stable";
 }
 
@@ -127,23 +129,45 @@ export class HealthSystem {
 
   availableMedicalBed(world: World, patientId: number): number { return this.findFreeMedicalBed(world, [], patientId); }
 
+  medicalBedIsValid(world: World, bed: number): boolean {
+    const anchor = bed >= 0 ? world.anchorOf(bed) : -1;
+    if (anchor < 0 || world.objKind[anchor] !== Obj.MedicalBed) return false;
+    const room = world.rooms.get(world.roomId[anchor]);
+    return !!room?.valid && room.type === RoomType.Infirmary;
+  }
+
   admit(patient: Agent, bed: number): boolean {
     const h = this.ensure(patient); if (!h.alive || bed < 0) return false;
-    h.admitted = true; h.treatmentBed = bed; patient.path = null; patient.pose = POSE_LIE_FLOOR; patient.state = "inTreatment";
     const job = this.treatmentJobs.find((row) => row.patientId === patient.id && row.state === "waiting");
-    if (job) { job.state = "transported"; job.transportGuardId = undefined; }
+    if (job?.transportBed !== undefined && job.transportBed !== bed) return false;
+    if ([...this.states.values()].some((state) => state.agentId !== patient.id && state.admitted && state.treatmentBed === bed) ||
+        this.treatmentJobs.some((row) => row.patientId !== patient.id && row.state === "waiting" && row.transportBed === bed)) return false;
+    h.admitted = true; h.treatmentBed = bed; patient.path = null; patient.pose = POSE_LIE_FLOOR; patient.state = "inTreatment";
+    if (job) { job.state = "transported"; job.transportGuardId = undefined; job.transportBed = undefined; }
     return true;
   }
 
   setTransportGuard(patientId: number, guardId: number): void {
     const job = this.treatmentJobs.find((row) => row.patientId === patientId && row.state === "waiting");
-    if (job) job.transportGuardId = guardId;
+    if (job) {
+      if (job.transportGuardId !== undefined && job.transportGuardId !== guardId) job.transportBed = undefined;
+      job.transportGuardId = guardId;
+    }
+  }
+
+  reserveMedicalBed(patientId: number, guardId: number, bed: number): boolean {
+    const job = this.treatmentJobs.find((row) => row.patientId === patientId && row.state === "waiting");
+    if (!job || job.transportGuardId !== guardId) return false;
+    if ([...this.states.values()].some((state) => state.agentId !== patientId && state.admitted && state.treatmentBed === bed)) return false;
+    if (this.treatmentJobs.some((row) => row.patientId !== patientId && row.state === "waiting" && row.transportBed === bed)) return false;
+    job.transportBed = bed;
+    return true;
   }
 
   clearTransportGuard(patientId: number, guardId?: number): void {
     const job = this.treatmentJobs.find((row) => row.patientId === patientId && row.state === "waiting");
     if (!job || (guardId !== undefined && job.transportGuardId !== guardId)) return;
-    job.transportGuardId = undefined;
+    job.transportGuardId = undefined; job.transportBed = undefined;
   }
 
   effectiveMobility(agentId: number): number { return this.states.get(agentId)?.mobility ?? 1; }
@@ -207,13 +231,19 @@ export class HealthSystem {
       const bed = h.treatmentBed;
       const roomId = bed >= 0 && bed < world.roomId.length ? world.roomId[bed] : -1;
       const room = roomId >= 0 ? world.rooms.get(roomId) : undefined;
-      if (bed >= 0 && world.objKind[bed] === Obj.MedicalBed && room?.valid && room.type === RoomType.Infirmary) continue;
+      if (bed >= 0 && world.objKind[bed] === Obj.MedicalBed && room?.valid && room.type === RoomType.Infirmary) {
+        // Prisoners do not run their ordinary need decay while admitted. Let
+        // a real, valid medical bed provide restful sleep during that time;
+        // hunger remains unchanged until ordinary food service can resume.
+        agent.needs.sleep = clamp(agent.needs.sleep + RATES.sleepRefill * dt);
+        continue;
+      }
       h.admitted = false; h.treatmentBed = -1;
       agent.state = h.consciousness < .12 ? "incapacitated" : "idle";
       agent.pose = agent.state === "incapacitated" ? POSE_LIE_FLOOR : POSE_STAND;
       agent.path = null;
       const job = this.treatmentJobs.find((row) => row.patientId === agent.id && row.state !== "stable");
-      if (job) { job.state = "waiting"; job.claimedBy = -1; job.transportGuardId = undefined; }
+      if (job) { job.state = "waiting"; job.claimedBy = -1; job.transportGuardId = undefined; job.transportBed = undefined; }
     }
     for (const job of this.treatmentJobs) {
       if (job.claimedBy >= 0) {
@@ -387,9 +417,17 @@ export class HealthSystem {
   }
 
   private findFreeMedicalBed(world: World, agents: readonly Agent[], patientId: number): number {
-    for (const tile of world.tilesOfKind(Obj.MedicalBed)) {
-      if (world.roomTypeAt(tile) !== RoomType.Infirmary) continue;
-      if (![...this.states.values()].some((h) => h.agentId !== patientId && h.admitted && h.treatmentBed === tile)) return tile;
+    // A medical bed is a two-tile furniture piece. Search/occupancy must use
+    // one anchor per physical bed, otherwise each footprint tile becomes an
+    // extra phantom bed and multiple casualties get dispatched to one cot.
+    const beds = new Set(world.tilesOfKind(Obj.MedicalBed).map((tile) => world.anchorOf(tile)));
+    for (const tile of beds) {
+      if (!this.medicalBedIsValid(world, tile)) continue;
+      const admitted = [...this.states.values()].some((h) => h.agentId !== patientId && h.admitted &&
+        world.anchorOf(h.treatmentBed) === tile);
+      const reserved = this.treatmentJobs.some((job) => job.patientId !== patientId && job.state === "waiting" &&
+        job.transportBed !== undefined && world.anchorOf(job.transportBed) === tile);
+      if (!admitted && !reserved) return tile;
     }
     void agents; return -1;
   }

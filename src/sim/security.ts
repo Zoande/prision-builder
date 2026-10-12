@@ -25,6 +25,7 @@ export class SecuritySystem {
   private readonly policyPhases = new Map<number, "approach" | "search-route" | "search" | "interview-route" | "interview" | "solitary-route">();
   private readonly dogCooldown = new Map<number, number>();
   private readonly bodyClaims = new Map<number, number>();
+  private readonly bodyRetryAt = new Map<number, number>();
   private readonly casualtyClaims = new Map<number, number>();
   private readonly blockedMoveRetries = new Map<number, { target: number; remaining: number }>();
   private lastRollCallStamp = -1;
@@ -91,6 +92,7 @@ export class SecuritySystem {
 
   tick(dt: number, time: number, world: World, agents: readonly Agent[], rollCall: boolean): void {
     this.warnings.clear();
+    this.releaseUnclaimedPolicyRestraints(agents);
     for (const order of this.institution.punishments) if (order.state === "complete" && order.solitaryRoomId !== undefined && !order.released) {
       const room = world.rooms.get(order.solitaryRoomId); if (room) for (const door of world.roomJailDoors(room)) world.jailClosed[door] = 0;
       const prisoner = agents.find((a) => a.id === order.prisonerId); if (prisoner) { prisoner.cuffed = false; prisoner.state = "idle"; }
@@ -125,6 +127,8 @@ export class SecuritySystem {
     this.syncArmouries(world, time);
     this.deploymentTimer -= dt; if (this.deploymentTimer <= 0) { this.deploymentTimer = 5; this.updateDeployments(agents); }
     this.discoverBodies(time, agents);
+    if ([...this.health.bodies.values()].some((body) => body.discovered && !body.removed && body.morgueSlab < 0) &&
+        !this.hasFreeMorgueSlab(world)) this.warnings.add("A discovered body is waiting for a valid free Morgue slab");
     this.cctvObserve(time, world, agents);
     this.updateDogs(dt, time, world, agents);
     if (rollCall) this.rollCall(time, agents);
@@ -152,7 +156,7 @@ export class SecuritySystem {
     // short handovers before honoring a fatigue break or deployment change.
     if (duty?.onBreak && ["intakeGo", "intakeEscort", "regimeGo", "regimeEscort"].includes(agent.state)) return false;
     if (securityRole && this.updateCasualtyResponse(agent, dt, world, agents)) return true;
-    if (securityRole && this.updateBodyResponse(agent, dt, world, agents)) return true;
+    if (securityRole && this.updateBodyResponse(agent, dt, time, world, agents)) return true;
     if (securityRole && this.updatePolicyAction(agent, dt, time, world, agents)) return true;
     if (this.combat.responseFor(agent)) return false;
     if (agent.kind === Obj.Guard && this.updateEmergencyEquipment(agent, dt, time, world)) return true;
@@ -195,7 +199,7 @@ export class SecuritySystem {
   saveData() { return { emergency: this.emergency, staff: [...this.staff.values()].map((s) => ({ ...s })),
     registeredPrisoners: [...this.registeredPrisoners], claims: [...this.claims], actionTimers: [...this.actionTimers], policyPhases: [...this.policyPhases],
     dogCooldown: [...this.dogCooldown], lastRollCallStamp: this.lastRollCallStamp,
-    bodyClaims: [...this.bodyClaims], casualtyClaims: [...this.casualtyClaims], deploymentTargets: [...this.deploymentTargets], postings: [...this.postings],
+    bodyClaims: [...this.bodyClaims], bodyRetryAt: [...this.bodyRetryAt], casualtyClaims: [...this.casualtyClaims], deploymentTargets: [...this.deploymentTargets], postings: [...this.postings],
     seededArmouries: [...this.seededArmouries], emergencyIssue: [...this.emergencyIssue],
     criticalResponseItems: [...this.criticalResponseItems], rngState: this.rngState }; }
   loadData(data: Partial<ReturnType<SecuritySystem["saveData"]>>): void {
@@ -206,6 +210,7 @@ export class SecuritySystem {
     this.policyPhases.clear(); for (const [incident, phase] of data.policyPhases ?? []) this.policyPhases.set(incident, phase);
     this.dogCooldown.clear(); for (const [a, t] of data.dogCooldown ?? []) this.dogCooldown.set(a, t);
     this.bodyClaims.clear(); for (const [body, guard] of data.bodyClaims ?? []) this.bodyClaims.set(body, guard);
+    this.bodyRetryAt.clear(); for (const [body, time] of data.bodyRetryAt ?? []) this.bodyRetryAt.set(body, time);
     this.casualtyClaims.clear(); for (const [patient, guard] of data.casualtyClaims ?? []) this.casualtyClaims.set(patient, guard);
     this.deploymentTargets.clear(); for (const [area, row] of data.deploymentTargets ?? []) this.deploymentTargets.set(area, { ...row });
     this.postings.clear(); for (const [agent, row] of data.postings ?? []) this.postings.set(agent, { ...row });
@@ -254,13 +259,28 @@ export class SecuritySystem {
     let order = [...this.institution.punishments].find((o) => this.claims.get(o.incidentId) === officer.id && o.state === "queued");
     if (!order) {
       order = this.institution.punishments.find((o) => o.state === "queued" && !this.claims.has(o.incidentId) &&
-        (!o.interrogate || officer.kind === Obj.Investigator));
+        (o.retryAt ?? -Infinity) <= time && (!o.interrogate || officer.kind === Obj.Investigator));
       if (!order) return false;
       this.claims.set(order.incidentId, officer.id);
     }
     const prisoner = agents.find((a) => a.id === order!.prisonerId);
     if (!prisoner || this.health.state(prisoner.id)?.alive === false) { order.state = "cancelled"; this.finishPolicy(order.incidentId, officer); return false; }
+    const medicalTransfer = prisoner.state === "beingTransported" || this.health.treatmentJobs.some((job) =>
+      job.patientId === prisoner.id && job.state !== "stable");
+    if (this.health.isUnavailable(prisoner.id) || medicalTransfer || prisoner.escortedBy >= 0 || prisoner.state === "escorted") {
+      this.deferPolicyClaim(order, officer, time);
+      return true;
+    }
     let phase = this.policyPhases.get(order.incidentId) ?? "approach";
+    const searchRank: Record<PunishmentOrder["search"], number> = { none: 0, person: 1, cell: 2, workplace: 2, targeted: 3, full: 4 };
+    if (searchRank[order.searchCompleted ?? "none"] < searchRank[order.search] &&
+        ["interview-route", "interview", "solitary-route"].includes(phase)) {
+      phase = order.search === "person" ? "search" : "search-route";
+      this.policyPhases.set(order.incidentId, phase); this.actionTimers.delete(officer.id);
+    }
+    if (order.interrogate && !order.interrogated && phase === "solitary-route") {
+      phase = "interview-route"; this.policyPhases.set(order.incidentId, phase); this.actionTimers.delete(officer.id);
+    }
     if (phase === "approach") {
       const target = world.idx(Math.floor(prisoner.x), Math.floor(prisoner.z));
       if (Math.hypot(officer.x - prisoner.x, officer.z - prisoner.z) > 1.5) {
@@ -277,10 +297,17 @@ export class SecuritySystem {
       phase = "search"; this.policyPhases.set(order.incidentId, phase); this.actionTimers.delete(officer.id);
     }
     if (phase === "search") {
+      prisoner.cuffed = true;
+      if (order.searchStarted === undefined) order.searchStarted = order.search;
+      else if (searchRank[order.searchStarted] < searchRank[order.search]) {
+        order.searchStarted = order.search;
+        this.actionTimers.set(officer.id, order.search === "full" ? 18 : 7);
+      }
       officer.state = "searching"; officer.amp = .35;
       const remaining = (this.actionTimers.get(officer.id) ?? (order.search === "full" ? 18 : 7)) - dt;
       this.actionTimers.set(officer.id, remaining); if (remaining > 0) return true;
       this.searchPrisoner(officer, prisoner, order, time, world); this.actionTimers.delete(officer.id);
+      order.searchCompleted = order.search;
       phase = order.interrogate ? "interview-route" : "solitary-route"; this.policyPhases.set(order.incidentId, phase);
     }
     if (phase === "interview-route") {
@@ -295,17 +322,33 @@ export class SecuritySystem {
       const remaining = (this.actionTimers.get(officer.id) ?? 20) - dt;
       this.actionTimers.set(officer.id, remaining); if (remaining > 0) return true;
       this.interrogate(officer, prisoner, order, time); this.actionTimers.delete(officer.id);
+      order.interrogated = true;
       phase = "solitary-route"; this.policyPhases.set(order.incidentId, phase);
     }
     const rule = this.institution.ruleFor(this.institution.incidents.get(order.incidentId)?.category ?? "unauthorized",
       this.institution.incidents.get(order.incidentId)?.itemDefId ?? "");
-    if (phase === "solitary-route" && rule.solitaryHours > 0) {
+    const solitaryHours = order.solitaryHours ?? rule.solitaryHours;
+    if (phase === "solitary-route" && solitaryHours > 0) {
       const occupied = new Set(this.institution.punishments.filter((row) => row.state === "active" && row.solitaryRoomId !== undefined).map((row) => row.solitaryRoomId));
       const room = [...world.rooms.values()].find((r) => r.valid && r.type === RoomType.Solitary && !occupied.has(r.id));
       const target = room ? ([...room.tiles].find((i) => world.objKind[i] === Obj.Bed) ?? [...room.tiles][0]) : -1;
-      if (!room || target < 0) { this.warnings.add(`Solitary order for inmate ${prisoner.id} is waiting for a free Solitary Cell`); return true; }
+      if (!room || target < 0) {
+        this.warnings.add(`Solitary order for inmate ${prisoner.id} is waiting for a free Solitary Cell`);
+        // Do not keep an inmate handcuffed at his current location while the
+        // prison waits for a solitary bed. Keep the completed search phase,
+        // release the guard, and retry this order after the room turnover.
+        this.deferPolicyClaim(order, officer, time);
+        prisoner.cuffed = false; prisoner.escortedBy = -1;
+        if (prisoner.state === "policyEscort" || prisoner.state === "cuffed" || prisoner.state === "restrained") {
+          prisoner.state = "idle"; prisoner.path = null; prisoner.pose = POSE_STAND;
+        }
+        officer.state = "idle"; officer.path = null; officer.amp = 0;
+        return true;
+      }
+      delete order.retryAt;
+      prisoner.cuffed = true;
       if (this.escortToward(officer, prisoner, target, dt, world)) { officer.state = "escortingToSolitary"; return true; }
-      order.solitaryRoomId = room.id; order.solitaryUntil = time + rule.solitaryHours * HOUR_SECONDS; order.state = "active";
+      order.solitaryRoomId = room.id; order.solitaryUntil = time + solitaryHours * HOUR_SECONDS; order.state = "active";
       prisoner.state = "solitary"; prisoner.cuffed = false; prisoner.path = null;
       for (const door of world.roomJailDoors(room)) world.jailClosed[door] = 1;
     } else if (phase === "solitary-route") {
@@ -317,6 +360,13 @@ export class SecuritySystem {
       prisoner.profile.custody = levels[Math.min(levels.length - 1, Math.max(0, at + 1))];
     }
     this.finishPolicy(order.incidentId, officer); return true;
+  }
+
+  private deferPolicyClaim(order: PunishmentOrder, officer: Agent, time: number): void {
+    order.retryAt = time + HOUR_SECONDS;
+    this.claims.delete(order.incidentId);
+    this.actionTimers.delete(officer.id);
+    officer.state = "idle"; officer.path = null; officer.amp = 0;
   }
 
   private finishPolicy(incidentId: number, officer: Agent): void {
@@ -352,25 +402,42 @@ export class SecuritySystem {
     }
   }
 
-  private updateBodyResponse(guard: Agent, dt: number, world: World, agents: readonly Agent[]): boolean {
+  private updateBodyResponse(guard: Agent, dt: number, time: number, world: World, agents: readonly Agent[]): boolean {
     let body = [...this.health.bodies.values()].find((b) => this.bodyClaims.get(b.agentId) === guard.id && !b.removed && b.morgueSlab < 0);
     if (!body) {
-      body = [...this.health.bodies.values()].find((b) => b.discovered && !b.removed && b.morgueSlab < 0 && !this.bodyClaims.has(b.agentId));
+      body = [...this.health.bodies.values()].find((b) => b.discovered && !b.removed && b.morgueSlab < 0 &&
+        !this.bodyClaims.has(b.agentId) && time >= (this.bodyRetryAt.get(b.agentId) ?? -Infinity));
       if (!body) return false; this.bodyClaims.set(body.agentId, guard.id);
     }
     const corpse = agents.find((a) => a.id === body!.agentId);
     if (Math.hypot(guard.x - body.x, guard.z - body.z) > 1.2 && guard.state !== "movingBody") {
       const target = world.idx(Math.floor(body.x), Math.floor(body.z)); this.moveToward(guard, target, dt, world, true); guard.state = "toBody"; return true;
     }
-    const slab = world.tilesOfKind(Obj.MorgueSlab).find((tile) => world.roomTypeAt(tile) === RoomType.Morgue &&
-      ![...this.health.bodies.values()].some((b) => b.agentId !== body!.agentId && b.morgueSlab === tile));
-    if (slab === undefined) { this.warnings.add("A discovered body is waiting for a valid free Morgue slab"); guard.state = "bodyWaiting"; return true; }
+    const slab = this.morgueSlabAnchors(world).find((anchor) =>
+      ![...this.health.bodies.values()].some((b) => b.agentId !== body!.agentId && !b.removed && b.morgueSlab >= 0 &&
+        world.anchorOf(b.morgueSlab) === anchor));
+    if (slab === undefined) {
+      this.warnings.add("A discovered body is waiting for a valid free Morgue slab");
+      this.bodyClaims.delete(body.agentId); this.bodyRetryAt.set(body.agentId, time + 60);
+      guard.path = null; guard.state = "idle";
+      return false;
+    }
     guard.state = "movingBody";
     body.x = guard.x; body.z = guard.z; if (corpse) { corpse.x = guard.x; corpse.z = guard.z; }
     if (this.moveToward(guard, slab, dt * .7, world, true)) return true;
     body.morgueSlab = slab; body.x = slab % world.size + .5; body.z = ((slab / world.size) | 0) + .5;
     if (corpse) { corpse.x = body.x; corpse.z = body.z; corpse.state = "morgue"; }
-    this.bodyClaims.delete(body.agentId); guard.state = "idle"; return true;
+    this.bodyClaims.delete(body.agentId); this.bodyRetryAt.delete(body.agentId); guard.state = "idle"; return true;
+  }
+
+  private morgueSlabAnchors(world: World): number[] {
+    return [...new Set(world.tilesOfKind(Obj.MorgueSlab).map((tile) => world.anchorOf(tile)))].filter((anchor) =>
+      world.roomTypeAt(anchor) === RoomType.Morgue);
+  }
+
+  private hasFreeMorgueSlab(world: World): boolean {
+    return this.morgueSlabAnchors(world).some((anchor) => ![...this.health.bodies.values()].some((body) =>
+      !body.removed && body.morgueSlab >= 0 && world.anchorOf(body.morgueSlab) === anchor));
   }
 
   private updateCasualtyResponse(guard: Agent, dt: number, world: World, agents: readonly Agent[]): boolean {
@@ -401,20 +468,54 @@ export class SecuritySystem {
       this.casualtyClaims.delete(job.patientId); this.health.clearTransportGuard(job.patientId, guard.id);
       job.state = "stable"; return false;
     }
-    const bed = this.health.availableMedicalBed(world, patient.id);
-    if (bed < 0) { this.warnings.add("A casualty is waiting for a free Infirmary medical bed"); guard.state = "casualtyWaiting"; return true; }
+    this.health.setTransportGuard(patient.id, guard.id);
+    let bed = job.transportBed ?? this.health.availableMedicalBed(world, patient.id);
+    if (bed >= 0 && !this.health.medicalBedIsValid(world, bed)) {
+      this.health.clearTransportGuard(patient.id, guard.id); bed = -1;
+    }
+    if (bed < 0) {
+      this.warnings.add("A casualty is waiting for a free Infirmary medical bed");
+      this.casualtyClaims.delete(patient.id); this.health.clearTransportGuard(patient.id, guard.id);
+      if (patient.state === "beingTransported") {
+        patient.state = h.consciousness < .12 ? "incapacitated" : patient.cuffed ? "cuffed" : "idle";
+        patient.pose = patient.state === "incapacitated" ? POSE_LIE_FLOOR : POSE_STAND;
+        patient.path = null;
+      }
+      guard.state = "idle"; guard.path = null; guard.interact = -1;
+      return false;
+    }
+    if (!job.transportBed && !this.health.reserveMedicalBed(patient.id, guard.id, bed)) {
+      this.casualtyClaims.delete(patient.id); this.health.clearTransportGuard(patient.id, guard.id);
+      guard.state = "idle"; guard.path = null; guard.interact = -1;
+      return false;
+    }
     if (guard.state !== "movingCasualty" && Math.hypot(guard.x - patient.x, guard.z - patient.z) > 1.25) {
       const target = world.idx(Math.floor(patient.x), Math.floor(patient.z)); this.moveToward(guard, target, dt, world, true);
       guard.state = "toCasualty"; return true;
     }
     guard.state = "movingCasualty"; patient.state = "beingTransported"; patient.path = null;
-    this.health.setTransportGuard(patient.id, guard.id);
     patient.x = guard.x; patient.z = guard.z; patient.pose = 4;
     if (this.moveToward(guard, bed, dt * .68, world, true)) return true;
     patient.x = bed % world.size + .5; patient.z = ((bed / world.size) | 0) + .5;
     const admitted = this.health.admit(patient, bed);
     if (!admitted) this.health.clearTransportGuard(patient.id, guard.id);
     this.casualtyClaims.delete(patient.id); guard.state = "idle"; return true;
+  }
+
+  private releaseUnclaimedPolicyRestraints(agents: readonly Agent[]): void {
+    const activelyClaimed = new Set(this.institution.punishments.filter((order) => order.state === "queued" &&
+      this.claims.has(order.incidentId)).map((order) => order.prisonerId));
+    for (const order of this.institution.punishments) {
+      if (order.state !== "queued" || this.claims.has(order.incidentId)) continue;
+      const prisoner = agents.find((agent) => agent.id === order.prisonerId);
+      if (!prisoner || activelyClaimed.has(prisoner.id) || prisoner.escortedBy >= 0 || prisoner.state === "escorted" ||
+          prisoner.state === "beingTransported" || prisoner.state === "inTreatment" || this.health.isUnavailable(prisoner.id)) continue;
+      if (!prisoner.cuffed && prisoner.state !== "cuffed" && prisoner.state !== "restrained" && prisoner.state !== "policyEscort") continue;
+      // A queued case without a live officer claim is not an active restraint.
+      // Leave the prisoner free to eat, sleep, and return to his cell while
+      // Security waits for an officer or an available solitary bed.
+      prisoner.cuffed = false; prisoner.state = "idle"; prisoner.path = null; prisoner.pose = POSE_STAND;
+    }
   }
 
   private searchPrisoner(officer: Agent, prisoner: Agent, order: PunishmentOrder, time: number, world: World): void {
@@ -453,7 +554,8 @@ export class SecuritySystem {
         `Interview produced a materially consistent admission`, time, prisoner.x, prisoner.z, -1,
         "The statement may be incomplete or motivated by promised leniency");
       if (personality(prisoner.profile, "loyalty") < 0 && this.random() < .25) this.institution.recruitInformant(prisoner.id, .45 + aptitude(prisoner.profile, "memory") * .04);
-      if (this.institution.ruleFor(incident.category, incident.itemDefId).protectiveOffer && this.institution.informants.has(prisoner.id)) prisoner.protectiveCustody = true;
+      if ((order.protectiveOffer ?? this.institution.ruleFor(incident.category, incident.itemDefId).protectiveOffer) &&
+          this.institution.informants.has(prisoner.id)) prisoner.protectiveCustody = true;
     } else {
       this.institution.addEvidence(incident.id, "witness", prisoner.id, prisoner.id, .28,
         `Interview produced a plausible denial`, time, prisoner.x, prisoner.z, -1,
