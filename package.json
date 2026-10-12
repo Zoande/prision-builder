@@ -18,7 +18,9 @@
     "check:playthrough": "node scripts/check-playthrough.ts",
     "check:production": "node scripts/check-production-browser.mjs",
     "check:ui": "node scripts/check-resident-care.mjs && node scripts/check-welfare-ui.mjs && node scripts/check-policy-controls.mjs && node scripts/check-work-assignments.mjs && node scripts/check-institutional-ui.mjs",
-    "check:boxed-save": "node scripts/check-boxed-save-browser.mjs"
+    "check:boxed-save": "node scripts/check-boxed-save-browser.mjs",
+    "check:sim-frame-boundary": "node scripts/check-sim-frame-boundary.ts",
+    "check:sim-frame-browser": "node scripts/check-sim-frame-browser.mjs"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.40",

@@ -217,6 +217,16 @@
       .queue-row header { display:flex; justify-content:space-between; gap:8px; } .queue-row p { margin:5px 0; color:#aab8b6; font-size:11px; }
       #notice { position:fixed; z-index:90; left:50%; bottom:26px; display:none; transform:translateX(-50%); max-width:min(560px,90vw); padding:10px 14px; color:#f5f7f2; background:rgba(39,25,20,.96); border:1px solid #b47b55; border-radius:6px; box-shadow:0 10px 34px #0009; }
       #notice.show { display:block; }
+      #simulationFault { position:fixed; z-index:140; top:14px; left:50%; display:none; transform:translateX(-50%); width:min(680px,calc(100vw - 28px)); max-height:45vh; overflow:auto; padding:12px 15px; color:#fff3e9; background:rgba(54,24,22,.97); border:1px solid #dd806d; border-radius:7px; box-shadow:0 12px 42px #000b; }
+      #simulationFault.show { display:block; }
+      #simulationFault strong { display:block; color:#ffd1bd; font-size:13px; }
+      #simulationFault p { margin:6px 0 9px; font-size:12px; line-height:1.45; }
+      #simulationFault details { margin:6px 0 10px; font-size:11px; }
+      #simulationFault summary { cursor:pointer; color:#f0c5ad; }
+      #simulationFault pre { max-height:18vh; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; color:#d4d9d4; }
+      .simulation-fault-actions { display:flex; flex-wrap:wrap; gap:7px; }
+      .simulation-fault-actions button { padding:6px 9px; color:#fff4ed; background:#58312d; border:1px solid #a9695d; border-radius:4px; cursor:pointer; }
+      .simulation-fault-actions button:hover { background:#704039; }
       #saveStatus { position:fixed; z-index:35; right:18px; bottom:184px; color:#91a19f; font-size:11px; }
       #saveControls { position:fixed; z-index:35; right:18px; bottom:194px; display:flex; gap:5px; }
       #saveControls button { padding:5px 8px; color:#cad5d0; background:#14252c; border:1px solid #33484d; border-radius:4px; cursor:pointer; font-size:10px; }
@@ -324,6 +334,12 @@
     <aside id="financialsDashboard" aria-label="Financials dashboard"></aside>
     <aside id="policyDashboard" aria-label="Policy dashboard"></aside>
     <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="intel-title-row"><div class="log-title">Prisoner intelligence</div><button type="button" id="intelNeedsButton" class="tiny-btn" aria-label="Toggle prison-wide needs" aria-pressed="false">Needs</button><button type="button" class="tiny-btn" data-close-dashboard aria-label="Close intelligence">Close</button></div><input id="intelSearch" aria-label="Search inmates" placeholder="Search official records or known cases"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and evidence-backed assessments are visible here.</div></section><section id="intelWelfare" class="intel-profile" hidden aria-label="Prison-wide resident needs"></section></aside>
+    <aside id="simulationFault" role="alert" aria-live="assertive" aria-hidden="true">
+      <strong>Simulation stopped</strong>
+      <p id="simulationFaultMessage"></p>
+      <details><summary>Technical details</summary><pre id="simulationFaultDetails"></pre></details>
+      <div class="simulation-fault-actions"><button id="exportSimulationDiagnosticBtn" type="button">Export diagnostic save</button><button id="reloadSavedGameBtn" type="button">Reload saved game</button></div>
+    </aside>
     <div id="notice" role="status" aria-live="polite"></div><div id="saveStatus" aria-live="polite">Not saved</div>
     <div id="saveControls"><button id="saveNowBtn" type="button">Save now</button><button id="exportSaveBtn" type="button">Export</button><button id="importSaveBtn" type="button">Import</button><button id="newGameBtn" type="button">New game</button><input id="importSaveFile" type="file" accept="application/json" hidden></div>
     <div id="startMenu"><div class="start-card"><h1>Fresh v6 prison required</h1><p>This release rebuilds construction, logistics, intake, and persistence. Version-5 saves are intentionally not migrated. You can download the old save before starting fresh.</p><div class="start-actions"><button id="freshStartBtn" type="button">Start fresh</button><button id="downloadOldBtn" type="button">Download old save</button></div></div></div>
