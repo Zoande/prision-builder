@@ -10,6 +10,7 @@ const browserPath=process.env.CHROMIUM_PATH || (existsSync('/usr/bin/chromium') 
 const server=await createServer({root:process.cwd(),server:{host:'127.0.0.1',port:0,hmr:false}});
 let browser;
 const errors=[];
+const panelsOnly=process.argv.includes('--panels-only');
 const artifactDir=process.env.PLAYTEST_ARTIFACTS || '/tmp/prison-builder-playtest';
 mkdirSync(artifactDir,{recursive:true});
 try {
@@ -29,6 +30,7 @@ try {
   await page.route('**/api/sim-log',route=>route.fulfill({contentType:'text/plain',body:''}));
   async function ready(){
     await page.waitForFunction(()=>window.__prisonPlaytest || document.querySelector('#err').textContent,null,{timeout:120000});
+    await page.evaluate(()=>document.querySelector('#speeds .spd').click());
     await page.waitForFunction(()=>document.querySelector('#hud').textContent.includes('fps') || document.querySelector('#err').textContent,null,{timeout:120000});
     assert.equal(await page.locator('#err').textContent(),'','WebGPU must initialize');
   }
@@ -36,6 +38,7 @@ try {
   await ready();
   console.log("Browser ready");
   assert.equal(await page.evaluate(()=>window.__prisonPlaytest.inspect().speed),0,'new prison starts paused');
+  if(!panelsOnly){
   await page.locator('.mode-btn[data-mode=objects]').click();
   const search=page.locator('#catalogSearch');
   for(const name of ['Loading Pallet','Freezer','Sink','Uniform Rack','Search Table','Gatehouse','Records Desk']){
@@ -114,6 +117,7 @@ try {
   assert.equal(await number.inputValue(),'7','refresh must preserve a focused edit');
   await number.press('Tab');
   await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#policyDashboard').isVisible(),false,'Escape closes a dashboard from a focused control');
   const savedCameraPoint=await page.evaluate(()=>window.__prisonPlaytest.screenTile(360,373));
   await page.locator('#saveNowBtn').click();
   await page.waitForFunction(()=>document.querySelector('#saveStatus').textContent.startsWith('Saved'),null,{timeout:30000});
@@ -157,9 +161,11 @@ try {
   await page.locator('#importSaveFile').setInputFiles({name:'broken-save.json',mimeType:'application/json',buffer:Buffer.from('{"version":6,"world":{},"agents":{}}')});
   await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('complete version-6 save'),null,{timeout:30000});
   assert.equal((await page.evaluate(()=>window.__prisonPlaytest.inspect())).floor[373*500+360],1,'a rejected import preserves the current prison');
+  }
   const populated=createPrison(9876,16);
   populated.advance(10);
-  const injured=populated.agents.agents.find(actor=>actor.kind===Obj.Prisoner);
+  const injured=populated.agents.agents.filter(actor=>actor.kind===Obj.Prisoner).sort((a,b)=>a.id-b.id)[0];
+  injured.needs.food=.08;injured.needs.hygiene=.05;
   populated.task2.health.applyInjury(injured,'blunt','left-arm',.3,populated.time);
   await Promise.all([
     page.waitForNavigation({waitUntil:'domcontentloaded',timeout:120000}),
@@ -187,7 +193,44 @@ try {
     await page.screenshot({timeout:30000,path:`${artifactDir}/intelligence-${width}.png`});
     const careButton=page.locator('#intelProfile [data-care-action]').filter({hasText:'Medical facilities'});
     await careButton.click();
-    assert.ok(await page.locator('#palette .build-item').filter({hasText:'Infirmary'}).isVisible(),'care action opens medical room tools');
+    try{await page.locator('#palette .build-item').filter({hasText:'Infirmary'}).waitFor({state:'visible',timeout:5000});}
+    catch(error){
+      console.error('Care action state',await page.evaluate(()=>({mode:document.querySelector('.mode-btn.on')?.getAttribute('data-mode'),palette:document.getElementById('palette').textContent,search:document.getElementById('catalogSearch').value,detail:document.getElementById('detailName').textContent})));
+      throw error;
+    }
+    await page.locator('.mode-btn[data-mode=intelligence]').click();
+    await page.locator('#intelNeedsButton').click();
+    assert.ok(await page.locator('#intelWelfare .welfare-overview').isVisible(),'population welfare overview is reachable');
+    assert.match(await page.locator('#intelWelfare').textContent(),/16 residents/);
+    assert.match(await page.locator('#intelWelfare').textContent(),/urgent/);
+    await page.screenshot({timeout:30000,path:`${artifactDir}/welfare-${width}.png`});
+    await page.locator('#intelWelfare .wo-concern').first().click();
+    assert.ok(await page.locator('#intelProfile').isVisible(),'welfare concerns link to a resident profile');
+    await page.locator('.mode-btn[data-mode=policy]').click();
+    assert.equal(await page.locator('#saveControls').isVisible(),false,'save toolbar does not cover policy fields');
+    const threshold=page.locator('#policyDashboard select[data-policy]').first();
+    assert.match(await threshold.getAttribute('aria-label'),/Evidence threshold/);
+    assert.match(await threshold.getAttribute('title'),/corroborated evidence/);
+    if(width<=720){
+      const card=await page.locator('#policyDashboard .policy-fields').first().boundingBox();
+      assert.ok(card.x>=0&&card.x+card.width<=width,'policy card fits on mobile');
+      const controls=await page.locator('#policyDashboard .policy-fields').first().locator('input,select').evaluateAll(inputs=>inputs.map(input=>{const r=input.getBoundingClientRect();return {x:r.x,right:r.right,width:r.width};}));
+      assert.ok(controls.every(control=>control.x>=0&&control.right<=width&&control.width>=18),'all mobile policy fields are usable');
+    }
+    await page.screenshot({timeout:30000,path:`${artifactDir}/policy-${width}.png`});
+    await page.locator('.mode-btn[data-mode=logistics]').click();
+    await page.locator('[data-logtab=work]').click();
+    const workSearch=page.locator('.work-assignment-search');
+    await workSearch.fill('Gabriel Turner');
+    assert.match(await page.locator('.work-assignment-count').textContent(),/1 of 16/);
+    await workSearch.fill('No matching inmate');
+    assert.match(await page.locator('.work-assignment-count').textContent(),/0 of 16/);
+    await workSearch.fill('');await workSearch.press('Tab');
+    if(width<=720){
+      const dashboard=await page.locator('#logisticsDashboard').boundingBox();
+      assert.ok(dashboard.x>=0&&dashboard.x+dashboard.width<=width,'work dashboard fits on mobile');
+    }
+    await page.screenshot({timeout:30000,path:`${artifactDir}/work-${width}.png`});
     await page.locator('.mode-btn[data-mode=staff]').click();
     await page.locator('.staff-roster.is-open').waitFor({state:'visible'});
     assert.equal(await page.locator('.staff-roster .sr-entry').count(),13);

@@ -16,7 +16,8 @@
     "sim-check": "node scripts/sim-golden.ts",
     "check:browser": "node scripts/check-browser.mjs",
     "check:playthrough": "node scripts/check-playthrough.ts",
-    "check:production": "node scripts/check-production-browser.mjs"
+    "check:production": "node scripts/check-production-browser.mjs",
+    "check:ui": "node scripts/check-resident-care.mjs && node scripts/check-welfare-ui.mjs && node scripts/check-policy-controls.mjs && node scripts/check-work-assignments.mjs && node scripts/check-institutional-ui.mjs"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.40",

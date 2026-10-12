@@ -1,0 +1,90 @@
+/* At desktop widths, column headings carry the field names. Keep the explicit
+   labels visually hidden there while retaining screen-reader names/tooltips. */
+#policyDashboard.policy-controls-enhanced .policy-field-label {
+  position:absolute;
+  width:1px;
+  height:1px;
+  padding:0;
+  margin:-1px;
+  overflow:hidden;
+  clip:rect(0,0,0,0);
+  white-space:nowrap;
+  border:0;
+}
+#policyDashboard.policy-controls-enhanced .policy-field { min-width:0; }
+#policyDashboard.policy-controls-enhanced .policy-fields > strong { min-width:0; overflow-wrap:anywhere; }
+
+@media (max-width:720px) {
+  #policyDashboard.policy-controls-enhanced {
+    left:8px;
+    right:8px;
+    top:236px;
+    bottom:8px;
+    width:auto;
+    max-height:calc(100vh - 244px);
+    overflow:auto;
+    padding:10px;
+  }
+  #policyDashboard.policy-controls-enhanced .policy-header { display:none; }
+  #policyDashboard.policy-controls-enhanced .policy-fields {
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    align-items:stretch;
+    gap:7px;
+    margin:8px 0;
+    padding:9px;
+    border:1px solid var(--line);
+    border-radius:5px;
+    background:#0e2028;
+  }
+  #policyDashboard.policy-controls-enhanced .policy-fields > strong {
+    grid-column:1 / -1;
+    padding-bottom:3px;
+    color:#e9f0df;
+    font-size:11px;
+  }
+  #policyDashboard.policy-controls-enhanced .policy-field {
+    display:flex;
+    min-width:0;
+    flex-direction:column;
+    justify-content:space-between;
+    gap:4px;
+    padding:5px;
+    border:1px solid rgba(255,255,255,.06);
+    border-radius:3px;
+    color:#b8c5c5;
+    font-size:9px;
+  }
+  #policyDashboard.policy-controls-enhanced .policy-field-label {
+    position:static;
+    width:auto;
+    height:auto;
+    margin:0;
+    overflow:visible;
+    clip:auto;
+    color:#b9ca78;
+    font-size:9px;
+    font-weight:800;
+    line-height:1.25;
+    white-space:normal;
+  }
+  #policyDashboard.policy-controls-enhanced .policy-field select,
+  #policyDashboard.policy-controls-enhanced .policy-field input[type="number"] {
+    width:100%;
+    min-height:34px;
+    padding:5px;
+    font-size:11px;
+  }
+  #policyDashboard.policy-controls-enhanced .policy-field.is-toggle {
+    flex-direction:row;
+    align-items:center;
+    gap:6px;
+  }
+  #policyDashboard.policy-controls-enhanced .policy-field.is-toggle .policy-field-label { flex:1 1 auto; }
+  #policyDashboard.policy-controls-enhanced .policy-field.is-toggle input { flex:0 0 auto; width:18px; height:18px; margin:0; }
+}
+
+@media (max-width:340px) {
+  #policyDashboard.policy-controls-enhanced { padding:8px; }
+  #policyDashboard.policy-controls-enhanced .policy-fields { gap:5px; padding:7px; }
+}

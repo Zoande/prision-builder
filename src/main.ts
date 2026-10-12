@@ -17,6 +17,10 @@ import { FacilityInspector, type FacilityRoomSelection } from "./ui/facilityInsp
 import { StaffRoster } from "./ui/staffRoster";
 import { residentCareMarkup, type ResidentCareFacts } from "./ui/residentCare";
 import { collectServiceProblems } from "./sim/serviceProblems";
+import { WelfareOverview, type WelfareNeedAction } from "./ui/welfareOverview";
+import { annotatePolicyControls } from "./ui/policyControls";
+import { annotateWorkAssignments } from "./ui/workAssignments";
+import { annotateInstitutionalDashboard } from "./ui/institutionalDashboard";
 import { clockLabel, dayOf, evalAtmosphere, HOUR_SECONDS, hourOf, isNightAt } from "./daynight";
 import { GroundPass } from "./render/groundPass";
 import { FloorPass } from "./render/floorPass";
@@ -369,10 +373,10 @@ async function main() {
       label.textContent = `${String(h).padStart(2, "0")}:00`;
       const act = document.createElement("button");
       act.type = "button";
-      act.setAttribute("aria-label", `${String(h).padStart(2, "0")}:00 activity`);
       act.className = "reg-act";
       const paint = () => {
         act.textContent = REG_NAMES[agents.regime[h]];
+        act.setAttribute("aria-label", `${String(h).padStart(2, "0")}:00 · ${REG_NAMES[agents.regime[h]]}`);
         act.style.background = REG_COLORS[agents.regime[h]] + "55";
         act.style.borderColor = REG_COLORS[agents.regime[h]];
       };
@@ -897,9 +901,14 @@ async function main() {
 
   const intelRoster = document.getElementById("intelRoster")!;
   const intelProfile = document.getElementById("intelProfile")!;
+  const intelWelfare = document.getElementById("intelWelfare")!;
+  const intelNeedsButton = document.getElementById("intelNeedsButton") as HTMLButtonElement;
+  let showWelfare = false;
+  const welfareOverview = new WelfareOverview({ selectResident: selectIntelligenceAgent, openCatalog }, intelWelfare);
   const intelSearch = document.getElementById("intelSearch") as HTMLInputElement;
   const html = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
   function selectIntelligenceAgent(id: number): void {
+    showWelfare = false;
     selected = agents.agents.find((a) => a.id === id) ?? null;
     overlayT = 0;
     updateInspector();
@@ -1025,6 +1034,31 @@ async function main() {
       return `<button class="intel-person${selected?.id === a.id ? " on" : ""}" data-agent="${a.id}"><strong><i class="custody-dot" style="background:rgb(${color.join(",")})"></i>${html(p.firstName)} ${html(p.lastName)}</strong><small>${CUSTODY_NAMES[p.custody]}${a.protectiveCustody ? " / Protective" : ""} · ${html(crimeName(p.conviction.crimeId))} · ${known.cases} case(s)</small></button>`;
     }).join("") || `<div class="profile-sub">No matching official records.</div>`);
     intelRoster.querySelectorAll<HTMLButtonElement>("[data-agent]").forEach((el) => el.onclick = () => selectIntelligenceAgent(Number(el.dataset.agent)));
+    intelProfile.hidden = showWelfare;
+    intelWelfare.hidden = !showWelfare;
+    intelNeedsButton.setAttribute("aria-pressed", String(showWelfare));
+    intelNeedsButton.textContent = showWelfare ? "Profile" : "Needs";
+    if (showWelfare) {
+      const residents = prisoners.filter(actor => !["dead", "morgue", "removed"].includes(actor.state) && task2.health.state(actor.id)?.alive !== false);
+      const basic = { mode: "rooms", section: "rooms:prisoner", label: "Facilities" };
+      const living = { mode: "rooms", section: "rooms:living", label: "Living rooms" };
+      const actions: Partial<Record<typeof NEEDS[number], WelfareNeedAction>> = {
+        food: { mode: "objects", section: "objects:dining", label: "Dining" }, sleep: basic, hygiene: basic, bladder: basic,
+        outdoors: basic, privacy: basic, comfort: living, recreation: living, exercise: living, spirituality: living, social: living,
+        family: { mode: "rooms", section: "rooms:work", label: "Mail Room" },
+        safety: { mode: "staff", section: "staff:deploy", label: "Guard posts" },
+      };
+      welfareOverview.update({ population: residents.length, needs: NEEDS.map(need => ({ id: need, label: needLabels[need],
+        affected: residents.filter(actor => actor.needs[need] < .25).length,
+        urgent: residents.filter(actor => actor.needs[need] < .12).length, action: actions[need] })),
+        concerns: residents.flatMap(actor => {
+          const need = NEEDS.reduce((worst, current) => actor.needs[current] < actor.needs[worst] ? current : worst, NEEDS[0]);
+          return actor.needs[need] < .25 ? [{ id: actor.id, name: `${actor.profile!.firstName} ${actor.profile!.lastName}`,
+            need: needLabels[need], percent: Math.round(actor.needs[need] * 100),
+            detail: actor.cuffed ? "Restrained" : task2.health.isUnavailable(actor.id) ? "Receiving care" : "Needs attention" }] : [];
+        }) });
+      return;
+    }
     if (!selected?.profile) {
       setPanelMarkup(intelProfile, `<div class="profile-title">Select an inmate</div><div class="profile-sub">Select a resident to review welfare, official records, and sourced staff intelligence.</div>`);
       return;
@@ -1062,6 +1096,7 @@ async function main() {
       `<div class="profile-section"><h3>Information sources</h3><div class="profile-sub">Assessments reflect shared staff observations, investigations, and management reports. Confidence changes as evidence develops.</div></div>`);
   }
   intelSearch.addEventListener("input", updateIntelligenceUi);
+  intelNeedsButton.addEventListener("click", () => { showWelfare = !showWelfare; updateIntelligenceUi(); });
 
   canvas.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
@@ -1135,7 +1170,11 @@ async function main() {
   });
   addEventListener("keydown", (e) => {
     const target = e.target;
-    if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+    const typing = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+    if (typing && e.key !== "Escape") return;
+    // Let the catalog clear a search before closing it; other dashboards must
+    // remain dismissible while one of their controls has keyboard focus.
+    if (e.key === "Escape" && target === document.getElementById("catalogSearch") && (target as HTMLInputElement).value) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if ((e.key === "Delete" || e.key === "Backspace") && hoverTile && !(e.target instanceof HTMLInputElement)) {
       e.preventDefault();
@@ -1759,6 +1798,8 @@ async function main() {
       body = `<div class="matrix">${workplaces.map((w) => `<div class="matrix-row"><header><strong>${html(w.jobId)} · room ${w.roomId}</strong><span>${w.active.length}/${w.assigned.length}/${w.capacity} active/assigned/capacity</span></header><label>Supervision <select class="work-select" data-supervision="${w.roomId}">${["none", "periodic", "constant"].map((s) => `<option ${w.supervision === s ? "selected" : ""}>${s}</option>`).join("")}</select></label>${w.blocked ? `<small>${html(w.blocked)}</small>` : ""}</div>`).join("")}</div><div class="profile-section"><h3>Inmate assignments</h3><div class="matrix">${workerRows || "No inmates available."}</div></div>`;
     }
     logisticsDashboard.innerHTML = `<div class="log-title">Institutional logistics <button class="tiny-btn" data-close-dashboard aria-label="Close logistics">Close</button></div>${tabBar()}${body}`;
+    annotateWorkAssignments(logisticsDashboard);
+    annotateInstitutionalDashboard(logisticsDashboard);
     logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-logtab]").forEach((button) => button.onclick = () => { logisticsTab = button.dataset.logtab as typeof logisticsTab; updateLogisticsUi(); });
     logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-open-catalog]").forEach((button) => button.onclick = () => openCatalog("logistics", button.dataset.openCatalog!));
     logisticsDashboard.querySelectorAll<HTMLButtonElement>("[data-deploy]").forEach((button) => button.onclick = () => {
@@ -1807,6 +1848,7 @@ async function main() {
     const reportRows = [...task3.management.reports.values()].filter((report) => report.expiresAt > worldTime).sort((a, b) => b.createdAt - a.createdAt).map((report) => `<div class="matrix-row"><header><strong>${html(report.title)}</strong><span>${html(report.manager)} · ${Math.round(report.confidence * 100)}%</span></header><div>${html(report.summary)}</div><small>${html(report.recommendation)}</small></div>`).join("");
     financialsDashboard.innerHTML += `<div class="profile-section"><h3>Temporary controls</h3><div class="profile-sub">Controls improve detection but consume staff time. A compromised employee may warn an inmate or quietly bypass the procedure.</div><div class="toggle-grid">${procedures.map((id) => { const active = task3.management.procedure(id, worldTime), manager = task3.management.procedureManager(id), enabled = task3.management.canActivateProcedure(id); return `<button class="tiny-btn${active ? " on" : ""}" data-procedure="${id}" ${!active && !enabled ? "disabled" : ""}>${html(id)} · ${manager}${active ? ` · ${Math.max(1, Math.ceil((active.activeUntil - worldTime) / HOUR_SECONDS))}h` : ""}</button>`; }).join("")}</div></div>` +
       `<div class="profile-section"><h3>Management reports</h3><div class="matrix">${reportRows || `<div class="profile-sub">No current reports. Each manager needs a separate valid Management Office and time to inspect records or the facility.</div>`}</div></div>`;
+    annotateInstitutionalDashboard(financialsDashboard);
     financialsDashboard.querySelectorAll<HTMLButtonElement>("[data-procedure]").forEach((button) => button.onclick = () => {
       const id = button.dataset.procedure as typeof procedures[number];
       if (task3.management.procedure(id, worldTime)) task3.management.deactivateProcedure(id);
@@ -1844,6 +1886,7 @@ async function main() {
       `<div class="profile-section"><h3>Mail inspection</h3><select class="work-select" id="mailInspection">${["none", "sample", "all"].map((v) => option(v, task2.market.mailInspection)).join("")}</select></div>`;
     const categoryHeader = policyDashboard.querySelector<HTMLElement>(".policy-row");
     if (categoryHeader?.children.length === 8) categoryHeader.insertAdjacentHTML("beforeend", "<b>Seize</b><b>Medical</b>");
+    annotatePolicyControls(policyDashboard);
     policyDashboard.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-policy]").forEach((input) => input.onchange = () => {
       const [indexText, field] = input.dataset.policy!.split(":"), rule = baseRules[Number(indexText)] as unknown as Record<string, unknown>;
       rule[field] = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : field === "solitaryHours" ? Math.max(0, Math.min(72, Number(input.value) || 0)) : input.value; markSaveDirty();

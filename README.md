@@ -34,6 +34,7 @@ npm run dev      # vite dev server
 | `npm run check:playthrough` | Play two seeded prisons for four days each, checking live services, needs, population, and ownership. |
 | `npm run check:browser` | Use Chromium with real WebGPU to test canvas construction, catalogs, controls, saving, and responsive UI. |
 | `npm run check:production` | After `npm run build`, verify bundled WebGPU rendering and catalog controls in Chromium. |
+| `npm run check:ui` | Chromium component checks for care, needs, policy, work search, and institutional dashboards. |
 
 ## Controls
 
@@ -59,6 +60,9 @@ Logistics mode opens stock, vehicles, exports, work assignments, and deployment.
 Intelligence mode shows the inmate roster and information the institution has
 learned; resident inspectors show welfare needs. Policy and management controls
 let you adjust searches, discipline, staffing, and active procedures.
+Open **Intelligence → Needs** for prison-wide urgent needs and links to affected
+residents. Work assignments, deployment and access lists can be searched, and
+policy fields show their names and explanations on phones.
 
 New prisons start paused. **Getting started** links to the tools for a delivery
 yard, workmen, Reception, housing, meals, and guards, and shows their current

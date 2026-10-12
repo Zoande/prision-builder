@@ -220,7 +220,9 @@
       #saveStatus { position:fixed; z-index:35; right:18px; bottom:184px; color:#91a19f; font-size:11px; }
       #saveControls { position:fixed; z-index:35; right:18px; bottom:194px; display:flex; gap:5px; }
       #saveControls button { padding:5px 8px; color:#cad5d0; background:#14252c; border:1px solid #33484d; border-radius:4px; cursor:pointer; font-size:10px; }
-      #intelligenceDashboard.show ~ #saveStatus, #intelligenceDashboard.show ~ #saveControls { display:none; }
+      #intelligenceDashboard.show ~ #saveStatus, #intelligenceDashboard.show ~ #saveControls,
+      #policyDashboard.show ~ #saveStatus, #policyDashboard.show ~ #saveControls,
+      #logisticsDashboard.show ~ #saveStatus, #logisticsDashboard.show ~ #saveControls { display:none; }
       #startMenu { position:fixed; z-index:120; inset:0; display:none; place-items:center; background:rgba(3,9,12,.82); }
       #startMenu.show { display:grid; }
       .start-card { width:min(520px,calc(100vw - 32px)); padding:24px; color:#eaf0ea; background:#0c1c24; border:1px solid #53666a; border-radius:10px; box-shadow:0 24px 80px #000c; }
@@ -321,7 +323,7 @@
     <aside id="logisticsDashboard" aria-label="Logistics dashboard"></aside>
     <aside id="financialsDashboard" aria-label="Financials dashboard"></aside>
     <aside id="policyDashboard" aria-label="Policy dashboard"></aside>
-    <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="intel-title-row"><div class="log-title">Prisoner intelligence</div><button type="button" class="tiny-btn" data-close-dashboard aria-label="Close intelligence">Close</button></div><input id="intelSearch" aria-label="Search inmates" placeholder="Search official records or known cases"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and evidence-backed assessments are visible here.</div></section></aside>
+    <aside id="intelligenceDashboard" aria-label="Prisoner intelligence dashboard"><section class="intel-roster"><div class="intel-roster-head"><div class="intel-title-row"><div class="log-title">Prisoner intelligence</div><button type="button" id="intelNeedsButton" class="tiny-btn" aria-label="Toggle prison-wide needs" aria-pressed="false">Needs</button><button type="button" class="tiny-btn" data-close-dashboard aria-label="Close intelligence">Close</button></div><input id="intelSearch" aria-label="Search inmates" placeholder="Search official records or known cases"></div><div id="intelRoster"></div></section><section id="intelProfile" class="intel-profile"><div class="profile-title">Select an inmate</div><div class="profile-sub">Only official records and evidence-backed assessments are visible here.</div></section><section id="intelWelfare" class="intel-profile" hidden aria-label="Prison-wide resident needs"></section></aside>
     <div id="notice" role="status" aria-live="polite"></div><div id="saveStatus" aria-live="polite">Not saved</div>
     <div id="saveControls"><button id="saveNowBtn" type="button">Save now</button><button id="exportSaveBtn" type="button">Export</button><button id="importSaveBtn" type="button">Import</button><button id="newGameBtn" type="button">New game</button><input id="importSaveFile" type="file" accept="application/json" hidden></div>
     <div id="startMenu"><div class="start-card"><h1>Fresh v6 prison required</h1><p>This release rebuilds construction, logistics, intake, and persistence. Version-5 saves are intentionally not migrated. You can download the old save before starting fresh.</p><div class="start-actions"><button id="freshStartBtn" type="button">Start fresh</button><button id="downloadOldBtn" type="button">Download old save</button></div></div></div>
