@@ -24,6 +24,13 @@ const warnings = {
   health: ["Treatment is blocked by missing bandages", "A concealed body is producing a detectable odor"],
   work: ["Contract output is waiting for a valid Exports room", "Laundry is waiting for supervision"],
   facility: ["A Gatehouse is unmanned; vehicles are leaving unchecked"],
+  visitation: ["Family visit screening is waiting for an available guard",
+    "Family visits are waiting for a valid Visitation Room with a screening desk and table",
+    "Family visits need a valid Visitation Room with a Visitor Search Desk and Visit Table or Visit Screen",
+    "Family visits need a public Gatehouse beside accessible outdoor space",
+    "Family visits are waiting for a guard at the public Gatehouse",
+    "Family visit for inmate 28 is paused while the resident is unavailable",
+    "Family visits need Visitor access from the public Gatehouse to the Visitation Room. Review Area Access along the route."],
   management: ["Chief Officer has no unclaimed valid Management Office"],
 };
 const problems = collectServiceProblems({
@@ -44,6 +51,12 @@ assert.deepEqual(action("Payroll Safe"), { kind: "catalog", label: "Place a Payr
 assert.deepEqual(action("Solitary order"), { kind: "catalog", label: "Build a Solitary Cell", mode: "rooms", section: "rooms:utility" });
 assert.deepEqual(action("active inmate gangs"), { kind: "mode", label: "Review intelligence", mode: "intelligence" });
 assert.deepEqual(action("Exports room"), { kind: "catalog", label: "Build an Exports room", mode: "rooms", section: "rooms:logistics" });
+assert.deepEqual(action("available guard"), { kind: "catalog", label: "Assign guards", mode: "staff", section: "staff:deploy" });
+assert.deepEqual(action("screening desk and table"), { kind: "catalog", label: "Open visitation objects", mode: "objects", section: "objects:visitation" });
+assert.deepEqual(action("resident is unavailable"), { kind: "mode", label: "Review resident care", mode: "intelligence" });
+assert.deepEqual(action("guard at the public Gatehouse"), { kind: "catalog", label: "Assign guards", mode: "staff", section: "staff:deploy" });
+assert.deepEqual(action("public Gatehouse beside"), { kind: "catalog", label: "Place a Gatehouse", mode: "objects", section: "objects:security" });
+assert.deepEqual(action("Visitor access"), { kind: "catalog", label: "Review access", mode: "rooms", section: "rooms:access" });
 assert.ok(!problems.some((problem) => /contraband market|concealed body/i.test(problem.message)), "hidden state isn't surfaced as an operational alert");
 const validSections = new Set(catalogSnapshot().map((row) => row.section));
 for (const problem of problems) for (const row of problem.actions) {

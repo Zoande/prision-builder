@@ -11,6 +11,9 @@ import { CUSTODY_COLORS } from "./profiles.ts";
 
 export const PERSON_INSTANCE_FLOATS = 19;
 
+export interface VisitorPresentation { x: number; z: number; heading: number; phase: number; state: string; }
+const NO_VISITORS: readonly VisitorPresentation[] = [];
+
 export interface InstanceBatch {
   data: Float32Array;
   count: number;
@@ -38,13 +41,14 @@ export class PersonInstanceStager {
     this.instances.workmen, this.instances.snipers,
   ];
 
-  stage(agents: readonly Agent[]): PersonInstances {
+  stage(agents: readonly Agent[], visitors: readonly VisitorPresentation[] = NO_VISITORS): PersonInstances {
     for (const batch of this.all) batch.count = 0;
     for (const ag of agents) {
       if (ag.underground || ag.state === "removed") continue;
       const batch = this.batch(ag.kind);
       if (batch) batch.count++;
     }
+    this.instances.prisoners.count += visitors.length;
     for (const batch of this.all) this.ensureCapacity(batch, batch.count * PERSON_INSTANCE_FLOATS);
 
     const offsets = { prisoners: 0, guards: 0, cooks: 0, workmen: 0, snipers: 0 };
@@ -76,6 +80,20 @@ export class PersonInstanceStager {
       const social = ag.socialAction === "talking" ? 1 : ag.socialAction === "arguing" ? 2 : 0;
       batch.data[o++] = profile ? (profile.body.posture + 1) * .5 + profile.body.gesture * 2 + social * 8 + profile.body.scars * 24 + profile.body.tattoos * 96 : 0;
       offsets[key] = o;
+    }
+    // Visitors share the unarmed civilian mesh but wear a distinct teal color.
+    // They remain separate from inmate/staff simulation records and payroll.
+    const batch = this.instances.prisoners;
+    let o = offsets.prisoners;
+    for (const visitor of visitors) {
+      const walking = ["toScreening", "toTable", "leaving"].includes(visitor.state);
+      batch.data[o++] = visitor.x; batch.data[o++] = visitor.z; batch.data[o++] = visitor.heading;
+      batch.data[o++] = 0; batch.data[o++] = 0; batch.data[o++] = visitor.phase;
+      batch.data[o++] = walking ? 1 : 0; batch.data[o++] = 0;
+      batch.data[o++] = 0; batch.data[o++] = 0; batch.data[o++] = 0;
+      batch.data[o++] = 1; batch.data[o++] = 1; batch.data[o++] = .52; batch.data[o++] = .25;
+      batch.data[o++] = .2; batch.data[o++] = .65; batch.data[o++] = .68;
+      batch.data[o++] = visitor.state === "contact" ? 8 : 0;
     }
     return this.instances;
   }

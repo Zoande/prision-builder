@@ -227,14 +227,22 @@ export class AreaSystem {
 
   private defaultAccess(areaId: number, world: World, tiles: Set<number>): AreaAccessPolicy {
     const roles = { ...ROLE_DEFAULTS }, custody = { ...CUSTODY_DEFAULTS };
+    let publicExterior = false;
     for (const tile of tiles) {
+      const x = tile % this.size, z = (tile / this.size) | 0;
+      if (x === 0 || z === 0 || x === this.size - 1 || z === this.size - 1) publicExterior = true;
       const room = world.rooms.get(world.roomId[tile]);
-      if (!room?.valid) continue;
+      if (!room) continue;
+      if (room.type === RoomType.Visitation) roles.visitor = true;
+      if (!room.valid) continue;
       if (roomDef(room.type)?.prisonerAccess || [RoomType.Cell, RoomType.Dorm].includes(room.type as never)) {
         roles.prisoner = true;
         custody.minimum = custody.medium = custody.maximum = custody.supermax = true;
       }
     }
+    // Ordinary visitors can use public outdoor space and designated visit
+    // rooms. Staff, cell, and custody access policies keep their usual defaults.
+    if (publicExterior) roles.visitor = true;
     return { areaId, roles, custody, mixed: true, reservedCustody: "" };
   }
 

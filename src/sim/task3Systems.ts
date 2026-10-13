@@ -10,6 +10,7 @@ import { ManagementSystem } from "./management.ts";
 import { Obj, RoomType } from "./objects.ts";
 import type { PrisonerSocialSystem } from "./social.ts";
 import { StaffProfileSystem } from "./staffProfiles.ts";
+import { VisitationSystem } from "./visitation.ts";
 import type { Task2Systems } from "./task2Systems.ts";
 import type { World } from "./world.ts";
 
@@ -22,6 +23,7 @@ export class Task3Systems {
   readonly management: ManagementSystem;
   readonly territories: GangTerritorySystem;
   readonly escape: AdvancedEscapeSystem;
+  readonly visitation: VisitationSystem;
   readonly warnings = new Set<string>();
   private readonly seededRooms = new Set<string>();
   private readonly materializedReports = new Set<number>();
@@ -40,6 +42,7 @@ export class Task3Systems {
       task2.market, task2.combat, task2.institution);
     this.escape = new AdvancedEscapeSystem(task2.items, this.credentials, this.facility, task2.institution,
       task2.combat, task2.market, task2.work, this.staff, this.management, task2.gangs, this.territories, logistics);
+    this.visitation = new VisitationSystem(task2.market, task2.areas, this.facility);
   }
 
   installNewGame(world: World, time: number): void { this.facility.recompute(world); this.refreshFacilities(world, time); }
@@ -60,19 +63,39 @@ export class Task3Systems {
     this.management.tick(dt, time, world, agents, tunnels);
     this.territories.tick(dt, time, world, agents, social);
     this.escape.tick(dt, time, world, agents, social, operations);
+    this.visitation.tick(dt, time, world, agents, (id) => {
+      const agent = agents.find((candidate) => candidate.id === id);
+      return this.task2.health.isUnavailable(id) || this.hasEscapeVisitorCommitment(id) ||
+        (!!agent && this.isActiveEscapeExecution(agent));
+    });
     this.applyCompromisedBehavior(time, world, agents);
     this.materializeReports(time);
-    for (const source of [this.facility.warnings, this.management.warnings, this.territories.warnings, this.escape.warnings]) for (const warning of source) this.warnings.add(warning);
+    for (const source of [this.facility.warnings, this.management.warnings, this.territories.warnings, this.escape.warnings,
+      this.visitation.warnings]) for (const warning of source) this.warnings.add(warning);
   }
 
-  updateStaff(agent: Agent, dt: number, _time: number, world: World, urgentResponse: boolean): boolean {
+  updateStaff(agent: Agent, dt: number, time: number, world: World, urgentResponse: boolean): boolean {
+    if (this.visitation.updateStaff(agent, dt, time, world, urgentResponse)) return true;
     if (this.management.updateManager(agent, dt, world)) return true;
     return this.facility.updateGuard(agent, dt, world, urgentResponse);
   }
   updatePrisoner(agent: Agent, dt: number, time: number, world: World, agents: readonly Agent[], activity?: number): boolean {
+    const activeEscape = this.isActiveEscapeExecution(agent);
+    if (this.visitation.updatePrisoner(agent, dt, time, world, agents, this.task2.health.isUnavailable(agent.id), activeEscape)) return true;
+    if (this.visitation.hasAppointment(agent.id) && !activeEscape) {
+      // While the visitor is still entering or being screened, keep the
+      // resident's normal needs AI available but suspend background escape
+      // movement so the resident cannot walk away from the rendezvous.
+      if (agent.state.startsWith("escape:")) { agent.path = null; agent.pathI = 0; agent.state = "idle"; }
+      return false;
+    }
     return this.escape.updatePrisoner(agent, dt, time, world, agents, activity,
       this.task2.health.isUnavailable(agent.id));
   }
+  isLegitimateVisitParticipant(agent: Agent): boolean {
+    return !this.isActiveEscapeExecution(agent) && this.visitation.isParticipant(agent);
+  }
+  visitationStatus() { return this.visitation.status(); }
   staffEfficiency(agent: Agent, time: number): number { return this.management.staffEfficiency(agent, time); }
   mayTakeSpoon(prisonerId: number, time: number): boolean {
     if (!this.management.procedure("spoon-count", time)) return true;
@@ -103,6 +126,7 @@ export class Task3Systems {
   saveData() { return {
     credentials: this.credentials.saveData(), staff: this.staff.saveData(), facility: this.facility.saveData(),
     management: this.management.saveData(), territories: this.territories.saveData(), escape: this.escape.saveData(),
+    visitation: this.visitation.saveData(),
     seededRooms: [...this.seededRooms], materializedReports: [...this.materializedReports],
     corruptionCooldown: [...this.corruptionCooldown], refreshT: this.refreshT,
   }; }
@@ -110,10 +134,30 @@ export class Task3Systems {
     this.credentials.loadData(data.credentials ?? {}); this.staff.loadData(data.staff ?? {});
     this.facility.loadData(data.facility ?? {}, world); this.management.loadData(data.management ?? {});
     this.territories.loadData(data.territories ?? {}); this.escape.loadData(data.escape ?? {});
+    this.visitation.loadData(data.visitation ?? {});
     this.seededRooms.clear(); for (const key of data.seededRooms ?? []) this.seededRooms.add(key);
     this.materializedReports.clear(); for (const id of data.materializedReports ?? []) this.materializedReports.add(id);
     this.corruptionCooldown.clear(); for (const [key, value] of data.corruptionCooldown ?? []) this.corruptionCooldown.set(key, value);
     this.refreshT = data.refreshT ?? 0;
+  }
+
+  private isActiveEscapeExecution(agent: Agent): boolean {
+    const action = agent.state.startsWith("escape:") ? agent.state.slice("escape:".length) : "";
+    const exitingAction = ["legacy-execute", "credential-walkout", "depart-vehicle", "visitation-exit", "medical-transfer", "outside-dig"];
+    const scheme = this.escape.schemeForAgent(agent.id);
+    // A scheme's status is aggregate across all members. Its `executing` state
+    // can describe another member's work while this inmate is only observing
+    // a background plan; that must not block ordinary appointments such as a
+    // family visit. Physical escape actions and legacy execute/flee stages are
+    // still exclusive.
+    return agent.plan?.stage === "execute" || agent.plan?.stage === "flee" || exitingAction.includes(action) ||
+      (!!scheme && scheme.state === "executing" && action !== "" && action !== "observe");
+  }
+
+  private hasEscapeVisitorCommitment(agentId: number): boolean {
+    const scheme = this.escape.schemeForAgent(agentId);
+    return !!scheme && scheme.mode === "visitation" && [...this.escape.commitments.values()].some((row) =>
+      row.schemeId === scheme.id && row.type === "visitor" && row.state !== "failed");
   }
 
   private refreshFacilities(world: World, time: number): void {

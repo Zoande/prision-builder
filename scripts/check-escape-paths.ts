@@ -195,7 +195,20 @@ function visitationRequiresLiveArrivalAndPhysicalPresentation(): void {
   f.prisoner.profile!.aptitudes.intelligence = 2;
   f.prisoner.profile!.aptitudes.creativity = 2;
   f.prisoner.profile!.skills.leadership.level = 2;
-  const time = run(f, 2400);
+  const familyNeedBeforeVisit = f.prisoner.needs.family;
+  let time = 0, previousFamilyNeed = f.prisoner.needs.family, sawVisitorPassComplete = false, observedContactReward = false;
+  for (let tick = 0; tick < 2400; tick++) {
+    time = advanceSimulation(f, time, .1);
+    const visitorPassComplete = f.scheme.nodes.some((node) => node.action === "acquire-item" && node.itemDefId === "visitor-pass" && node.state === "complete");
+    if (!sawVisitorPassComplete && visitorPassComplete) {
+      assert(f.prisoner.needs.family >= previousFamilyNeed + .4,
+        `the family need rises at the completed, arrived visitor handoff: previous=${previousFamilyNeed} now=${f.prisoner.needs.family}`);
+      observedContactReward = true;
+    }
+    sawVisitorPassComplete ||= visitorPassComplete;
+    previousFamilyNeed = f.prisoner.needs.family;
+    if (f.agents.escapedCount || f.prisoner.state === "caughtAtGatehouse" || f.prisoner.cuffed) break;
+  }
   const visitor = [...f.task3.escape.commitments.values()].find((row) => row.type === "visitor");
   assert(visitor, `the inmate arranges outside visitation; ${describe(f)}`);
   assert.equal(visitor.state, "fulfilled", "the visitor vehicle arrives and completes unloading");
@@ -206,7 +219,9 @@ function visitationRequiresLiveArrivalAndPhysicalPresentation(): void {
   assert(f.agents.escapedCount === 1, `visitor vehicle clears the gate with the inmate aboard at ${time}s`);
   assert(f.scheme.nodes.some((node) => node.action === "acquire-item" && node.itemDefId === "civilian-clothes" && node.state === "complete"));
   assert(f.scheme.nodes.some((node) => node.action === "acquire-item" && node.itemDefId === "visitor-pass" && node.state === "complete"));
-  assert(f.prisoner.needs.family >= .5, "meeting a live family visitor restores the inmate's family need");
+  assert(observedContactReward, "family benefit is earned at the arrived visitor handoff that completes the physical contact task");
+  assert(f.prisoner.needs.family > familyNeedBeforeVisit + .25,
+    `meeting a live family visitor improves the inmate's family need after ordinary time decay; before=${familyNeedBeforeVisit} after=${f.prisoner.needs.family}`);
 }
 
 function outsideDigUsesArrivedDiggerAndRealSpoons(): void {
@@ -368,7 +383,16 @@ function escapeAssignmentsYieldAndResume(): void {
   assert.equal(f.task3.updatePrisoner(f.prisoner, .1, 3.5, f.world, f.agents.agents), false,
     "an escorted prisoner cannot perform an advanced escape assignment");
   f.prisoner.escortedBy = -1; f.prisoner.state = "inTreatment";
-  const health = f.task2.health.ensure(f.prisoner); health.admitted = true;
+  const health = f.task2.health.ensure(f.prisoner);
+  f.task2.health.applyInjury(f.prisoner, "cut", "left-arm", .22, 3.5);
+  assert(health.consciousness > .08 && !health.admitted, "the medical transport regression uses a conscious, non-admitted patient");
+  // Medical transport itself sets the state but does not use escortedBy;
+  // guard ownership lives in the health job claim.
+  f.prisoner.escortedBy = -1; f.prisoner.state = "beingTransported";
+  assert.equal(f.task3.updatePrisoner(f.prisoner, .1, 3.55, f.world, f.agents.agents), false,
+    "a conscious patient under medical transport cannot perform an escape task before admission");
+  assert.equal(observe.progress, beforeCustody, "medical transport pauses escape progress before admission");
+  health.admitted = true; f.prisoner.state = "inTreatment";
   assert.equal(f.task3.updatePrisoner(f.prisoner, .1, 3.6, f.world, f.agents.agents), false,
     "a patient admitted to treatment cannot perform an advanced escape assignment");
   assert.equal(observe.progress, beforeCustody, "custody and treatment do not erase graph progress");

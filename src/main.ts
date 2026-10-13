@@ -1075,7 +1075,16 @@ async function main() {
       : `Queued response${order.search !== "none" ? ` · ${order.search} search` : ""}${order.interrogate ? " · Interview" : ""}`).join("; ") : "No active discipline";
     const state = actor.state.startsWith("escape:") ? actor.path ? "Moving" : "Occupied"
       : STATE_TEXT[actor.state] ?? actor.state.replace(/([A-Z])/g, " $1");
-    return { state, housing, escort: escortText, medical, discipline, warnings, actions };
+    const visitStatus = task3.visitationStatus();
+    const visitLabels: Record<string, string> = {
+      waitingGate: "Guest waiting at entrance", toScreening: "Guest arriving for screening",
+      waitingScreen: "Guest waiting for screening", toTable: "Guest on the way to visitation",
+      waitingPrisoner: "Guest waiting at table", contact: "Visiting family", leaving: "Guest leaving",
+    };
+    const visit = visitStatus.prisonerId === actor.id ? visitLabels[visitStatus.state] ?? "Visit scheduled" : "No current appointment";
+    if (!terminal && (visitStatus.prisonerId === actor.id || actor.needs.family < .25))
+      actions.push({ label: "Visitation facilities", mode: "rooms", section: "rooms:staff" });
+    return { state, housing, escort: escortText, medical, discipline, visit, warnings, actions };
   }
   document.addEventListener("click", event => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-care-action]");
@@ -1104,7 +1113,7 @@ async function main() {
       const actions: Partial<Record<typeof NEEDS[number], WelfareNeedAction>> = {
         food: { mode: "objects", section: "objects:dining", label: "Dining" }, sleep: basic, hygiene: basic, bladder: basic,
         outdoors: basic, privacy: basic, comfort: living, recreation: living, exercise: living, spirituality: living, social: living,
-        family: { mode: "rooms", section: "rooms:work", label: "Mail Room" },
+        family: { mode: "rooms", section: "rooms:staff", label: "Visitation" },
         safety: { mode: "staff", section: "staff:deploy", label: "Guard posts" },
       };
       welfareOverview.update({ population: residents.length, needs: NEEDS.map(need => ({ id: need, label: needLabels[need],
@@ -1593,7 +1602,7 @@ async function main() {
     for (const problem of collectServiceProblems({
       security: task2.security.warnings, market: task2.market.warnings, gangs: task2.gangs.warnings,
       health: task2.health.warnings, work: task2.work.warnings,
-      facility: task3.facility.warnings, management: task3.management.warnings,
+      facility: task3.facility.warnings, management: task3.management.warnings, visitation: task3.visitation.warnings,
       constructionGroups: construction.groups.values(),
       stock: { available: commodity => logistics.quantity(commodity), incoming: commodity => logistics.incoming(commodity) },
     })) problems.add(problem);
@@ -2050,7 +2059,7 @@ async function main() {
     const peopleKey = `${worldTime}:${saveRevision}:${renderRevision}`;
     if (peopleKey !== peopleStateKey) {
       peopleStateKey = peopleKey;
-      people.update(device, personStager.stage(agents.agents));
+      people.update(device, personStager.stage(agents.agents, task3.visitation.visitors));
     }
     if (agents.takeWorldDirty()) { dirty = true; markSaveDirty(); } // fences cut / repaired
     else if (agents.takeMealsDirty()) { refreshFurniture(); markSaveDirty(); }
@@ -2216,6 +2225,7 @@ async function main() {
   if (import.meta.env.DEV && new URLSearchParams(location.search).has("playtest")) {
     const bridge = {
       snapshot: saveSnapshot,
+      visitation: () => task3.visitation.status(),
       inspect: () => ({ time: worldTime, speed, cash: economy.cash, floor: Array.from(world.floorMat),
         agents: agents.agents.map((agent) => ({ id: agent.id, kind: agent.kind, state: agent.state, x: agent.x, z: agent.z })),
         orders: [...construction.groups.values()].map((group) => ({ id: group.id, state: group.state, blocker: group.blocker })),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { AreaSystem } from "../src/sim/areas.ts";
-import { World } from "../src/sim/world.ts";
+import { Obj, RoomType, World } from "../src/sim/world.ts";
 
 function enclosure(world: World, x0: number, z0: number, w: number, h: number, doorX: number): void {
   for (let x = x0; x < x0 + w; x++) { world.setWall(x, z0, 1); world.setWall(x, z0 + h - 1, 1); }
@@ -103,4 +103,38 @@ assert.equal(merge.areaAt[smallTile], preMergeExteriorId, "breached room joins t
 assert.notEqual(preMergeSmallId, preMergeExteriorId);
 assert(!merge.access.has(preMergeSmallId), "merged-away component access policy is removed");
 assert([...merge.access.keys()].every((id) => merge.areas.has(id)), "merge leaves no stale access records");
+
+// New prisons need ordinary visitor access on public outdoor space and inside
+// a designated visitation area, while custody rooms retain their restrictions.
+const accessWorld = new World(64);
+enclosure(accessWorld, 4, 20, 10, 10, 8);
+enclosure(accessWorld, 24, 20, 12, 12, 30);
+const cellTiles = new Set<number>(), visitationTiles = new Set<number>();
+for (let z = 21; z < 29; z++) for (let x = 5; x < 13; x++) {
+  const tile = accessWorld.idx(x, z); accessWorld.roomId[tile] = 101; cellTiles.add(tile);
+}
+for (let z = 21; z < 31; z++) for (let x = 25; x < 35; x++) {
+  const tile = accessWorld.idx(x, z); accessWorld.roomId[tile] = 102; visitationTiles.add(tile);
+}
+accessWorld.rooms.set(101, { id: 101, type: RoomType.Cell, access: 0, tiles: cellTiles, valid: true, ambience: 0, guards: 0 });
+accessWorld.rooms.set(102, { id: 102, type: RoomType.Visitation, access: 0, tiles: visitationTiles, valid: true, ambience: 0, guards: 0 });
+assert(accessWorld.placePiece(27, 24, Obj.VisitTable, 0));
+assert(accessWorld.placePiece(31, 24, Obj.VisitorSearchDesk, 0));
+const defaulted = new AreaSystem(accessWorld.size); defaulted.recompute(accessWorld);
+const publicAreaId = defaulted.areaAt[accessWorld.idx(1, 1)];
+const cellAreaId = defaulted.areaAt[accessWorld.idx(6, 22)];
+const visitationAreaId = defaulted.areaAt[accessWorld.idx(26, 22)];
+assert.equal(defaulted.access.get(publicAreaId)?.roles.visitor, true, "public exterior admits ordinary visitors by default");
+assert.equal(defaulted.access.get(visitationAreaId)?.roles.visitor, true, "a valid visitation room admits its scheduled visitor by default");
+assert.equal(defaulted.access.get(cellAreaId)?.roles.visitor, false, "visitor defaults do not open cell areas");
+assert.equal(defaulted.access.get(cellAreaId)?.roles.prisoner, true, "cell access remains restricted to prisoner custody policy");
+const explicitlyDenied = defaulted.saveData();
+for (const areaId of [publicAreaId, visitationAreaId]) {
+  const policy = explicitlyDenied.access.find((row) => row.areaId === areaId)!;
+  policy.roles.visitor = false;
+}
+const deniedRestore = new AreaSystem(accessWorld.size);
+deniedRestore.loadData(explicitlyDenied); deniedRestore.recompute(accessWorld);
+assert.equal(deniedRestore.access.get(publicAreaId)?.roles.visitor, false, "cold restore preserves a deliberate public-area visitor denial");
+assert.equal(deniedRestore.access.get(visitationAreaId)?.roles.visitor, false, "cold restore does not auto-unlock a deliberate room visitor denial");
 console.log("cold area-access restore, topology reorder, role/custody preservation, and legacy v6 fallback passed");

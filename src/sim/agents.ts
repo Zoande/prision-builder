@@ -1771,7 +1771,7 @@ export class Agents {
         const excused = p.needs.hygiene < 0.1 &&
           usingKind(world, p) === Obj.Shower;
         const defying = this.curActivity !== REG.Free && !p.compliant &&
-          !actingInRegime(this.curActivity, p, world) && !excused;
+          !actingInRegime(this.curActivity, p, world) && !excused && !(this.task3?.isLegitimateVisitParticipant(p) ?? false);
         if (!outOfLine && !defying) continue;
         if (!canSee(ag, world, p.x, p.z)) continue;
         // A starving man gets marched to the canteen, not back to his cell —

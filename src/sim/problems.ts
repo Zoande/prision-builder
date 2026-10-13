@@ -8,7 +8,7 @@ export type ProblemAction =
 export interface Problem {
   id: string;
   severity: ProblemSeverity;
-  source: "construction" | "room" | "logistics" | "intake" | "staff" | "kitchen" | "work" | "health" | "security" | "management" | "market" | "gangs" | "facility";
+  source: "construction" | "room" | "logistics" | "intake" | "staff" | "kitchen" | "work" | "health" | "security" | "management" | "market" | "gangs" | "facility" | "visitation";
   message: string;
   x: number;
   z: number;
