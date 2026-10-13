@@ -38,7 +38,7 @@ import { RoomLinePass } from "./render/roomLinePass";
 import { SkyPass } from "./render/skyPass";
 import { GhostPass } from "./render/ghostPass";
 import { pickGround } from "./render/pick";
-import { configureAssets, type Quality } from "./render/assets";
+import { configureAssets, resolveTextureQuality, type Quality } from "./render/assets";
 import { GLOBALS_SIZE, writeGlobals } from "./render/shaderCommon";
 import { WorldOverlay, type PreviewTile } from "./ui/worldOverlay";
 import { EconomySystem } from "./sim/economy";
@@ -108,14 +108,26 @@ async function main() {
   const format = navigator.gpu.getPreferredCanvasFormat();
   ctx.configure({ device, format, alphaMode: "opaque" });
 
-  // Texture quality (High 4K / Low 1K), persisted.
-  const quality: Quality = localStorage.getItem("texQuality") === "1k" ? "1k" : "4k";
+  // Resolve the saved preference against compressed files present in this build.
+  const requestedQuality: Quality = localStorage.getItem("texQuality") === "1k" ? "1k" : "4k";
+  const qualitySupport = resolveTextureQuality(requestedQuality, bcSupported);
+  const quality = qualitySupport.quality;
   configureAssets({ quality, bcSupported });
   const qualBtn = document.getElementById("qualBtn") as HTMLButtonElement;
-  if (!bcSupported) { qualBtn.textContent = "RAW"; qualBtn.title = "Raw textures (BC compression unavailable)"; qualBtn.disabled = true; }
-  else {
+  if (qualitySupport.mode === "compressed") {
     qualBtn.textContent = quality === "4k" ? "HQ" : "LQ";
     qualBtn.title = quality === "4k" ? "Texture quality: High (4K)" : "Texture quality: Low (1K)";
+  } else if (qualitySupport.mode === "mixed") {
+    qualBtn.textContent = "MIX";
+    qualBtn.title = "Mixed resolution: some textures use 1K fallback";
+  } else {
+    qualBtn.textContent = "1K";
+    qualBtn.title = qualitySupport.bcSupported
+      ? "Texture quality: 1K (higher resolutions unavailable in this build)"
+      : "Texture quality: 1K (higher resolutions unsupported by this device)";
+  }
+  if (!qualitySupport.canToggle) qualBtn.disabled = true;
+  else {
     qualBtn.addEventListener("click", () => {
       localStorage.setItem("texQuality", quality === "4k" ? "1k" : "4k");
       location.reload();
