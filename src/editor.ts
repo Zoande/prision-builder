@@ -538,7 +538,7 @@ export class Editor {
     if (item.tool.cat === "room") {
       const room = ROOM_DEFS.find((row) => row.type === item.tool.mat);
       const requirements = room?.requires.map((req) => req.issue.replace(/^Needs? /, "").replace(/\.$/, "")).join(", ");
-      return `Mark a zone as a ${item.label.toLowerCase()}.` +
+      return `Finish the enclosing walls or fences and an entrance, then paint the interior as a ${item.label.toLowerCase()}.` +
         (room?.minSquare ? ` Minimum clear area: ${room.minSquare}\u00d7${room.minSquare}.` : "") +
         (requirements ? ` Requires: ${requirements}.` : "");
     }

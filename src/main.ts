@@ -1184,6 +1184,12 @@ async function main() {
     dragPlaced = new Set();
     if (editor.tool?.cat === "room") {
       editor.roomDrag = world.startRoomPaint(tile.x, tile.z, editor.tool.mat);
+      if (editor.roomDrag === 0) {
+        painting = false;
+        dragStart = null;
+        notify("Finish the enclosing walls or fences and add an entrance, then start painting on an interior tile.");
+        return;
+      }
     }
     if (editor.tool?.cat === "patrol") {
       editor.routeDrag = world.startRoute(editor.tool.mat);
@@ -1277,7 +1283,11 @@ async function main() {
     toEat: "Going to eat leftovers", eating: "Eating", toSleep: "Heading to bed",
     sleeping: "Sleeping", toSit: "Going to sit down", sitting: "Sitting",
     toOutside: "Heading outside", outside: "Getting fresh air",
-    cuffed: "Handcuffed — waiting for a cell", escorted: "Being escorted",
+    cuffed: "Handcuffed", escorted: "Being escorted",
+    restrained: "Restrained after an incident", custodyEscort: "Returning a resident to their cell",
+    solitary: "In solitary confinement", eatingHeldMeal: "Eating a carried meal",
+    beingTransported: "Being taken to medical care", inTreatment: "Receiving treatment",
+    incapacitated: "Needs medical care", staffBreak: "On a staff break",
     climbing: "CLIMBING THE FENCE", cutting: "CUTTING THE FENCE",
     sneakWait: "Waiting for a clear moment", toBreach: "Sneaking toward the fence",
     fleeing: "MAKING A RUN FOR IT", retreating: "Sneaking back home",
@@ -1301,6 +1311,11 @@ async function main() {
     toBuild: "Walking to a construction site", constructing: "Building", demolishing: "Demolishing",
     toBookCargo: "Collecting library stock", deliverBookCargo: "Stocking the library",
     toExportCargo: "Collecting export goods", deliverExportCargo: "Delivering goods to Exports",
+    toWork: "Heading to assigned work", working: "Working",
+    workMissingTool: "Waiting for work tools", workMissingInputs: "Waiting for work supplies",
+    workWaiting: "Waiting to work", workUnreachable: "Workplace route blocked",
+    toWorkInput: "Collecting work supplies", carryingWorkInput: "Delivering work supplies",
+    toWorkExport: "Collecting contract goods", carryingWorkExport: "Delivering contract goods to Exports",
   };
   function debugTipText(ag: Agent): string {
     const kind = ag.kind === 8 ? "Prisoner" : ag.kind === 9 ? "Guard" :
