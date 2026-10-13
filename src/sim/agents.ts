@@ -2192,6 +2192,30 @@ export class Agents {
 
   // --- Workman -----------------------------------------------------------------
 
+  /** Find a construction stance, recovering if a completed wall has trapped
+   * the worker on its tile. `pathAdjacent` accepts the worker's current tile as
+   * a one-node route even when that tile is no longer passable; discard that
+   * route and path out to a different open side of the site. */
+  private pathAdjacentForConstruction(ag: Agent, target: number, world: World): boolean {
+    if (!pathAdjacent(ag, world, target, (i) => passable(world, i, true))) return false;
+    const current = world.idx(Math.floor(ag.x), Math.floor(ag.z));
+    const open = (i: number) => passable(world, i, true, ag.accessKeys);
+    if (ag.path?.length !== 1 || ag.path[0] !== current || open(current)) return true;
+    let best: number[] | null = null;
+    const tx = target % world.size, tz = (target / world.size) | 0;
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const x = tx + dx, z = tz + dz;
+      if (!world.inBounds(x, z)) continue;
+      const tile = world.idx(x, z);
+      if (tile === current || !open(tile)) continue;
+      const path = astar(world.size, current, tile, open, 30000, (from, to) => world.canNavigateEdge(from, to));
+      if (path && (!best || path.length < best.length)) best = path;
+    }
+    ag.path = best;
+    ag.pathI = 0;
+    return best !== null;
+  }
+
   updateWorkman(ag: Agent, dt: number, world: World) {
     const size = world.size;
     if (this.task2?.work.updateHauler(ag, dt, this.simTime, world, false)) return;
@@ -2318,8 +2342,18 @@ export class Agents {
           ag.buildGroup = -1; ag.buildTarget = -1; ag.state = "idle";
         }
       } else if (target.state === "working") {
-        if (pathAdjacent(ag, world, world.idx(target.x, target.z), (i) => passable(world, i, true))) {
-          ag.state = target.progress > 0 ? "toBuildResume" : "toBuild";
+        if (this.pathAdjacentForConstruction(ag, world.idx(target.x, target.z), world)) {
+          // pathAdjacent returns [currentTile] when a worker already stands
+          // beside this site. In that case there is no travel frame to consume
+          // the path and start construction; repeatedly assigning toBuild here
+          // leaves a claimed target idle forever. Start its work phase directly.
+          if ((ag.path as number[] | null)?.length === 1 && ag.pathI === 0) {
+            ag.path = null;
+            ag.state = group.operation === "demolish" ? "demolishing" : "constructing";
+            if (ag.timer <= 0) ag.timer = target.workSeconds * (1 - target.progress);
+          } else {
+            ag.state = target.progress > 0 ? "toBuildResume" : "toBuild";
+          }
           return;
         } else {
           this.construction!.releaseClaim(group.id, target.id, ag.id, "Unreachable construction site");
@@ -2422,11 +2456,20 @@ export class Agents {
         const idx = pkg
           ? world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(pkg.x))), Math.max(0, Math.min(world.size - 1, Math.floor(pkg.z))))
           : world.idx(claim.target.x, claim.target.z);
-        if (pathAdjacent(ag, world, idx, (i) => passable(world, i, true))) {
+        if (claim.phase === "work" ? this.pathAdjacentForConstruction(ag, idx, world) :
+            pathAdjacent(ag, world, idx, (i) => passable(world, i, true))) {
           ag.buildGroup = claim.group.id;
           ag.buildTarget = claim.target.id;
           ag.interact = claim.packageId;
-          ag.state = claim.phase === "haul" ? "toBuildCargo" : "toBuild";
+          if (claim.phase === "work" && (ag.path as number[] | null)?.length === 1 && ag.pathI === 0) {
+            // A worker claiming a ready site from an adjacent tile already has
+            // its work position. Avoid the empty one-tile movement loop.
+            ag.path = null;
+            ag.state = claim.group.operation === "demolish" ? "demolishing" : "constructing";
+            ag.timer = claim.target.workSeconds * (1 - claim.target.progress);
+          } else {
+            ag.state = claim.phase === "haul" ? "toBuildCargo" : "toBuild";
+          }
           return;
         }
         this.construction.releaseClaim(claim.group.id, claim.target.id, ag.id, "Unreachable construction site");
