@@ -23,7 +23,8 @@
     "check:sim-frame-browser": "node scripts/check-sim-frame-browser.mjs",
     "check:texture-quality": "node scripts/check-texture-quality.ts",
     "check:visitation-browser": "node scripts/check-visitation-browser.mjs",
-    "check:procurement": "node scripts/check-recurring-procurement.ts"
+    "check:procurement": "node scripts/check-recurring-procurement.ts",
+    "check:player-building": "node scripts/check-player-construction-browser.mjs"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.40",
