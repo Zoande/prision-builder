@@ -403,7 +403,7 @@ export class Agents {
       }
       if (ag.kind === Obj.Prisoner && this.task3?.updatePrisoner(ag, dt, this.simTime, world, this.agents, this.curActivity)) { /* advanced escape task */ }
       else if (ag.kind === Obj.Prisoner && this.curActivity === REG.Work &&
-          this.task2?.work.updateWorker(ag, dt, this.simTime, world)) { /* assigned prison work */ }
+          this.task2?.work.updateWorker(ag, dt, this.simTime, world, this.task2.health.isUnavailable(ag.id))) { /* assigned prison work */ }
       else if (ag.kind === Obj.Prisoner) this.updatePrisoner(ag, dt, world, isNight);
       else if (ag.kind === Obj.Cook) this.updateCook(ag, dt * this.staffPerformance * (this.task3?.staffEfficiency(ag, this.simTime) ?? 1), world);
       else if (ag.kind === Obj.Doctor) {
@@ -1764,14 +1764,17 @@ export class Agents {
         if (p.escortedBy >= 0 || p.state === "escorted") continue;
         if (p.plan && (p.plan.stage === "execute" || p.plan.stage === "flee")) continue;
         const pi = Math.floor(p.z) * size + Math.floor(p.x);
-        const outOfLine = p.sneaking || !prisonerAllowed(world, pi);
+        const authorizedWork = this.task2?.work.isAuthorizedWorkerAt(p, pi, world,
+          this.curActivity === REG.Work, this.task2.health.isUnavailable(p.id)) ?? false;
+        const custody = p.protectiveCustody ? "protective" : p.profile?.custody ?? "minimum";
+        const outOfLine = p.sneaking || (!prisonerAllowed(world, pi, p.accessKeys, custody) && !authorizedWork);
         // "Defiant" on paper but already doing the right thing? Leave him be.
         // Ditto a visibly filthy man off to a shower he's allowed to reach —
         // purposeful defiance is tolerated (trespassing still isn't).
         const excused = p.needs.hygiene < 0.1 &&
           usingKind(world, p) === Obj.Shower;
         const defying = this.curActivity !== REG.Free && !p.compliant &&
-          !actingInRegime(this.curActivity, p, world) && !excused && !(this.task3?.isLegitimateVisitParticipant(p) ?? false);
+          !actingInRegime(this.curActivity, p, world) && !excused && !authorizedWork && !(this.task3?.isLegitimateVisitParticipant(p) ?? false);
         if (!outOfLine && !defying) continue;
         if (!canSee(ag, world, p.x, p.z)) continue;
         // A starving man gets marched to the canteen, not back to his cell —

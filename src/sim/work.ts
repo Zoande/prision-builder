@@ -86,6 +86,21 @@ export class WorkSystem {
     this.items = items; this.economy = economy; this.logistics = logistics;
   }
 
+  /** A resident gets the worker-only route exemption only for assigned,
+   * active work while fit and out of custody. */
+  isAuthorizedWorkerAt(agent: Agent, tile: number, world: World, scheduledWork: boolean, unavailable = false): boolean {
+    if (!scheduledWork || unavailable || agent.kind !== Obj.Prisoner || agent.sneaking || agent.cuffed ||
+        agent.escortedBy >= 0 || agent.state === "escorted" || agent.needs.food < 0.15 || agent.needs.sleep < 0.08) return false;
+    if (!(agent.state === "toWork" || agent.state === "working" || agent.state === "workMissingTool" ||
+          agent.state === "workMissingInputs" || agent.state === "workWaiting")) return false;
+    const roomId = this.assignments.get(agent.id), workplace = roomId === undefined ? null : this.workplaces.get(roomId);
+    if (!workplace || !world.rooms.get(workplace.roomId)?.valid) return false;
+    if (agent.state !== "toWork" && world.roomId[tile] !== workplace.roomId) return false;
+    const custody = agent.protectiveCustody ? "protective" : agent.profile?.custody ?? "minimum";
+    return passable(world, tile, false, agent.accessKeys) &&
+      (roleAllowed(world, tile, "worker", custody) || roleAllowed(world, tile, "prisoner", custody));
+  }
+
   refresh(world: World, time: number): void {
     const valid = new Set<number>();
     for (const room of world.rooms.values()) {
@@ -106,8 +121,9 @@ export class WorkSystem {
         this.workplaces.set(room.id, workplace);
       }
       workplace.capacity = this.capacity(room, def, world);
-      this.requestStock(workplace, def, time);
       workplace.assigned = [...this.assignments].filter(([, r]) => r === room.id).map(([id]) => id).sort((a, b) => a - b);
+      if (workplace.assigned.length) this.requestStock(workplace, def, time);
+      else this.logistics.cancelSource(`work:${workplace.roomId}`);
     }
     for (const roomId of [...this.workplaces.keys()]) if (!valid.has(roomId)) {
       const workplace = this.workplaces.get(roomId)!;
@@ -115,6 +131,7 @@ export class WorkSystem {
       // exist. Otherwise demolishing a workplace strands its tools in workers'
       // hands and lets a later assignment reuse the wrong job's equipment.
       for (const agentId of workplace.assigned) this.returnTool(agentId, time);
+      this.logistics.cancelSource(`work:${workplace.roomId}`);
       this.workplaces.delete(roomId);
     }
     for (const [agentId, roomId] of [...this.assignments]) if (!valid.has(roomId)) this.assignments.delete(agentId);
@@ -205,20 +222,35 @@ export class WorkSystem {
     void dt;
   }
 
-  updateWorker(agent: Agent, dt: number, time: number, world: World): boolean {
+  updateWorker(agent: Agent, dt: number, time: number, world: World, unavailable = false): boolean {
     const roomId = this.assignments.get(agent.id), workplace = roomId === undefined ? null : this.workplaces.get(roomId);
     if (!workplace) return false;
+    // The work schedule must not take priority over immediate care or custody
+    // transitions. Return controlled tools before ordinary prisoner routing
+    // takes over so they remain available in the workplace stock.
+    const workActivity = agent.state === "toWork" || agent.state === "working" || agent.state.startsWith("work");
+    if (unavailable || agent.cuffed || agent.escortedBy >= 0 || agent.state === "escorted" ||
+        agent.needs.food < 0.15 || agent.needs.sleep < 0.08) {
+      this.returnTool(agent.id, time);
+      if (workActivity) { agent.path = null; agent.pathI = 0; agent.state = "idle"; agent.amp = 0; }
+      return false;
+    }
     const room = world.rooms.get(workplace.roomId), def = this.def(workplace);
     if (!room?.valid) return false;
     if (workplace.blocked) { agent.state = "workWaiting"; agent.amp = 0; return true; }
     const target = this.stationTile(room, def, world);
     const here = world.idx(Math.floor(agent.x), Math.floor(agent.z));
     if (world.roomId[here] !== room.id || Math.hypot(agent.x - (target % world.size + .5), agent.z - (((target / world.size) | 0) + .5)) > 2.2) {
-      if (!agent.path) {
+      const custody = agent.protectiveCustody ? "protective" : agent.profile?.custody ?? "minimum";
+      const workAreaOpen = (i: number) => roleAllowed(world, i, "prisoner", custody) || roleAllowed(world, i, "worker", custody);
+      const pathStillAuthorized = !!agent.path && agent.pathI < agent.path.length && agent.path.slice(agent.pathI).every(i =>
+        passable(world, i, false, agent.accessKeys) && workAreaOpen(i));
+      if (!pathStillAuthorized) {
         const start = here;
-        const custody = agent.protectiveCustody ? "protective" : agent.profile?.custody ?? "minimum";
-        agent.path = astar(world.size, start, target, (i) => passable(world, i, false, agent.accessKeys) &&
-          roleAllowed(world, i, "worker", custody), 20000,
+        // Assigned residents may use either ordinary prisoner areas or areas
+        // explicitly authorized for inmate work, while custody and door rules
+        // remain enforced throughout the route.
+        agent.path = astar(world.size, start, target, (i) => passable(world, i, false, agent.accessKeys) && workAreaOpen(i), 20000,
           (a, b) => world.canNavigateEdge(a, b));
         agent.pathI = 0;
       }
@@ -277,12 +309,15 @@ export class WorkSystem {
     const targetX = haul.phase === "pickup" ? item.x : exportContainer.x;
     const targetZ = haul.phase === "pickup" ? item.z : exportContainer.z;
     if (Math.hypot(agent.x - targetX, agent.z - targetZ) > 1.4) {
-      this.validateHaulPath(agent, targetX, targetZ, world);
+      this.validateHaulPath(agent, targetX, targetZ, world, haul.phase === "dropoff");
       if (!agent.path) {
-        const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
-        const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(targetX))), Math.max(0, Math.min(world.size - 1, Math.floor(targetZ))));
-        agent.path = astar(world.size, start, target, (i) => passable(world, i, true, agent.accessKeys) && roleAllowed(world, i, "workman"),
-          30000, (a, b) => world.canNavigateEdge(a, b)); agent.pathI = 0;
+        if (haul.phase === "dropoff") this.pathAdjacentForHaul(agent, targetX, targetZ, world);
+        else {
+          const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
+          const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(targetX))), Math.max(0, Math.min(world.size - 1, Math.floor(targetZ))));
+          agent.path = astar(world.size, start, target, (i) => passable(world, i, true, agent.accessKeys) && roleAllowed(world, i, "workman"),
+            30000, (a, b) => world.canNavigateEdge(a, b)); agent.pathI = 0;
+        }
       }
       if (!agent.path || agent.pathI >= agent.path.length) { this.warnings.add("A contract output cannot reach Exports"); this.clearHaul(agent.id, haul.itemId); return false; }
       const next = agent.path[agent.pathI], nx = next % world.size + .5, nz = ((next / world.size) | 0) + .5;
@@ -351,33 +386,64 @@ export class WorkSystem {
   }
   private requestStock(workplace: Workplace, def: JobDef, time: number): void {
     const demand: Record<string, number> = {};
+    const stock = this.items.itemsIn(workplace.stockContainer);
     for (const toolId of def.toolIds) {
       const target = Math.max(1, Math.min(3, workplace.capacity || 1));
-      const issued = [...this.assignments].filter(([, roomId]) => roomId === workplace.roomId)
-        .reduce((sum, [agentId]) => {
-          const itemId = this.activeTools.get(agentId), item = itemId === undefined ? undefined : this.items.items.get(itemId);
-          return sum + (item?.defId === toolId && item.locationKind === "container" &&
-            item.containerId === `agent:${agentId}:hands` ? 1 : 0);
-        }, 0);
-      demand[toolId] = Math.max(0, target - issued - this.items.itemsIn(workplace.stockContainer).filter((i) => i.defId === toolId).length - this.logistics.pipelineQuantity(toolId));
+      // Each workplace reports its full local stock target. LogisticsSystem
+      // allocates shared free/in-transit quantities across all demand sources;
+      // subtracting its global pipeline here makes this source cancel itself
+      // on the next refresh and continually resets procurement age.
+      demand[toolId] = Math.max(0, target - this.localToolQuantity(workplace, toolId, stock));
     }
     for (const [defId, perJob] of Object.entries(JOB_INPUTS[def.id] ?? {})) {
       const target = Math.max(4, workplace.capacity * perJob * 3);
-      demand[defId] = Math.max(0, target - this.items.itemsIn(workplace.stockContainer).filter((i) => i.defId === defId).length - this.logistics.pipelineQuantity(defId));
+      demand[defId] = Math.max(0, target - this.localInputQuantity(workplace, defId, stock));
     }
     this.logistics.request(demand, time, false, `work:${workplace.roomId}`);
   }
+  private localToolQuantity(workplace: Workplace, toolId: string, stock = this.items.itemsIn(workplace.stockContainer)): number {
+    const issued = [...this.assignments].filter(([, roomId]) => roomId === workplace.roomId)
+      .reduce((sum, [agentId]) => {
+        const itemId = this.activeTools.get(agentId), item = itemId === undefined ? undefined : this.items.items.get(itemId);
+        return sum + (item?.defId === toolId && item.locationKind === "container" &&
+          item.containerId === `agent:${agentId}:hands` ? 1 : 0);
+      }, 0);
+    return stock.filter((item) => item.defId === toolId).length + issued + this.localReservedQuantity(workplace, toolId);
+  }
+  private localInputQuantity(workplace: Workplace, defId: string, stock = this.items.itemsIn(workplace.stockContainer)): number {
+    return stock.filter((item) => item.defId === defId).length + this.localReservedQuantity(workplace, defId);
+  }
+  private localReservedQuantity(workplace: Workplace, defId: string): number {
+    let reserved = 0;
+    for (const haul of this.inputHauls.values()) {
+      if (haul.roomId !== workplace.roomId) continue;
+      const pkg = this.logistics.packages.get(haul.packageId);
+      if (pkg?.commodity === defId) reserved += pkg.quantity;
+    }
+    return reserved;
+  }
   private claimInputHaul(agentId: number): boolean {
     for (const workplace of [...this.workplaces.values()].sort((a, b) => a.roomId - b.roomId)) {
+      if (!workplace.assigned.length) continue;
       const def = this.def(workplace), stock = this.items.itemsIn(workplace.stockContainer);
       const wanted = new Set<string>();
-      for (const toolId of def.toolIds) if (stock.filter((i) => i.defId === toolId).length < Math.max(1, Math.min(3, workplace.capacity || 1))) wanted.add(toolId);
-      for (const [defId, perJob] of Object.entries(JOB_INPUTS[def.id] ?? {})) if (stock.filter((i) => i.defId === defId).length < Math.max(4, workplace.capacity * perJob * 3)) wanted.add(defId);
+      for (const toolId of def.toolIds) if (this.localToolQuantity(workplace, toolId, stock) < Math.max(1, Math.min(3, workplace.capacity || 1))) wanted.add(toolId);
+      for (const [defId, perJob] of Object.entries(JOB_INPUTS[def.id] ?? {})) if (this.localInputQuantity(workplace, defId, stock) < Math.max(4, workplace.capacity * perJob * 3)) wanted.add(defId);
       const pkg = [...this.logistics.packages.values()].filter((p) => p.state === "delivery" && !p.reservedBy && wanted.has(p.commodity) && !this.inputClaims.has(p.id))
         .sort((a, b) => a.id - b.id)[0];
       if (!pkg) continue;
-      pkg.reservedBy = `work-input:${agentId}`; pkg.state = "reserved"; this.inputClaims.set(pkg.id, agentId);
-      this.inputHauls.set(agentId, { packageId: pkg.id, roomId: workplace.roomId, phase: "pickup" }); return true;
+      const toolTarget = Math.max(1, Math.min(3, workplace.capacity || 1));
+      const inputTarget = JOB_INPUTS[def.id]?.[pkg.commodity] === undefined ? 0 :
+        Math.max(4, workplace.capacity * JOB_INPUTS[def.id][pkg.commodity]! * 3);
+      const localQuantity = pkg.commodity in (JOB_INPUTS[def.id] ?? {})
+        ? this.localInputQuantity(workplace, pkg.commodity, stock)
+        : this.localToolQuantity(workplace, pkg.commodity, stock);
+      const needed = Math.max(0, (inputTarget || toolTarget) - localQuantity);
+      if (needed <= 0) continue;
+      const reserved = this.logistics.reserveBundle({ [pkg.commodity]: needed }, `work-input:${agentId}`);
+      if (!reserved) continue;
+      this.inputClaims.set(reserved.id, agentId);
+      this.inputHauls.set(agentId, { packageId: reserved.id, roomId: workplace.roomId, phase: "pickup" }); return true;
     }
     return false;
   }
@@ -389,12 +455,15 @@ export class WorkSystem {
     const targetX = haul.phase === "pickup" ? pkg.x : stock.x, targetZ = haul.phase === "pickup" ? pkg.z : stock.z;
     if (haul.phase === "dropoff") { pkg.x = agent.x; pkg.z = agent.z; pkg.state = "carried"; }
     if (Math.hypot(agent.x - targetX, agent.z - targetZ) > 1.4) {
-      this.validateHaulPath(agent, targetX, targetZ, world);
+      this.validateHaulPath(agent, targetX, targetZ, world, haul.phase === "pickup");
       if (!agent.path) {
-        const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
-        const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(targetX))), Math.max(0, Math.min(world.size - 1, Math.floor(targetZ))));
-        agent.path = astar(world.size, start, target, (i) => passable(world, i, true, agent.accessKeys) && roleAllowed(world, i, "workman"),
-          30000, (a, b) => world.canNavigateEdge(a, b)); agent.pathI = 0;
+        if (haul.phase === "pickup") this.pathAdjacentForHaul(agent, targetX, targetZ, world);
+        else {
+          const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
+          const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(targetX))), Math.max(0, Math.min(world.size - 1, Math.floor(targetZ))));
+          agent.path = astar(world.size, start, target, (i) => passable(world, i, true, agent.accessKeys) && roleAllowed(world, i, "workman"),
+            30000, (a, b) => world.canNavigateEdge(a, b)); agent.pathI = 0;
+        }
       }
       if (!agent.path || agent.pathI >= agent.path.length) {
         pkg.reservedBy = null; pkg.state = "delivery"; this.warnings.add(`${pkg.commodity} cannot reach workplace ${workplace.roomId}`);
@@ -472,12 +541,31 @@ export class WorkSystem {
   }
   private clearHaul(agentId: number, itemId: number): void { this.hauls.delete(agentId); this.haulClaims.delete(itemId); }
   private clearInputHaul(agentId: number, packageId: number): void { this.inputHauls.delete(agentId); this.inputClaims.delete(packageId); }
-  private validateHaulPath(agent: Agent, targetX: number, targetZ: number, world: World): void {
+  private pathAdjacentForHaul(agent: Agent, targetX: number, targetZ: number, world: World): void {
+    const x = Math.max(0, Math.min(world.size - 1, Math.floor(targetX)));
+    const z = Math.max(0, Math.min(world.size - 1, Math.floor(targetZ)));
+    const start = world.idx(Math.floor(agent.x), Math.floor(agent.z));
+    const adjacent = [[x - 1, z], [x + 1, z], [x, z - 1], [x, z + 1]]
+      .filter(([ax, az]) => ax! >= 0 && az! >= 0 && ax! < world.size && az! < world.size)
+      .map(([ax, az]) => world.idx(ax!, az!));
+    let best: number[] | null = null;
+    for (const target of adjacent) {
+      if (!passable(world, target, true, agent.accessKeys) || !roleAllowed(world, target, "workman")) continue;
+      const path = astar(world.size, start, target, (i) => passable(world, i, true, agent.accessKeys) && roleAllowed(world, i, "workman"),
+        30000, (a, b) => world.canNavigateEdge(a, b));
+      if (path && (!best || path.length < best.length)) best = path;
+    }
+    agent.path = best;
+    agent.pathI = 0;
+  }
+  private validateHaulPath(agent: Agent, targetX: number, targetZ: number, world: World, adjacent = false): void {
     if (!agent.path) return;
     const target = world.idx(Math.max(0, Math.min(world.size - 1, Math.floor(targetX))), Math.max(0, Math.min(world.size - 1, Math.floor(targetZ))));
     const here = world.idx(Math.floor(agent.x), Math.floor(agent.z));
     const next = agent.path[agent.pathI];
-    if (agent.path[agent.path.length - 1] !== target || (next !== undefined && next !== here && !world.canNavigateEdge(here, next))) {
+    const end = agent.path[agent.path.length - 1];
+    const endpointMatches = end === target || (adjacent && Math.abs(end % world.size - target % world.size) + Math.abs(((end / world.size) | 0) - ((target / world.size) | 0)) === 1);
+    if (!endpointMatches || (next !== undefined && next !== here && !world.canNavigateEdge(here, next))) {
       agent.path = null; agent.pathI = 0;
     }
   }
