@@ -50,7 +50,7 @@ export const JOB_DEFS: JobDef[] = [
   job("visitation", "Visitation porter", [RoomType.Visitation], [Obj.VisitTable, Obj.VisitScreen], true, "standard", [], "visitor-package", 40, 12, ["visitor-package", "cash-20", "civilian-clothes", "drugs"]),
 ];
 
-const JOB_INPUTS: Record<string, Record<string, number>> = {
+export const JOB_INPUTS: Record<string, Record<string, number>> = {
   laundry: { cloth: 1 }, greenhouse: { fertilizer: 1 }, janitorial: { chemical: 1 },
   grounds: { fertilizer: 1 }, recycling: { "metal-scrap": 1 }, woodshop: { "wood-scrap": 2 },
   metalshop: { "metal-scrap": 2 }, tailoring: { cloth: 2 }, maintenance: { wire: 1 },
