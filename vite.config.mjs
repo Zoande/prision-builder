@@ -1,9 +1,19 @@
 import { defineConfig } from "vite";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const savePath = resolve(process.cwd(), "prototype-save.json");
 const simLogPath = resolve(process.cwd(), "sim-log.jsonl");
+const compressedTexturePath = fileURLToPath(new URL("./public/textures/compressed", import.meta.url));
+
+function compressedTextureManifest() {
+  if (!existsSync(compressedTexturePath)) return [];
+  return readdirSync(compressedTexturePath, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /^[a-z0-9_]+\.(?:4k|1k)\.ktx$/i.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+}
 
 function readBody(req) {
   return new Promise((resolveBody, reject) => {
@@ -27,6 +37,9 @@ export default defineConfig({
         },
       },
     },
+  },
+  define: {
+    __AVAILABLE_COMPRESSED_TEXTURES__: JSON.stringify(compressedTextureManifest()),
   },
   plugins: [{
     name: "prototype-save-file",

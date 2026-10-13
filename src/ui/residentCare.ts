@@ -12,6 +12,7 @@ export interface ResidentCareFacts {
   escort: string;
   medical: string;
   discipline: string;
+  visit?: string;
   warnings: readonly string[];
   actions: readonly ResidentCareAction[];
 }
@@ -32,6 +33,7 @@ export function residentCareMarkup(facts: ResidentCareFacts): string {
     ["Medical", facts.medical],
     ["Discipline", facts.discipline],
   ];
+  if (facts.visit) fields.push(["Family visit", facts.visit]);
   const warnings = facts.warnings.length
     ? `<ul class="resident-care-warnings" aria-label="Care and custody warnings">${facts.warnings.map((warning) => `<li>${display(warning)}</li>`).join("")}</ul>`
     : "";

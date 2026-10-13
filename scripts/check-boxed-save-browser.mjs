@@ -3,10 +3,11 @@
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { createServer, preview } from 'vite';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createPrison } from './scenarios/prison.ts';
 import { Obj } from '../src/sim/world.ts';
+import { COMPRESSED_TEXTURE_NAMES } from '../src/render/textureQuality.ts';
 
 const sourceRoot = resolve(process.env.PLAYTEST_ROOT || process.cwd());
 const production = process.env.PLAYTEST_PRODUCTION === '1';
@@ -46,7 +47,7 @@ try {
   const trackPage = current => {
     current.on('pageerror', error => errors.push(error.message));
     current.on('console', message => {
-      if (message.type() === 'warning' && message.text().includes('[assets] compressed load failed')) fallbackWarnings.push(message.text());
+      if (message.type() === 'warning' && message.text().includes('[assets] listed compressed texture failed')) fallbackWarnings.push(message.text());
     });
     current.on('response', response => {
       if (response.url().includes('/textures/')) assetResponses.push({
@@ -117,45 +118,61 @@ try {
       `${label}: WASD moves the camera`);
   }
 
-  // Import reloads the page with a brand new module registry. The save starts
-  // in the default high-quality mode, then verify both quality reload paths.
-  await page.waitForFunction(() => document.querySelector('#qualBtn').title.includes('High (4K)') || document.querySelector('#qualBtn').disabled, null, { timeout: 120000 });
-  assert.equal(await page.locator('#qualBtn').isDisabled(), false, 'SwiftShader Chromium exposes BC texture quality toggling');
-  assert.match(await page.locator('#qualBtn').getAttribute('title'), /High \(4K\)/);
-  await checkRunningAndCamera('default 4K');
+  // Imported save starts the fresh module registry. Quality controls are only
+  // offered when both complete generated KTX sets are available locally.
+  const initialQualityTitle = await page.locator('#qualBtn').getAttribute('title');
+  const qualityCanToggle = !(await page.locator('#qualBtn').isDisabled());
+  const compressedRoot = resolve(root, 'public/textures/compressed');
+  const compressedFiles = new Set(existsSync(compressedRoot) ? readdirSync(compressedRoot) : []);
+  const completePair = COMPRESSED_TEXTURE_NAMES.every(name => ['1k', '4k'].every(quality => compressedFiles.has(`${name}.${quality}.ktx`)));
+  if (!completePair) assert.equal(qualityCanToggle, false, 'this build cannot offer a quality toggle without both complete texture sets');
+  if (compressedFiles.size === 0) assert.equal(await page.locator('#qualBtn').textContent(), '1K', 'raw-only build displays its actual texture resolution');
+  if (qualityCanToggle) {
+    assert.match(initialQualityTitle, /High \(4K/);
+    await checkRunningAndCamera('default 4K');
 
-  await page.locator('#qualBtn').click();
-  assert.equal(await page.evaluate(() => localStorage.getItem('texQuality')), '1k', 'quality button selects the 1K asset path');
-  // Reload explicitly after the control writes localStorage so the following
-  // assertions observe the newly configured renderer, even in headless builds
-  // where reload navigation notifications can precede GPU initialization.
-  await page.close();
-  page = await context.newPage();
-  trackPage(page);
-  await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 120000 });
-  await page.waitForFunction(() => document.querySelector('#hud')?.textContent.includes('fps') || document.querySelector('#err').textContent, null, { timeout: 120000 });
-  assert.equal(await page.locator('#err').textContent(), '', 'low-quality reload retains valid save');
-  await page.waitForFunction(() => document.querySelector('#qualBtn').title.includes('Low (1K)') || document.querySelector('#qualBtn').disabled, null, { timeout: 30000 });
-  assert.match(await page.locator('#qualBtn').getAttribute('title'), /Low \(1K\)/);
-  await checkRunningAndCamera('1K after toggle');
+    await page.locator('#qualBtn').click();
+    assert.equal(await page.evaluate(() => localStorage.getItem('texQuality')), '1k', 'quality button selects the 1K compressed set');
+    await page.close();
+    page = await context.newPage();
+    trackPage(page);
+    await page.goto(production ? origin : `${origin}/?playtest`, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    await page.waitForFunction(() => document.querySelector('#hud')?.textContent.includes('fps') || document.querySelector('#err').textContent, null, { timeout: 120000 });
+    assert.equal(await page.locator('#err').textContent(), '', 'low-quality reload retains valid save');
+    assert.match(await page.locator('#qualBtn').getAttribute('title'), /Low \(1K/);
+    await checkRunningAndCamera('1K after toggle');
 
-  await page.locator('#qualBtn').click();
-  assert.equal(await page.evaluate(() => localStorage.getItem('texQuality')), '4k', 'quality button restores the 4K asset path');
-  await page.close();
-  page = await context.newPage();
-  trackPage(page);
-  await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 120000 });
-  await page.waitForFunction(() => document.querySelector('#hud')?.textContent.includes('fps') || document.querySelector('#err').textContent, null, { timeout: 120000 });
-  assert.equal(await page.locator('#err').textContent(), '', 'high-quality reload retains valid save');
-  await page.waitForFunction(() => document.querySelector('#qualBtn').title.includes('High (4K)') || document.querySelector('#qualBtn').disabled, null, { timeout: 30000 });
-  assert.match(await page.locator('#qualBtn').getAttribute('title'), /High \(4K\)/);
-  await checkRunningAndCamera('4K restored after toggle');
+    await page.locator('#qualBtn').click();
+    assert.equal(await page.evaluate(() => localStorage.getItem('texQuality')), '4k', 'quality button restores the 4K compressed set');
+    await page.close();
+    page = await context.newPage();
+    trackPage(page);
+    await page.goto(production ? origin : `${origin}/?playtest`, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    await page.waitForFunction(() => document.querySelector('#hud')?.textContent.includes('fps') || document.querySelector('#err').textContent, null, { timeout: 120000 });
+    assert.equal(await page.locator('#err').textContent(), '', 'high-quality reload retains valid save');
+    assert.match(await page.locator('#qualBtn').getAttribute('title'), /High \(4K/);
+    await checkRunningAndCamera('4K restored after toggle');
+  } else {
+    assert.match(initialQualityTitle, /Texture quality: 1K \(|Mixed resolution:|Low \(1K\)|High \(4K\)/,
+      'disabled quality control describes the quality this build can provide');
+    await checkRunningAndCamera(initialQualityTitle);
+    if (initialQualityTitle.includes('higher resolutions unavailable in this build')) {
+      await page.evaluate(() => localStorage.setItem('texQuality', '4k'));
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 120000 });
+      await page.waitForFunction(isProduction => (isProduction || window.__prisonPlaytest) && document.querySelector('#hud')?.textContent.includes('fps'), production, { timeout: 120000 });
+      assert.equal(await page.evaluate(() => localStorage.getItem('texQuality')), '4k', 'the saved high-quality preference is retained when raw 1K is the only available path');
+      assert.match(await page.locator('#qualBtn').getAttribute('title'), /Texture quality: 1K \(higher resolutions unavailable in this build\)/);
+      assert.equal(await page.locator('#qualBtn').isDisabled(), true, 'an unavailable high-resolution toggle remains disabled after reload');
+      await checkRunningAndCamera('raw 1K after stored high preference reload');
+    }
+  }
 
   assert.deepEqual(errors, [], 'no uncaught browser runtime errors');
-  console.log('Fresh v6 import with box:62 package/construction, simulation clock, WASD camera, and 4K/1K quality reloads: passed');
+  console.log('Fresh v6 import with box:62 cargo, simulation clock, WASD camera, supported quality mode, and compressed-manifest checks: passed');
   const compressed = assetResponses.filter(row => row.url.includes('/textures/compressed/'));
   const rawNormal = assetResponses.find(row => row.url === '/textures/galv_nrm.png');
   const missingCompressed = compressed.filter(row => row.status >= 400 || row.type.includes('text/html'));
+  assert.deepEqual(missingCompressed, [], 'the build-time manifest never requests absent compressed files');
   console.log(`Texture responses: ${compressed.length} compressed URLs (${missingCompressed.length} absent or SPA-fallback), galv_nrm.png ${rawNormal?.status ?? 'not requested'}`);
   console.log(`Compressed fallback warnings: ${fallbackWarnings.length}`);
 } finally {

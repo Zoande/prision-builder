@@ -19,6 +19,7 @@ export interface ServiceProblemInput {
   work?: Iterable<string>;
   facility?: Iterable<string>;
   management?: Iterable<string>;
+  visitation?: Iterable<string>;
   constructionGroups?: Iterable<BuildOrderGroup>;
   stock?: ProblemStockView;
 }
@@ -117,6 +118,24 @@ function serviceLocation(source: Problem["source"], message: string): {
   if (source === "facility" && /Gatehouse is unmanned/i.test(message)) {
     return { severity: "warning", actions: [catalog("Assign a guard", "staff", "staff:deploy")] };
   }
+  if (source === "visitation") {
+    if (/resident is unavailable|waiting for inmate .* to reach/i.test(message)) {
+      return { severity: "info", actions: [{ kind: "mode", label: "Review resident care", mode: "intelligence" }] };
+    }
+    if (/available guard|staffed public entrance|Gatehouse guard|guard at the public Gatehouse/i.test(message)) {
+      return { severity: "warning", actions: [catalog("Assign guards", "staff", "staff:deploy"), catalog("Review entrance access", "rooms", "rooms:access")] };
+    }
+    if (/reachable|blocked|route/i.test(message)) {
+      return { severity: "warning", actions: [catalog("Review access", "rooms", "rooms:access"), catalog("Review visitation facilities", "rooms", "rooms:staff")] };
+    }
+    if (/Gatehouse/i.test(message)) {
+      return { severity: "warning", actions: [catalog("Place a Gatehouse", "objects", "objects:security")] };
+    }
+    if (/Search Desk|screening desk|Visit Table|Visit Screen|screened booth/i.test(message)) {
+      return { severity: "warning", actions: [catalog("Open visitation objects", "objects", "objects:visitation"), catalog("Build a Visitation Room", "rooms", "rooms:staff")] };
+    }
+    return { severity: "warning", actions: [catalog("Build visitation facilities", "rooms", "rooms:staff")] };
+  }
   if (source === "management") {
     if (/no unclaimed valid Management Office/i.test(message)) {
       return { severity: "warning", actions: [catalog("Build a Management Office", "rooms", "rooms:staff")] };
@@ -188,7 +207,7 @@ export function collectServiceProblems(input: ServiceProblemInput): Problem[] {
   const rows = new Map<string, Problem>();
   const warningSources: Array<[Problem["source"], Iterable<string> | undefined]> = [
     ["security", input.security], ["market", input.market], ["gangs", input.gangs],
-    ["health", input.health], ["work", input.work], ["facility", input.facility], ["management", input.management],
+    ["health", input.health], ["work", input.work], ["facility", input.facility], ["management", input.management], ["visitation", input.visitation],
   ];
   for (const [source, warnings] of warningSources) for (const message of warnings ?? []) {
     const mapped = serviceLocation(source, message);

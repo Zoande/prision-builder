@@ -5,8 +5,14 @@
 
 import { loadTexture } from "../textures";
 import { loadKtxTexture } from "./ktx";
+import {
+  COMPRESSED_TEXTURE_NAMES,
+  resolveTextureQuality as resolveQuality,
+  type Quality,
+  type TextureQualityResolution,
+} from "./textureQuality";
 
-export type Quality = "4k" | "1k";
+export type { Quality, TextureQualityResolution } from "./textureQuality";
 
 let quality: Quality = "4k";
 let bcSupported = false;
@@ -37,11 +43,13 @@ const RAW: Record<string, string> = {
 };
 
 // Names that have a compressed KTX twin (others go straight to raw).
-const COMPRESSED = new Set([
-  "grass_col", "grass_nrm", "dirt_col", "dirt_nrm", "floor2_col", "floor2_nrm",
-  "concrete_col", "concrete_nrm", "wall_col", "wood_col", "black_col",
-  "galv_col", "galv_nrm", "corroded_col", "corroded_nrm", "fabric_col",
-]);
+const COMPRESSED = new Set<string>(COMPRESSED_TEXTURE_NAMES);
+const AVAILABLE_COMPRESSED = new Set(__AVAILABLE_COMPRESSED_TEXTURES__);
+
+/** Resolve the saved preference against the compressed files present at build/dev-server startup. */
+export function resolveTextureQuality(requested: Quality, supportsBc: boolean): TextureQualityResolution {
+  return resolveQuality(requested, supportsBc, AVAILABLE_COMPRESSED);
+}
 
 const RAW_MAX = 2048; // cap raw textures so 4K sources don't blow up VRAM
 
@@ -70,11 +78,11 @@ async function loadTexUncached(device: GPUDevice, name: string, srgb: boolean): 
     device.queue.writeTexture({ texture }, new Uint8Array([245, 245, 240, 255]), { bytesPerRow: 4 }, [1, 1, 1]);
     return texture;
   }
-  if (bcSupported && COMPRESSED.has(name)) {
+  if (bcSupported && COMPRESSED.has(name) && AVAILABLE_COMPRESSED.has(`${name}.${quality}.ktx`)) {
     try {
       return await loadKtxTexture(device, `/textures/compressed/${name}.${quality}.ktx`, srgb);
     } catch (e) {
-      console.warn(`[assets] compressed load failed for ${name}.${quality}, using raw`, e);
+      console.warn(`[assets] listed compressed texture failed for ${name}.${quality}, using raw`, e);
     }
   }
   const file = RAW[name];

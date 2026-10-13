@@ -182,6 +182,50 @@ function outsideArrivalChecks(): void {
   assert.equal(wait.state, "complete", "physical arrival should release the external-assistance dependency");
 }
 
+function ordinaryFamilyVisitationChecks(): void {
+  const { world, task2, task3 } = setup();
+  addRoom(world, 29, RoomType.Visitation, 350, 90, 8, 8);
+  assert(world.placePiece(351, 92, Obj.VisitTable, 0));
+  assert(world.placePiece(354, 92, Obj.VisitorSearchDesk, 0));
+  assert(world.placePiece(370, 100, Obj.Gatehouse, 0), "a road entrance provides the lawful public entry");
+  task2.rebuildWorld(world); task3.rebuildWorld(world);
+  for (const policy of task2.areas.access.values()) {
+    policy.roles.visitor = true; policy.roles.prisoner = true; policy.custody.minimum = true;
+  }
+  const resident = inmate(960, 347.5, 94.5), gateGuard = staff(961, Obj.Guard, 370.9, 101.5);
+  const screeningGuard = staff(962, Obj.Guard, 348.5, 95.5);
+  const agents = [resident, gateGuard, screeningGuard];
+  for (const agent of agents) task2.ensureAgent(agent, 0);
+  resident.needs.family = .1; resident.needs.food = .8; resident.needs.sleep = .8;
+  task2.market.contacts.set(resident.id, [{ id: 9001, prisonerId: resident.id, name: "Jordan", relation: "family", trust: .8, resources: .8 }]);
+  const gate = [...task3.facility.gatehouses.values()][0]!; gate.guardId = gateGuard.id;
+  gateGuard.state = "manningGatehouse";
+  const social = new PrisonerSocialSystem(), operations = new EscapeOperationsSystem();
+  let sawVisitor = false, sawPhysicalScreen = false;
+  for (let tick = 1; tick <= 1200 && task3.visitation.visitsCompleted < 1; tick++) {
+    const time = tick * .5;
+    task3.tick(.5, time, world, agents, social, operations, []);
+    sawVisitor ||= task3.visitation.visitors.length > 0;
+    task3.updateStaff(screeningGuard, .5, time, world, false);
+    task3.updateStaff(gateGuard, .5, time, world, false);
+    sawPhysicalScreen ||= screeningGuard.state === "screeningVisitor";
+    task3.updatePrisoner(resident, .5, time, world, agents);
+    if (tick === 20 && task3.visitation.visitors.length) {
+      const saved = JSON.parse(JSON.stringify(task3.saveData()));
+      task3.loadData(saved, world);
+    }
+  }
+  assert(sawVisitor, "the system materializes a physical external family visitor");
+  assert(sawPhysicalScreen, `an available guard physically screens the visitor at the search desk; guard=${screeningGuard.state}@${screeningGuard.x},${screeningGuard.z} visitor=${JSON.stringify(task3.visitation.visitors)} warnings=${JSON.stringify([...task3.visitation.warnings])}`);
+  assert.equal(task3.visitation.visitsCompleted, 1, "a completed visit leaves through its physical route");
+  assert(resident.needs.family > .5, "only an actual contact at the visitation table restores family need");
+  assert.equal(resident.state, "idle", "the resident returns to ordinary behavior when the visit ends");
+  const saved = JSON.parse(JSON.stringify(task3.saveData()));
+  const economy2 = new EconomySystem(), logistics2 = new LogisticsSystem(economy2), task22 = new Task2Systems(world.size, economy2, logistics2);
+  const restored = new Task3Systems(task22, economy2, logistics2); restored.loadData(saved, world);
+  assert.equal(restored.visitation.visitsCompleted, task3.visitation.visitsCompleted, "completed visitor service survives save/load");
+}
+
 function scaleCheck(): void {
   const started = performance.now(), { world, task2, task3 } = setup(), social = new PrisonerSocialSystem(), operations = new EscapeOperationsSystem();
   const agents: Agent[] = [];
@@ -212,4 +256,5 @@ planGraphChecks();
 scaleCheck();
 deterministicCheck();
 outsideArrivalChecks();
+ordinaryFamilyVisitationChecks();
 console.log("Task 3 Gatehouse/management/credentials/corruption/plans/save/scale checks passed");

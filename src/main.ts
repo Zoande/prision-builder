@@ -38,7 +38,7 @@ import { RoomLinePass } from "./render/roomLinePass";
 import { SkyPass } from "./render/skyPass";
 import { GhostPass } from "./render/ghostPass";
 import { pickGround } from "./render/pick";
-import { configureAssets, type Quality } from "./render/assets";
+import { configureAssets, resolveTextureQuality, type Quality } from "./render/assets";
 import { GLOBALS_SIZE, writeGlobals } from "./render/shaderCommon";
 import { WorldOverlay, type PreviewTile } from "./ui/worldOverlay";
 import { EconomySystem } from "./sim/economy";
@@ -108,14 +108,26 @@ async function main() {
   const format = navigator.gpu.getPreferredCanvasFormat();
   ctx.configure({ device, format, alphaMode: "opaque" });
 
-  // Texture quality (High 4K / Low 1K), persisted.
-  const quality: Quality = localStorage.getItem("texQuality") === "1k" ? "1k" : "4k";
+  // Resolve the saved preference against compressed files present in this build.
+  const requestedQuality: Quality = localStorage.getItem("texQuality") === "1k" ? "1k" : "4k";
+  const qualitySupport = resolveTextureQuality(requestedQuality, bcSupported);
+  const quality = qualitySupport.quality;
   configureAssets({ quality, bcSupported });
   const qualBtn = document.getElementById("qualBtn") as HTMLButtonElement;
-  if (!bcSupported) { qualBtn.textContent = "RAW"; qualBtn.title = "Raw textures (BC compression unavailable)"; qualBtn.disabled = true; }
-  else {
+  if (qualitySupport.mode === "compressed") {
     qualBtn.textContent = quality === "4k" ? "HQ" : "LQ";
     qualBtn.title = quality === "4k" ? "Texture quality: High (4K)" : "Texture quality: Low (1K)";
+  } else if (qualitySupport.mode === "mixed") {
+    qualBtn.textContent = "MIX";
+    qualBtn.title = "Mixed resolution: some textures use 1K fallback";
+  } else {
+    qualBtn.textContent = "1K";
+    qualBtn.title = qualitySupport.bcSupported
+      ? "Texture quality: 1K (higher resolutions unavailable in this build)"
+      : "Texture quality: 1K (higher resolutions unsupported by this device)";
+  }
+  if (!qualitySupport.canToggle) qualBtn.disabled = true;
+  else {
     qualBtn.addEventListener("click", () => {
       localStorage.setItem("texQuality", quality === "4k" ? "1k" : "4k");
       location.reload();
@@ -1063,7 +1075,16 @@ async function main() {
       : `Queued response${order.search !== "none" ? ` · ${order.search} search` : ""}${order.interrogate ? " · Interview" : ""}`).join("; ") : "No active discipline";
     const state = actor.state.startsWith("escape:") ? actor.path ? "Moving" : "Occupied"
       : STATE_TEXT[actor.state] ?? actor.state.replace(/([A-Z])/g, " $1");
-    return { state, housing, escort: escortText, medical, discipline, warnings, actions };
+    const visitStatus = task3.visitationStatus();
+    const visitLabels: Record<string, string> = {
+      waitingGate: "Guest waiting at entrance", toScreening: "Guest arriving for screening",
+      waitingScreen: "Guest waiting for screening", toTable: "Guest on the way to visitation",
+      waitingPrisoner: "Guest waiting at table", contact: "Visiting family", leaving: "Guest leaving",
+    };
+    const visit = visitStatus.prisonerId === actor.id ? visitLabels[visitStatus.state] ?? "Visit scheduled" : "No current appointment";
+    if (!terminal && (visitStatus.prisonerId === actor.id || actor.needs.family < .25))
+      actions.push({ label: "Visitation facilities", mode: "rooms", section: "rooms:staff" });
+    return { state, housing, escort: escortText, medical, discipline, visit, warnings, actions };
   }
   document.addEventListener("click", event => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-care-action]");
@@ -1092,7 +1113,7 @@ async function main() {
       const actions: Partial<Record<typeof NEEDS[number], WelfareNeedAction>> = {
         food: { mode: "objects", section: "objects:dining", label: "Dining" }, sleep: basic, hygiene: basic, bladder: basic,
         outdoors: basic, privacy: basic, comfort: living, recreation: living, exercise: living, spirituality: living, social: living,
-        family: { mode: "rooms", section: "rooms:work", label: "Mail Room" },
+        family: { mode: "rooms", section: "rooms:staff", label: "Visitation" },
         safety: { mode: "staff", section: "staff:deploy", label: "Guard posts" },
       };
       welfareOverview.update({ population: residents.length, needs: NEEDS.map(need => ({ id: need, label: needLabels[need],
@@ -1163,6 +1184,12 @@ async function main() {
     dragPlaced = new Set();
     if (editor.tool?.cat === "room") {
       editor.roomDrag = world.startRoomPaint(tile.x, tile.z, editor.tool.mat);
+      if (editor.roomDrag === 0) {
+        painting = false;
+        dragStart = null;
+        notify("Finish the enclosing walls or fences and add an entrance, then start painting on an interior tile.");
+        return;
+      }
     }
     if (editor.tool?.cat === "patrol") {
       editor.routeDrag = world.startRoute(editor.tool.mat);
@@ -1256,7 +1283,11 @@ async function main() {
     toEat: "Going to eat leftovers", eating: "Eating", toSleep: "Heading to bed",
     sleeping: "Sleeping", toSit: "Going to sit down", sitting: "Sitting",
     toOutside: "Heading outside", outside: "Getting fresh air",
-    cuffed: "Handcuffed — waiting for a cell", escorted: "Being escorted",
+    cuffed: "Handcuffed", escorted: "Being escorted",
+    restrained: "Restrained after an incident", custodyEscort: "Returning a resident to their cell",
+    solitary: "In solitary confinement", eatingHeldMeal: "Eating a carried meal",
+    beingTransported: "Being taken to medical care", inTreatment: "Receiving treatment",
+    incapacitated: "Needs medical care", staffBreak: "On a staff break",
     climbing: "CLIMBING THE FENCE", cutting: "CUTTING THE FENCE",
     sneakWait: "Waiting for a clear moment", toBreach: "Sneaking toward the fence",
     fleeing: "MAKING A RUN FOR IT", retreating: "Sneaking back home",
@@ -1280,6 +1311,11 @@ async function main() {
     toBuild: "Walking to a construction site", constructing: "Building", demolishing: "Demolishing",
     toBookCargo: "Collecting library stock", deliverBookCargo: "Stocking the library",
     toExportCargo: "Collecting export goods", deliverExportCargo: "Delivering goods to Exports",
+    toWork: "Heading to assigned work", working: "Working",
+    workMissingTool: "Waiting for work tools", workMissingInputs: "Waiting for work supplies",
+    workWaiting: "Waiting to work", workUnreachable: "Workplace route blocked",
+    toWorkInput: "Collecting work supplies", carryingWorkInput: "Delivering work supplies",
+    toWorkExport: "Collecting contract goods", carryingWorkExport: "Delivering contract goods to Exports",
   };
   function debugTipText(ag: Agent): string {
     const kind = ag.kind === 8 ? "Prisoner" : ag.kind === 9 ? "Guard" :
@@ -1581,7 +1617,7 @@ async function main() {
     for (const problem of collectServiceProblems({
       security: task2.security.warnings, market: task2.market.warnings, gangs: task2.gangs.warnings,
       health: task2.health.warnings, work: task2.work.warnings,
-      facility: task3.facility.warnings, management: task3.management.warnings,
+      facility: task3.facility.warnings, management: task3.management.warnings, visitation: task3.visitation.warnings,
       constructionGroups: construction.groups.values(),
       stock: { available: commodity => logistics.quantity(commodity), incoming: commodity => logistics.incoming(commodity) },
     })) problems.add(problem);
@@ -2038,7 +2074,7 @@ async function main() {
     const peopleKey = `${worldTime}:${saveRevision}:${renderRevision}`;
     if (peopleKey !== peopleStateKey) {
       peopleStateKey = peopleKey;
-      people.update(device, personStager.stage(agents.agents));
+      people.update(device, personStager.stage(agents.agents, task3.visitation.visitors));
     }
     if (agents.takeWorldDirty()) { dirty = true; markSaveDirty(); } // fences cut / repaired
     else if (agents.takeMealsDirty()) { refreshFurniture(); markSaveDirty(); }
@@ -2204,6 +2240,7 @@ async function main() {
   if (import.meta.env.DEV && new URLSearchParams(location.search).has("playtest")) {
     const bridge = {
       snapshot: saveSnapshot,
+      visitation: () => task3.visitation.status(),
       inspect: () => ({ time: worldTime, speed, cash: economy.cash, floor: Array.from(world.floorMat),
         agents: agents.agents.map((agent) => ({ id: agent.id, kind: agent.kind, state: agent.state, x: agent.x, z: agent.z })),
         orders: [...construction.groups.values()].map((group) => ({ id: group.id, state: group.state, blocker: group.blocker })),

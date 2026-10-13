@@ -107,10 +107,14 @@ export class LogisticsSystem {
   }
 
   request(recipe: Recipe, createdAt: number, mandatory: boolean, source: string): void {
+    const prior = new Map([...this.demands].filter(([, demand]) => demand.source === source));
     for (const key of [...this.demands.keys()]) if (this.demands.get(key)?.source === source) this.demands.delete(key);
     for (const [commodity, quantity] of Object.entries(recipe)) if (quantity > 0) {
       const key = `${source}::${commodity}`;
-      this.demands.set(key, { source, commodity, quantity, createdAt, mandatory });
+      // Periodic producers refresh their target every simulation tick. Keep a
+      // continuous demand's original age so this refresh cannot indefinitely
+      // reset truck consolidation; a returned demand starts a new window.
+      this.demands.set(key, { source, commodity, quantity, createdAt: prior.get(key)?.createdAt ?? createdAt, mandatory });
     }
     this.rebuildRequests();
   }
